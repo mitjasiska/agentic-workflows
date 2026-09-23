@@ -1,0 +1,9 @@
+[projects.knowledge-base]
+linear_project = "KnowledgeBase"
+repo_name = "knowledge-base"
+base_branch = "main"
+
+[projects.agentic-workflows]
+linear_project = "Agentic Workflows"
+repo_name = "agentic-workflows"
+base_branch = "main"

@@ -1,0 +1,7 @@
+# Copy to ~/.agentic-workflows/config.toml and edit locally.
+# Windows example: projects_root = "C:/development/projects"
+projects_root = "~/projects"
+
+[linear]
+# Set your personal API key here, in the local copy only.
+api_key = ""
