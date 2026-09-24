@@ -13,20 +13,21 @@ from urllib.error import HTTPError, URLError
 
 from task_start import TaskError
 from task_start import cli
-from task_start.config import LocalConfig, Project, load_local, load_projects, repository_path, resolve_project
+from task_start.config import AgentConfig, LocalConfig, Project, load_local, load_projects, repository_path, resolve_project
 from task_start.linear import Issue, Linear
-from task_start.workspace import Git, Herdr, branch_name, run
+from task_start.workspace import Git, Herdr, Workspace, branch_name, run
 
 
 PROJECT = Project("KnowledgeBase", "knowledge-base", "main")
 ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started")
 # Deliberately not an API key; no real credentials are used by these tests.
-LOCAL = LocalConfig(Path("/projects"), "test-placeholder")
+LOCAL = LocalConfig(Path("/projects"), "test-placeholder", AgentConfig("codex", "gpt-6-astra", "high"))
 
 
 def issue_data():
     return {"issue": {
         "id": "issue-id", "identifier": "DEV-7", "title": "Add ingestion CLI",
+        "description": "",
         "project": {"id": "project-id", "name": "KnowledgeBase"},
         "state": {"id": "todo", "name": "Todo"},
         "team": {"id": "team-id", "states": {
@@ -244,7 +245,7 @@ class GitTests(unittest.TestCase):
                 patch("task_start.cli.Herdr") as herdr:
             linear.return_value.get_issue.return_value = ISSUE
             with self.assertRaisesRegex(TaskError, "did not reach"):
-                cli.start("DEV-7")
+                cli.start("DEV-7", no_agent=True)
             herdr.assert_not_called()
             linear.return_value.start.assert_not_called()
 
@@ -284,6 +285,7 @@ class HerdrTests(unittest.TestCase):
         self.git.branches.return_value = []
         self.git.remote_branches.return_value = []
         self.git.worktrees.return_value = []
+        self.git.resolve_scope.return_value = None
         self.branch = "dev-7-add-ingestion-cli"
         self.tree = {"branch": self.branch, "path": str(self.tree_path), "label": "DEV-7",
                      "is_linked_worktree": True, "is_bare": False, "is_detached": False,
@@ -291,7 +293,11 @@ class HerdrTests(unittest.TestCase):
         self.listing = {"type": "worktree_list", "source": {"repo_root": str(self.repo)}, "worktrees": []}
 
     def result(self, operation):
-        return {"type": "worktree_" + operation, "worktree": copy.deepcopy(self.tree), "workspace": {"focused": True}}
+        return {"type": "worktree_" + operation, "worktree": copy.deepcopy(self.tree),
+                "workspace": {"focused": True, "workspace_id": "w1", "worktree": {
+                    "repo_root": str(self.repo), "checkout_path": str(self.tree_path)}},
+                "tab": {"workspace_id": "w1", "tab_id": "w1:t5"},
+                "root_pane": {"workspace_id": "w1", "tab_id": "w1:t5", "pane_id": "w1:p9"}}
 
     def prepare(self):
         return self.herdr.prepare(self.git, "main", self.branch, "DEV-7")
@@ -302,8 +308,9 @@ class HerdrTests(unittest.TestCase):
         self.git.worktrees.return_value = [{"worktree": str(self.tree_path), "branch": "refs/heads/" + self.tree["branch"]}]
 
     def test_create_command(self):
+        self.git.worktrees.side_effect = [[], [{"worktree": str(self.tree_path), "branch": "refs/heads/" + self.branch}]]
         with patch("task_start.workspace.run", side_effect=[json.dumps({"result": self.listing}), json.dumps({"result": self.result("created")})]) as runner:
-            self.assertEqual(self.prepare(), (self.branch, "workspace created and focused"))
+            self.assertEqual(self.prepare(), Workspace(self.branch, self.tree_path, "w1", "w1:t5", "w1:p9", "workspace created and focused"))
         self.assertEqual(runner.call_args_list[0].args[0], ["herdr", "worktree", "list", "--cwd", str(self.repo)])
         self.assertEqual(runner.call_args_list[1].args[0], ["herdr", "worktree", "create", "--cwd", str(self.repo), "--base", "main", "--branch", self.branch, "--label", "DEV-7", "--focus"])
 
@@ -311,11 +318,11 @@ class HerdrTests(unittest.TestCase):
         self.tree["branch"] = "dev-7-previous-title"
         self.existing()
         with patch("task_start.workspace.run", side_effect=[json.dumps({"result": self.listing}), json.dumps({"result": self.result("opened")})]) as runner:
-            self.assertEqual(self.prepare()[0], "dev-7-previous-title")
+            self.assertEqual(self.prepare().branch, "dev-7-previous-title")
         self.assertEqual(runner.call_args.args[0], ["herdr", "worktree", "open", "--cwd", str(self.repo), "--path", str(self.tree_path), "--label", "DEV-7", "--focus"])
 
     def test_branch_only_and_remote_only_refused(self):
-        for local, remote in [([self.branch], []), ([], ["refs/remotes/origin/" + self.branch])]:
+        for local, remote in [([self.branch], []), ([], [self.branch])]:
             self.git.branches.return_value = local
             self.git.remote_branches.return_value = remote
             with patch.object(self.herdr, "command", return_value=self.listing) as command, self.assertRaises(TaskError):
@@ -359,7 +366,10 @@ class OrchestrationTests(unittest.TestCase):
         self.linear.get_issue.return_value = ISSUE
         self.git = self.enterContext(patch("task_start.cli.Git")).return_value
         self.herdr = self.enterContext(patch("task_start.cli.Herdr")).return_value
-        self.herdr.prepare.return_value = ("dev-7-add-ingestion-cli", "workspace created and focused")
+        self.workspace = Workspace("dev-7-add-ingestion-cli", Path("/selected/worktree"), "w7", "w7:t5", "w7:p8", "workspace created and focused")
+        self.herdr.prepare.return_value = self.workspace
+        self.agent = self.enterContext(patch("task_start.cli.Codex")).return_value
+        self.agent.launch.return_value = "Codex working in w7:p8"
 
     def test_order_and_concise_output(self):
         operations = Mock()
@@ -368,7 +378,7 @@ class OrchestrationTests(unittest.TestCase):
         operations.attach_mock(self.linear.start, "status")
         output = cli.start("DEV-7")
         self.assertEqual([call[0] for call in operations.mock_calls], ["base", "workspace", "status"])
-        self.assertEqual(len(output.splitlines()), 5)
+        self.assertEqual(len(output.splitlines()), 7)
         self.assertIn("Linear: In Progress", output)
         self.assertNotIn("test-placeholder", output)
 

@@ -8,7 +8,7 @@ from . import TaskError
 ISSUE_QUERY = """
 query TaskIssue($id: String!) {
   issue(id: $id) {
-    id identifier title
+    id identifier title description
     project { id name }
     state { id name }
     team { id states(first: 250) {
@@ -36,6 +36,7 @@ class Issue:
     state_id: str
     state_name: str
     in_progress_id: str
+    description: str = ""
 
 
 def text_field(value: dict, key: str) -> str:
@@ -96,8 +97,13 @@ class Linear:
                 progress = [state_id]
             if len(progress) != 1:
                 raise TaskError("Issue team must have exactly one status named In Progress")
+            description = issue["description"]
+            if description is None:
+                description = ""
+            if not isinstance(description, str):
+                raise ValueError("invalid description")
             return Issue(text_field(issue, "id"), identifier, text_field(issue, "title"),
-                         text_field(issue["project"], "name"), state_id, state_name, progress[0])
+                         text_field(issue["project"], "name"), state_id, state_name, progress[0], description)
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TaskError("Unexpected Linear issue response") from None
 

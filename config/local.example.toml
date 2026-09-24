@@ -5,3 +5,9 @@ projects_root = "~/projects"
 [linear]
 # Set your personal API key here, in the local copy only.
 api_key = ""
+
+[agent]
+kind = "codex"
+# Use a model ID accepted by your installed Codex CLI/account.
+model = "gpt-6-astra"
+reasoning = "high"
