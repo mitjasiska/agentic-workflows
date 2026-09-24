@@ -7,8 +7,3 @@ base_branch = "main"
 linear_project = "Agentic Workflows"
 repo_name = "agentic-workflows"
 base_branch = "main"
-
-[projects.siska-dev-web]
-linear_project = "siska.dev Website"
-repo_name = "siska-dev-web"
-base_branch = "main"
