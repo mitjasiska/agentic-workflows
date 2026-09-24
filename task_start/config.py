@@ -16,9 +16,17 @@ class Project:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    kind: str
+    model: str
+    reasoning: str
+
+
+@dataclass(frozen=True)
 class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
+    agent: AgentConfig | None = None
 
 
 def read_toml(path: Path) -> dict:
@@ -39,7 +47,7 @@ def required_text(data: dict, key: str) -> str:
     return value.strip()
 
 
-def load_local(path: Path | None = None) -> LocalConfig:
+def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConfig:
     data = read_toml(path or Path.home() / ".agentic-workflows" / "config.toml")
     api_key = required_text(data.get("linear"), "api_key")
     if any(char.isspace() for char in api_key):
@@ -48,9 +56,26 @@ def load_local(path: Path | None = None) -> LocalConfig:
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
             raise TaskError("projects_root must be absolute (or start with ~)")
-        return LocalConfig(root.resolve(), api_key)
+        agent = None if no_agent else agent_config(data.get("agent"))
+        return LocalConfig(root.resolve(), api_key, agent)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
+
+
+def agent_config(data: dict | None) -> AgentConfig | None:
+    # Older configurations remain useful for --no-agent.
+    if data is None:
+        return None
+    kind = required_text(data, "kind")
+    if kind != "codex":
+        raise TaskError("agent.kind must be codex")
+    model = required_text(data, "model")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model):
+        raise TaskError("agent.model must be a Codex model name without whitespace or control characters")
+    reasoning = required_text(data, "reasoning")
+    if reasoning not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        raise TaskError("agent.reasoning must be none, minimal, low, medium, high, xhigh, max, or ultra")
+    return AgentConfig(kind, model, reasoning)
 
 
 def load_projects(path: Path = REGISTRY) -> list[Project]:
