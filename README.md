@@ -4,6 +4,42 @@ Reusable tooling, skills, and automation for efficient agentic software developm
 
 The goal is to reduce repetitive development mechanics and make working with coding agents across multiple projects fast, consistent, and predictable.
 
+## Linear task creation skill
+
+[`skills/create-linear-task`](skills/create-linear-task/SKILL.md) turns a rough development idea into a concise Linear issue that can be handed directly to an implementation agent. It keeps the human specification visible, puts execution-only guidance and workflow metadata in a collapsed `Agent instructions` block, and supports implementation, research, and experiment tasks.
+
+Use the skill from this repository or install the entire directory into Codex's skill location. The directory includes a generated [`config.toml`](skills/create-linear-task/config.toml), which the renderer finds relative to the installed skill—not the source checkout. Repository [`config/projects.toml`](config/projects.toml) is the single human-edited source for project mappings; do not edit project mappings in the packaged or installed snapshot.
+
+From the repository root, an initial installation or full refresh is:
+
+```sh
+skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
+mkdir -p "$skill_dest"
+cp -R skills/create-linear-task/. "$skill_dest/"
+```
+
+After changing canonical project mappings, regenerate and check the packaged snapshot, then refresh that same installed directory:
+
+```sh
+python3.12 skills/create-linear-task/scripts/sync_config.py
+python3.12 skills/create-linear-task/scripts/sync_config.py --check
+skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
+mkdir -p "$skill_dest"
+cp -R skills/create-linear-task/. "$skill_dest/"
+cmp skills/create-linear-task/config.toml "$skill_dest/config.toml"
+```
+
+`cmp` exits successfully only when the installed configuration matches the generated package. The drift check is also covered by the repository test suite. Pass `--config /path/to/generated-config.toml` only to use an intentionally prepared alternative package configuration. Missing exact targets or `linear_team` values fail rather than being guessed.
+Start a new Codex session after installation or refresh so skill discovery uses the updated copy.
+
+The deterministic renderer uses that bundled configuration to select an exact Linear project/team and apply a closed workflow taxonomy. A task has at most one primary category (`feature`, `bug`, `chore`, `docs`, or `refactor`) plus an independent Research modifier. Task kind remains separate.
+
+The taxonomy maps those categories to the exact canonical labels `Feature`, `Bug`, `Chore`, `Docs`, and `Refactor`, and to the matching Conventional Commit types. The modifier maps to the exact `Research` label. Before mutation, the skill resolves all six names exactly once against the complete catalog applicable to the selected team—even labels unused by the current task. A missing or ambiguous canonical label stops instead of being guessed or created.
+
+The packaged configuration contains the known `agentic-workflows` team selector. New issues use the configured team/project. Refinements carry their current team/project IDs explicitly, require their names to match the configured target, and never include a target change in the issue mutation; a mismatch stops rather than moving the issue. Post-mutation verification retains those original IDs and compares them with a separate reread target, so unchanged names cannot hide a move. No relationship is inferred between an issue prefix such as `DEV-` and team selection. Existing unrelated labels—including archived labels such as `Improvement` that may be absent from the active catalog—are preserved as opaque IDs. For refinements, the skill re-reads current labels immediately before mutation and applies only canonical workflow-label additions/removals; it never replaces all labels from the earlier drafting snapshot. It then re-reads and verifies the target and workflow labels, reporting concurrent changes without automatically repairing them. Workflow-label replacement is disabled unless a project explicitly enables `replace_workflow_labels`, and the skill never creates, renames, or deletes label objects.
+
+Descriptions use Linear's API Markdown form `+++ Section title … +++` for collapsed sections. The similar `>>>` syntax is an interactive-editor shortcut and is intentionally not emitted by this API-oriented skill.
+
 ## Setup and use
 
 Requires Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
