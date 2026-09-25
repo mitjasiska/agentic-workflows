@@ -8,6 +8,8 @@ The goal is to reduce repetitive development mechanics and make working with cod
 
 [`skills/create-linear-task`](skills/create-linear-task/SKILL.md) turns a rough development idea into a concise Linear issue that can be handed directly to an implementation agent. It keeps the human specification visible, puts execution-only guidance and workflow metadata in a collapsed `Agent instructions` block, and supports implementation, research, and experiment tasks.
 
+This directory is the canonical standalone agent skill. Its standalone installation is currently validated with Codex. It is designed to remain portable to compatible skill-aware agent harnesses, but Pi, OpenCode, and other harnesses have not been verified and are not claimed as supported yet.
+
 Use the skill from this repository or install the entire directory into Codex's skill location. The directory includes a generated [`config.toml`](skills/create-linear-task/config.toml), which the renderer finds relative to the installed skill—not the source checkout. Repository [`config/projects.toml`](config/projects.toml) is the single human-edited source for project mappings; do not edit project mappings in the packaged or installed snapshot.
 
 From the repository root, an initial installation or full refresh is:
@@ -31,6 +33,21 @@ cmp skills/create-linear-task/config.toml "$skill_dest/config.toml"
 
 `cmp` exits successfully only when the installed configuration matches the generated package. The drift check is also covered by the repository test suite. Pass `--config /path/to/generated-config.toml` only to use an intentionally prepared alternative package configuration. Missing exact targets or `linear_team` values fail rather than being guessed.
 Start a new Codex session after installation or refresh so skill discovery uses the updated copy.
+
+### ChatGPT plugin distribution
+
+[`plugins/create-linear-task`](plugins/create-linear-task/README.md) is a separate, thin distribution package for ChatGPT web/mobile. It does not own or redefine the workflow. Its bundled `skills/create-linear-task` directory and compatibility manifest are generated from the canonical standalone skill by `sync_plugin.py`; a check mode and repository tests detect drift. The package is skills-only because the current OpenAI plugin format supports skills without an MCP server.
+
+Refresh and verify the plugin snapshot, then build its deterministic submission archive with:
+
+```sh
+python3.12 plugins/create-linear-task/scripts/sync_plugin.py
+python3.12 plugins/create-linear-task/scripts/sync_plugin.py --check
+python3.12 plugins/create-linear-task/scripts/package_plugin.py \
+  --output /tmp/create-linear-task-plugin.zip
+```
+
+See the plugin README for local validation and the manual fresh-session acceptance procedure. The standalone Codex installation above remains independent of the plugin package.
 
 The deterministic renderer uses that bundled configuration to select an exact Linear project/team and apply a closed workflow taxonomy. A task has at most one primary category (`feature`, `bug`, `chore`, `docs`, or `refactor`) plus an independent Research modifier. Task kind remains separate.
 
