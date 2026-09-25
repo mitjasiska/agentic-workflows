@@ -5,5 +5,7 @@ base_branch = "main"
 
 [projects.agentic-workflows]
 linear_project = "Agentic Workflows"
+linear_team = "DEV"
 repo_name = "agentic-workflows"
 base_branch = "main"
+replace_workflow_labels = false
