@@ -43,10 +43,13 @@ python3.12 plugins/create-linear-task/scripts/package_plugin.py \
 
 ## Distribution paths
 
-- For workspace/private distribution, put this package in a GitHub repository with a supported
-  marketplace manifest. A workspace admin imports it through **Admin → Plugins → Add → Import
-  marketplace**, supplies the GitHub repository and marketplace path, reviews the import, and sets
-  role installation policy. Follow the official
+- For workspace/private distribution, this repository includes
+  [`.agents/plugins/marketplace.json`](../../.agents/plugins/marketplace.json). It exposes
+  `plugins/create-linear-task` as the local source `./plugins/create-linear-task`. A workspace admin
+  imports the GitHub repository through **Admin → Plugins → Add → Import marketplace**, leaves
+  **Path** empty because the marketplace is at the repository root, selects the branch, tag, or
+  commit containing the package, reviews the import, and configures installation policy for the
+  intended roles. Follow the official
   [workspace plugin management guide](https://learn.chatgpt.com/docs/enterprise/plugin-management).
 - For public distribution, create a **Skills only** draft in the OpenAI plugin submission portal,
   upload the generated ZIP, complete the public review requirements, and publish only after

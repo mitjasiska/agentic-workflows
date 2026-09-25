@@ -1,7 +1,7 @@
 import importlib.util
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -13,6 +13,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "create-linear-task"
+MARKETPLACE = ROOT / ".agents" / "plugins" / "marketplace.json"
 SYNC_SCRIPT = PLUGIN / "scripts" / "sync_plugin.py"
 PACKAGE_SCRIPT = PLUGIN / "scripts" / "package_plugin.py"
 SYNC_SPEC = importlib.util.spec_from_file_location("plugin_synchronizer", SYNC_SCRIPT)
@@ -27,6 +28,45 @@ PACKAGE_SPEC.loader.exec_module(packager)
 
 
 class CreateLinearTaskPluginTests(unittest.TestCase):
+    def test_repository_marketplace_references_the_plugin_package(self):
+        marketplace = json.loads(MARKETPLACE.read_text())
+
+        self.assertEqual(marketplace["name"], "agentic-workflows")
+        self.assertEqual(
+            marketplace["interface"], {"displayName": "Agentic Workflows"}
+        )
+        self.assertEqual(len(marketplace["plugins"]), 1)
+        entry = marketplace["plugins"][0]
+        self.assertEqual(entry["name"], "create-linear-task")
+        self.assertEqual(
+            entry["source"],
+            {
+                "source": "local",
+                "path": "./plugins/create-linear-task",
+            },
+        )
+        self.assertEqual(
+            entry["policy"],
+            {
+                "installation": "AVAILABLE",
+                "authentication": "ON_INSTALL",
+            },
+        )
+        self.assertEqual(entry["category"], "Productivity")
+
+        source_path = PurePosixPath(entry["source"]["path"])
+        self.assertFalse(source_path.is_absolute())
+        self.assertNotIn("..", source_path.parts)
+        plugin_root = ROOT.joinpath(*source_path.parts)
+        self.assertEqual(plugin_root, PLUGIN)
+        self.assertTrue((plugin_root / "plugin.json").is_file())
+        self.assertTrue((plugin_root / ".codex-plugin" / "plugin.json").is_file())
+        self.assertTrue(
+            (plugin_root / "skills" / "create-linear-task" / "SKILL.md").is_file()
+        )
+        plugin_manifest = json.loads((plugin_root / "plugin.json").read_text())
+        self.assertEqual(plugin_manifest["name"], entry["name"])
+
     def test_portable_manifest_describes_a_skills_only_plugin(self):
         manifest = json.loads((PLUGIN / "plugin.json").read_text())
 
