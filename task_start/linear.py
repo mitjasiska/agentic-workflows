@@ -10,7 +10,7 @@ query TaskIssue($id: String!) {
   issue(id: $id) {
     id identifier title description
     project { id name }
-    state { id name }
+    state { id name type }
     team { id states(first: 250) {
       nodes { id name }
       pageInfo { hasNextPage }
@@ -37,6 +37,7 @@ class Issue:
     state_name: str
     in_progress_id: str
     description: str = ""
+    state_type: str = ""
 
 
 def text_field(value: dict, key: str) -> str:
@@ -103,7 +104,8 @@ class Linear:
             if not isinstance(description, str):
                 raise ValueError("invalid description")
             return Issue(text_field(issue, "id"), identifier, text_field(issue, "title"),
-                         text_field(issue["project"], "name"), state_id, state_name, progress[0], description)
+                         text_field(issue["project"], "name"), state_id, state_name, progress[0], description,
+                         text_field(issue["state"], "type"))
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TaskError("Unexpected Linear issue response") from None
 
