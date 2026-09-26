@@ -8,8 +8,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from task_start import TaskError, cli
-from task_start.agent import Codex, INSTRUCTIONS, task_prompt
+from task_start.agent import (AgentExecution, AgentOptions, AgentOverrides, Codex,
+                              LaunchResult, Pi, adapter_for, resolve_agent_options)
 from task_start.config import AgentConfig, agent_config, load_local
+from task_start.handoff import IMPLEMENTATION_INSTRUCTIONS, implementation_handoff
 from task_start.linear import Linear
 from task_start.workspace import Workspace, slice_slug
 import test_task_start as baseline
@@ -17,20 +19,52 @@ from test_task_start import ISSUE, LOCAL, issue_data
 
 
 class ConfigurationAndInputTests(unittest.TestCase):
-    def test_arbitrary_models_and_reasoning(self):
+    def test_arbitrary_models_and_legacy_reasoning(self):
         for model in ["gpt-6-astra", "gpt-6-sol", "custom/model:v2"]:
             for reasoning in ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]:
                 self.assertEqual(agent_config(dict(kind="codex", model=model, reasoning=reasoning)),
                                  AgentConfig("codex", model, reasoning))
 
     def test_invalid_agent_config(self):
-        for data in [[], "codex", {}, dict(kind="other", model="a", reasoning="high"),
-                     dict(kind="codex", model="a"), dict(kind="codex", model="a", reasoning="extreme"),
-                     dict(kind="codex", model=3, reasoning="high"),
+        for data in [[], "codex", {}, dict(kind="Codex", model="a", mode="high"),
+                     dict(kind="codex", model=3, mode="high"),
                      dict(kind="codex", model="-config", reasoning="high"),
-                     dict(kind="codex", model="a\nb", reasoning="high")]:
+                     dict(kind="codex", model="a\nb", reasoning="high"),
+                     dict(kind="codex", mode="high", reasoning="high")]:
             with self.subTest(data=data), self.assertRaises(TaskError):
                 agent_config(data)
+
+    def test_mode_field_and_optional_agent_defaults(self):
+        self.assertEqual(agent_config(dict(kind="pi", model="anthropic/sonnet", mode="high")),
+                         AgentConfig("pi", "anthropic/sonnet", "high"))
+        self.assertEqual(agent_config(dict(kind="pi")), AgentConfig("pi"))
+
+    def test_independent_cli_over_config_precedence(self):
+        configured = AgentConfig("codex", "configured-model", "medium")
+        cases = [
+            (AgentOverrides(), AgentOptions("codex", "configured-model", "medium")),
+            (AgentOverrides(kind="pi"), AgentOptions("pi", "configured-model", "medium")),
+            (AgentOverrides(model="run-model"), AgentOptions("codex", "run-model", "medium")),
+            (AgentOverrides(mode="high"), AgentOptions("codex", "configured-model", "high")),
+            (AgentOverrides("pi", "run-model", "low"), AgentOptions("pi", "run-model", "low")),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                self.assertEqual(resolve_agent_options(configured, overrides), expected)
+        self.assertEqual(
+            resolve_agent_options(AgentConfig("pi", "pi-model", "low"),
+                                  AgentOverrides(kind="codex")),
+            AgentOptions("codex", "pi-model", "low"),
+        )
+        self.assertEqual(configured, AgentConfig("codex", "configured-model", "medium"))
+        with self.assertRaisesRegex(TaskError, r"\[agent\].*--agent"):
+            resolve_agent_options(None, AgentOverrides(model="model-only"))
+
+    def test_adapter_selection_and_unknown_agent(self):
+        self.assertIsInstance(adapter_for(AgentOptions("codex")), Codex)
+        self.assertIsInstance(adapter_for(AgentOptions("pi")), Pi)
+        with self.assertRaisesRegex(TaskError, "Unsupported agent.*codex, pi"):
+            adapter_for(AgentOptions("unknown"))
 
     def test_load_agent_and_skip_invalid_config_for_no_agent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -47,6 +81,10 @@ class ConfigurationAndInputTests(unittest.TestCase):
         args = cli.parser().parse_args(["start", "DEV-13", "--slice", "Codex Handoff", "--no-agent"])
         self.assertEqual(args.slice, "codex-handoff")
         self.assertTrue(args.no_agent)
+        args = cli.parser().parse_args(["start", "DEV-13", "--agent", "pi",
+                                        "--model", "anthropic/sonnet", "--mode", "high"])
+        self.assertEqual((args.agent_kind, args.model, args.mode),
+                         ("pi", "anthropic/sonnet", "high"))
         for value in ["", " ", "---", "../escape", "foo/bar", "a.lock", "a\nb", "a;ls", "a" * 101, "字"]:
             with self.subTest(value=value), patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args(["start", "DEV-13", "--slice", value])
@@ -71,17 +109,28 @@ class PromptTests(unittest.TestCase):
     def test_fresh_snapshot_and_instructions(self):
         workspace = Workspace("dev-7-original-title", Path("/exact/checkout"), "w2", "tab", "pane", "reopened")
         issue = replace(ISSUE, title="Renamed issue", description="\nExact  whitespace\r\n**Unicode α**\n")
-        prompt = task_prompt(issue, workspace)
+        prompt = implementation_handoff(issue, workspace)
         self.assertIn(f"Implement Linear issue {issue.identifier}.", prompt)
         self.assertIn(f"Title:\n{issue.title}\n", prompt)
         self.assertIn(f"Task:\n{issue.description}\n\nInstructions:", prompt)
-        self.assertIn(INSTRUCTIONS, prompt)
+        self.assertIn(IMPLEMENTATION_INSTRUCTIONS, prompt)
         self.assertIn(str(workspace.path), prompt)
         self.assertIn(workspace.branch, prompt)
         self.assertNotIn(LOCAL.api_key, prompt)
-        self.assertIn("Slice: handoff", task_prompt(issue, replace(workspace, slice="handoff")))
+        self.assertIn("Slice: handoff", implementation_handoff(
+            issue, replace(workspace, slice="handoff")))
         with self.assertRaisesRegex(TaskError, "NUL"):
-            task_prompt(replace(issue, description="\0"), workspace)
+            implementation_handoff(replace(issue, description="\0"), workspace)
+
+    def test_shared_execution_preserves_non_implementation_handoff(self):
+        workspace = Workspace("dev-7-review", Path("/exact/checkout"),
+                              "w2", "w2:t1", "w2:p1", "reopened")
+        handoff = "Review DEV-7 in the prepared checkout. Report findings only."
+        execution = AgentExecution(ISSUE, Path("/resolved/repository"), workspace,
+                                   AgentOptions("pi"), handoff, purpose="review")
+        self.assertEqual(execution.handoff, handoff)
+        self.assertNotIn("Implement Linear issue", execution.handoff)
+        self.assertNotIn("Implement only this slice", execution.handoff)
 
 
 class AgentTests(unittest.TestCase):
@@ -90,7 +139,8 @@ class AgentTests(unittest.TestCase):
         self.bootstrap = (f"Handoff readiness {self.message_id}. Do not use tools or modify files. "
                           "Reply READY, then wait for the task prompt.")
         self.workspace = Workspace("dev-7-old", Path("/exact/checkout"), "w6", "w6:t8", "w6:p20", "ready")
-        self.codex = Codex(AgentConfig("codex", "custom/model", "high"))
+        self.issue = ISSUE
+        self.codex = Codex(AgentOptions("codex", "custom/model", "high"))
         self.rpc = MagicMock()
         for target, value in [("CodexRPC", None), ("uuid4", self.message_id)]:
             patcher = patch("task_start.agent." + target, return_value=value)
@@ -111,7 +161,7 @@ class AgentTests(unittest.TestCase):
     def reset_fixture(self):
         self.now = 0
         self.queued = False
-        self.prompt = "Exact task\nα\r\n$(no shell)\n"
+        self.prompt = implementation_handoff(self.issue, self.workspace)
         self.thread_id = "01a0d314-bd68-7203-8b68-f2520f892afa"
         self.turn_id = "01a0d315-ded5-7051-ac63-e46e9aa818fe"
         self.thread = dict(id=self.thread_id, cwd=str(self.workspace.path), preview=self.bootstrap)
@@ -145,13 +195,15 @@ class AgentTests(unittest.TestCase):
         self.fail("Unexpected session operation " + method)
 
     def run_launch(self):
-        return self.codex.launch(self.workspace, self.prompt)
+        execution = AgentExecution(self.issue, Path("/resolved/repository"), self.workspace,
+                                   self.codex.options, self.prompt)
+        return self.codex.launch(execution)
 
     def test_exact_workspace_model_reasoning_and_confirmed_task(self):
         with patch("task_start.agent.run", side_effect=[json.dumps(dict(result=r)) for r in self.results]) as run:
             result = self.run_launch()
-        self.assertIn(self.turn_id, result)
-        self.assertIn(self.thread_id, result)
+        self.assertEqual(result.turn_id, self.turn_id)
+        self.assertEqual(result.session_id, self.thread_id)
         calls = [c.args[0] for c in run.call_args_list]
         self.assertEqual(calls[1][4:], ["--kind", "codex", "--pane", "w6:p20", "--timeout", "30000", "--", *self.args[1:]])
         self.assertEqual(calls[2:], [["herdr", "agent", "get", "w6:p20"]] * 2)
@@ -228,7 +280,7 @@ class AgentTests(unittest.TestCase):
 
     def test_quickly_completed_turn_is_confirmed(self):
         with patch.object(self.codex, "command", side_effect=self.results):
-            self.assertIn("confirmed", self.run_launch())
+            self.assertIn("confirmed", self.run_launch().summary)
 
     def test_different_input_fails(self):
         self.receipt["item"]["content"][0]["text"] = self.prompt[:-1]
@@ -306,14 +358,14 @@ class AgentTests(unittest.TestCase):
 
     def test_exact_linear_context_and_resolved_slice_reach_queue(self):
         self.workspace = replace(self.workspace, slice="importer")
-        issue = replace(ISSUE, title="Current title", description="\nExact α\r\n  task\n")
-        self.prompt = task_prompt(issue, self.workspace)
+        self.issue = replace(ISSUE, title="Current title", description="\nExact α\r\n  task\n")
+        self.prompt = implementation_handoff(self.issue, self.workspace)
         self.receipt["item"]["content"][0]["text"] = self.prompt
         with patch.object(self.codex, "command", side_effect=self.results):
             self.run_launch()
         queued = [c.args[1]["input"][0]["text"] for c in self.rpc.request.call_args_list if c.args[0] == "thread/queue/add"]
         self.assertEqual(queued, [self.prompt])
-        self.assertIn(f"Task:\n{issue.description}\n\nInstructions:", queued[0])
+        self.assertIn(f"Task:\n{self.issue.description}\n\nInstructions:", queued[0])
         self.assertIn("Slice: importer\nImplement only this slice", queued[0])
 
     def test_malformed_responses_fail_cleanly(self):
@@ -327,8 +379,362 @@ class AgentTests(unittest.TestCase):
             self.codex.check_available()
 
 
+class PiAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.workspace = Workspace("dev-7-old", Path("/exact/checkout"),
+                                   "w6", "w6:t8", "w6:p20", "ready")
+        self.options = AgentOptions("pi", "anthropic/claude-sonnet", "high")
+        self.pi = Pi(self.options)
+        self.handoff = implementation_handoff(ISSUE, self.workspace)
+        self.execution = AgentExecution(ISSUE, Path("/resolved/repository"),
+                                        self.workspace, self.options, self.handoff)
+        capability_patcher = patch.object(
+            self.pi, "model_mode_capabilities",
+            return_value=("anthropic/claude-sonnet", "high",
+                          ("off", "minimal", "low", "medium", "high")),
+        )
+        self.capabilities = capability_patcher.start()
+        self.addCleanup(capability_patcher.stop)
+        self.agent = dict(agent="pi", agent_status="idle", workspace_id="w6",
+                          tab_id="w6:t8", pane_id="w6:p20", terminal_id="term_pi",
+                          agent_session="pi-session", cwd="/exact/checkout",
+                          foreground_cwd="/exact/checkout")
+        self.args = ["--model", "anthropic/claude-sonnet", "--thinking", "high"]
+        self.results = [dict(type="pane_list", panes=[dict(self.agent, agent=None)]),
+                        dict(type="agent_started", agent=dict(self.agent), argv=["pi", *self.args]),
+                        dict(type="agent_info", agent=dict(self.agent)),
+                        dict(type="agent_prompted", agent=dict(self.agent)),
+                        dict(type="agent_info", agent=dict(self.agent))]
+
+    def test_normal_prompt_submission_uses_exact_workspace_model_and_mode(self):
+        with patch.object(self.pi, "command", side_effect=self.results) as command:
+            result = self.pi.launch(self.execution)
+        self.assertEqual(result, LaunchResult("pi", "w6:p20",
+                         "Pi prompt submitted in w6:p20 (session pi-session)", "pi-session"))
+        self.capabilities.assert_called_once_with(self.workspace)
+        start = command.call_args_list[1].args
+        self.assertEqual(start[3:], ("--kind", "pi", "--pane", "w6:p20",
+                                    "--timeout", "30000", "--", *self.args))
+        self.assertNotIn(self.execution.handoff, start)
+        self.assertNotIn("--cd", self.args)
+        self.assertEqual(command.call_args_list[2].args, ("agent", "get", "w6:p20"))
+        self.assertEqual(command.call_args_list[3].args,
+                         ("agent", "prompt", "w6:p20", self.handoff))
+        self.assertEqual(command.call_args_list[4].args, ("agent", "get", "w6:p20"))
+
+    def test_session_already_working_is_only_reported_as_submitted(self):
+        results = copy.deepcopy(self.results)
+        results[1]["agent"]["agent_status"] = "working"
+        results[2]["agent"]["agent_status"] = "working"
+        with patch.object(self.pi, "command", side_effect=results):
+            summary = self.pi.launch(self.execution).summary
+        self.assertIn("prompt submitted", summary)
+        self.assertNotIn("task started", summary)
+        self.assertNotIn("confirmed", summary)
+
+    def test_unrelated_working_activity_cannot_satisfy_a_turn_wait(self):
+        results = copy.deepcopy(self.results)
+        results[2]["agent"]["agent_status"] = "working"
+        results[3]["agent"]["agent_status"] = "working"
+        with patch.object(self.pi, "command", side_effect=results) as command:
+            summary = self.pi.launch(self.execution).summary
+        prompt_call = command.call_args_list[3].args
+        self.assertEqual(prompt_call, ("agent", "prompt", "w6:p20", self.handoff))
+        self.assertNotIn("--wait", prompt_call)
+        self.assertEqual(summary, "Pi prompt submitted in w6:p20 (session pi-session)")
+
+    def test_agent_local_defaults_are_not_silently_replaced(self):
+        pi = Pi(AgentOptions("pi"))
+        self.assertEqual(pi.launch_args(), [])
+
+    def test_none_mode_maps_to_pi_off(self):
+        pi = Pi(AgentOptions("pi", None, "none"))
+        self.assertEqual(pi.launch_args(), ["--thinking", "off"])
+
+    def test_unsupported_or_conflicting_pi_options_are_clear(self):
+        with self.assertRaisesRegex(TaskError, "Pi mode"):
+            Pi(AgentOptions("pi", "model", "ultra"))
+        with self.assertRaisesRegex(TaskError, r"model:mode syntax.*--mode"):
+            Pi(AgentOptions("pi", "sonnet:high", "low"))
+        self.assertEqual(Pi(AgentOptions("pi", "high", "low")).launch_args(),
+                         ["--model", "high", "--thinking", "low"])
+
+    def test_pi_model_thinking_suffixes_fail_before_submission(self):
+        for model in ["openai/gpt-4o:high", "anthropic/claude-haiku-4-5:max"]:
+            with self.subTest(model=model), \
+                    patch.object(Pi, "command") as command, \
+                    patch("task_start.agent.subprocess.run") as rpc, \
+                    self.assertRaisesRegex(TaskError, r"model:mode syntax.*--mode"):
+                Pi(AgentOptions("pi", model))
+            command.assert_not_called()
+            rpc.assert_not_called()
+
+    def test_pi_plain_model_without_mode_remains_supported(self):
+        pi = Pi(AgentOptions("pi", "openai/gpt-4o"))
+        self.assertEqual(pi.launch_args(), ["--model", "openai/gpt-4o"])
+        with patch.object(pi, "model_mode_capabilities") as capabilities:
+            pi.validate_model_mode(self.workspace)
+        capabilities.assert_not_called()
+
+    def test_installed_pi_rpc_capability_probe_uses_target_worktree(self):
+        pi = Pi(AgentOptions("pi", "openai-codex/gpt-6-luna", "max"))
+        responses = [
+            dict(id="state", type="response", command="get_state", success=True,
+                 data=dict(model=dict(provider="openai-codex", id="gpt-6-luna"),
+                           thinkingLevel="max")),
+            dict(id="levels", type="response", command="get_available_thinking_levels",
+                 success=True, data=dict(levels=["off", "minimal", "low", "medium",
+                                                 "high", "xhigh", "max"])),
+        ]
+        completed = MagicMock(returncode=0,
+                              stdout=("\n".join(json.dumps(r) for r in responses) + "\n").encode())
+        with patch("task_start.agent.shutil.which", return_value="/agents/pi"), \
+                patch("task_start.agent.subprocess.run", return_value=completed) as run:
+            capabilities = pi.model_mode_capabilities(self.workspace)
+        self.assertEqual(capabilities, ("openai-codex/gpt-6-luna", "max",
+                         ("off", "minimal", "low", "medium", "high", "xhigh", "max")))
+        args = run.call_args.args[0]
+        self.assertEqual(args[:5], ["/agents/pi", "--model", "openai-codex/gpt-6-luna",
+                                    "--thinking", "max"])
+        self.assertEqual(args[5:], ["--mode", "rpc", "--no-session", "--no-tools"])
+        self.assertEqual(run.call_args.kwargs["cwd"], self.workspace.path)
+        requests = [json.loads(line) for line in run.call_args.kwargs["input"].decode().splitlines()]
+        self.assertEqual(requests, [dict(id="state", type="get_state"),
+                                    dict(id="levels", type="get_available_thinking_levels")])
+
+    def test_pi_capability_probe_failure_is_clear(self):
+        pi = Pi(AgentOptions("pi", "openai/gpt-4o", "high"))
+        completed = MagicMock(returncode=1, stdout=b"")
+        with patch("task_start.agent.shutil.which", return_value="/agents/pi"), \
+                patch("task_start.agent.subprocess.run", return_value=completed), \
+                self.assertRaisesRegex(TaskError, "model/mode preflight failed"):
+            pi.model_mode_capabilities(self.workspace)
+
+    def test_pi_rejects_silently_clamped_model_mode_combinations(self):
+        cases = [
+            (AgentOptions("pi", "openai/gpt-4o", "high"),
+             ("openai/gpt-4o", "off", ("off",))),
+            (AgentOptions("pi", "anthropic/claude-haiku-4-5", "max"),
+             ("anthropic/claude-haiku-4-5", "high",
+              ("off", "minimal", "low", "medium", "high"))),
+        ]
+        for options, capabilities in cases:
+            with self.subTest(options=options):
+                pi = Pi(options)
+                execution = AgentExecution(ISSUE, Path("/resolved/repository"), self.workspace,
+                                           options, self.handoff)
+                with patch.object(pi, "model_mode_capabilities", return_value=capabilities), \
+                        patch.object(pi, "command") as command, \
+                        self.assertRaisesRegex(TaskError, r"does not support requested mode.*Pi would use"):
+                    pi.launch(execution)
+                command.assert_not_called()
+
+    def test_pi_accepts_supported_model_mode_combinations(self):
+        cases = [
+            (AgentOptions("pi", "openai/gpt-4o", "off"),
+             ("openai/gpt-4o", "off", ("off",))),
+            (AgentOptions("pi", "anthropic/claude-haiku-4-5", "high"),
+             ("anthropic/claude-haiku-4-5", "high",
+              ("off", "minimal", "low", "medium", "high"))),
+            (AgentOptions("pi", "openai-codex/gpt-6-luna", "max"),
+             ("openai-codex/gpt-6-luna", "max",
+              ("off", "minimal", "low", "medium", "high", "xhigh", "max"))),
+        ]
+        for options, capabilities in cases:
+            with self.subTest(options=options):
+                pi = Pi(options)
+                with patch.object(pi, "model_mode_capabilities", return_value=capabilities):
+                    pi.validate_model_mode(self.workspace)
+
+    def test_mismatched_target_or_argv_is_not_success(self):
+        for field, value in [("cwd", "/wrong"), ("agent", "codex")]:
+            with self.subTest(field=field):
+                results = copy.deepcopy(self.results)
+                results[1]["agent"][field] = value
+                with patch.object(self.pi, "command", side_effect=results) as command, \
+                        self.assertRaisesRegex(TaskError, "not confirmed"):
+                    self.pi.launch(self.execution)
+                self.assertEqual(command.call_count, 2)
+        results = copy.deepcopy(self.results)
+        results[1]["argv"] = ["pi"]
+        with patch.object(self.pi, "command", side_effect=results) as command, \
+                self.assertRaisesRegex(TaskError, "not confirmed"):
+            self.pi.launch(self.execution)
+        self.assertEqual(command.call_count, 2)
+
+    def test_changed_target_before_submission_does_not_send(self):
+        results = copy.deepcopy(self.results)
+        results[2]["agent"]["terminal_id"] = "replacement"
+        with patch.object(self.pi, "command", side_effect=results) as command, \
+                self.assertRaisesRegex(TaskError, "startup"):
+            self.pi.launch(self.execution)
+        self.assertEqual(command.call_count, 3)
+
+    def test_prompt_response_type_must_be_agent_prompted(self):
+        with patch("task_start.agent.run", return_value=json.dumps(dict(
+                result=dict(type="agent_info", agent=self.agent)))), \
+                self.assertRaisesRegex(TaskError, "Unexpected Herdr agent prompt response"):
+            self.pi.command("agent", "prompt", "w6:p20", "probe")
+
+    def test_prompt_failure_is_not_retried_or_mistaken_for_success(self):
+        for response in [TaskError("agent_blocked"),
+                         dict(type="agent_prompted", agent={}),
+                         dict(type="agent_prompted", agent=dict(self.agent, terminal_id="replaced"))]:
+            with self.subTest(response=response):
+                results = copy.deepcopy(self.results)
+                results[3] = response
+                with patch.object(self.pi, "command", side_effect=results) as command, \
+                        self.assertRaisesRegex(TaskError, "prompt submission"):
+                    self.pi.launch(self.execution)
+                self.assertEqual(command.call_count, 4)
+
+    def test_exact_multiline_context_reaches_herdr_prompt_only(self):
+        issue = replace(ISSUE, title="Current title", description="\nExact α\r\n  task\n")
+        workspace = replace(self.workspace, slice="importer")
+        handoff = implementation_handoff(issue, workspace)
+        execution = replace(self.execution, issue=issue, workspace=workspace, handoff=handoff)
+        with patch.object(self.pi, "command", side_effect=self.results) as command:
+            self.pi.launch(execution)
+        self.assertEqual(command.call_args_list[3].args[3], handoff)
+        self.assertIn("Slice: importer", command.call_args_list[3].args[3])
+        self.assertNotIn(issue.description, str(command.call_args_list[1].args))
+
+    def test_review_handoff_is_delivered_without_implementation_framing(self):
+        handoff = "Review DEV-7. Report findings only; do not implement changes."
+        execution = replace(self.execution, purpose="review", handoff=handoff)
+        with patch.object(self.pi, "command", side_effect=self.results) as command:
+            self.pi.launch(execution)
+        submitted = command.call_args_list[3].args[3]
+        self.assertEqual(submitted, handoff)
+        self.assertNotIn("Implement Linear issue", submitted)
+        self.assertNotIn("Implement only this slice", submitted)
+
+    def test_unavailable_pi(self):
+        with patch("task_start.agent.shutil.which", return_value=None), \
+                self.assertRaisesRegex(TaskError, "pi is not installed"):
+            self.pi.check_available()
+
+
+class ControlledTaskStartAcceptanceTests(unittest.TestCase):
+    """Drive the same mocked workflow boundary through both real adapters."""
+
+    def setUp(self):
+        self.enterContext(patch("task_start.cli.load_local", return_value=LOCAL))
+        self.enterContext(patch("task_start.cli.load_projects", return_value=[baseline.PROJECT]))
+        linear = self.enterContext(patch("task_start.cli.Linear")).return_value
+        linear.get_issue.return_value = ISSUE
+        self.enterContext(patch("task_start.cli.Git"))
+        herdr = self.enterContext(patch("task_start.cli.Herdr")).return_value
+        self.workspace = Workspace("dev-7-add-ingestion-cli", Path("/selected/worktree"),
+                                   "w7", "w7:t5", "w7:p8", "ready")
+        herdr.prepare.return_value = self.workspace
+        self.enterContext(patch("task_start.agent.shutil.which", return_value="/agents/executable"))
+
+    def test_same_semantic_handoff_reaches_codex_and_pi(self):
+        message_id = "b67e58a0-3876-4e85-ab88-bc170e847327"
+        bootstrap = (f"Handoff readiness {message_id}. Do not use tools or modify files. "
+                     "Reply READY, then wait for the task prompt.")
+        prompt = implementation_handoff(ISSUE, self.workspace)
+        codex_agent = dict(agent="codex", agent_status="idle", workspace_id="w7",
+                           tab_id="w7:t5", pane_id="w7:p8", terminal_id="term_codex",
+                           cwd=str(self.workspace.path), foreground_cwd=str(self.workspace.path))
+        codex_args = ["--cd", str(self.workspace.path), "--model", "gpt-6-astra",
+                      "--config", 'model_reasoning_effort="high"', "--", bootstrap]
+        codex_results = [
+            dict(type="pane_list", panes=[dict(codex_agent, agent=None)]),
+            dict(type="agent_started", agent=codex_agent, argv=["codex", *codex_args]),
+            dict(type="agent_info", agent=codex_agent),
+            dict(type="agent_info", agent=codex_agent),
+        ]
+        rpc = MagicMock()
+        queued = False
+
+        def codex_request(method, params, **kwargs):
+            nonlocal queued
+            if method == "thread/list":
+                return dict(data=[dict(id="01a0d314-bd68-7203-8b68-f2520f892afa",
+                                       cwd=str(self.workspace.path), preview=bootstrap)])
+            if method == "thread/read":
+                return dict(thread=dict(id="01a0d314-bd68-7203-8b68-f2520f892afa",
+                                        cwd=str(self.workspace.path)))
+            if method == "thread/items/list":
+                items = [dict(turnId="ready", item=dict(type="userMessage", clientId="native",
+                              content=[dict(type="text", text=bootstrap)]))]
+                if queued:
+                    items.append(dict(turnId="task-turn", item=dict(type="userMessage", clientId=message_id,
+                                      content=[dict(type="text", text=prompt)])))
+                return dict(data=items, nextCursor=None)
+            if method == "thread/queue/add":
+                queued = True
+                return dict(queuedSubmission=dict(id="queue", clientUserMessageId=message_id,
+                                                   input=params["input"]))
+            self.fail(method)
+
+        rpc.request.side_effect = codex_request
+        rpc_factory = MagicMock()
+        rpc_factory.return_value.__enter__.return_value = rpc
+        with patch("task_start.agent.uuid4", return_value=message_id), \
+                patch("task_start.agent.CodexRPC", rpc_factory), \
+                patch.object(Codex, "command", side_effect=codex_results):
+            codex_output = cli.start("DEV-7")
+
+        codex_handoff = next(call.args[1]["input"][0]["text"] for call in rpc.request.call_args_list
+                              if call.args[0] == "thread/queue/add")
+        pi_agent = dict(agent="pi", agent_status="working", workspace_id="w7",
+                        tab_id="w7:t5", pane_id="w7:p8", terminal_id="term_pi",
+                        cwd=str(self.workspace.path), foreground_cwd=str(self.workspace.path))
+        pi_args = ["--model", "gpt-6-astra", "--thinking", "high"]
+        pi_results = [dict(type="pane_list", panes=[dict(pi_agent, agent=None)]),
+                      dict(type="agent_started", agent=pi_agent, argv=["pi", *pi_args]),
+                      dict(type="agent_info", agent=pi_agent),
+                      dict(type="agent_prompted", agent=pi_agent),
+                      dict(type="agent_info", agent=pi_agent)]
+        with patch.object(Pi, "model_mode_capabilities",
+                          return_value=("openai-codex/gpt-6-astra", "high",
+                                        ("off", "minimal", "low", "medium", "high"))), \
+                patch.object(Pi, "command", side_effect=pi_results) as pi_command:
+            pi_output = cli.start("DEV-7", agent_kind="pi")
+
+        self.assertEqual(codex_handoff, prompt)
+        self.assertEqual(pi_command.call_args_list[1].args[-len(pi_args):], tuple(pi_args))
+        self.assertNotIn(prompt, pi_command.call_args_list[1].args)
+        self.assertEqual(pi_command.call_args_list[3].args,
+                         ("agent", "prompt", "w7:p8", prompt))
+        self.assertIn("Codex turn task-turn confirmed", codex_output)
+        self.assertIn("Pi prompt submitted", pi_output)
+
+
 class HandoffOrchestrationTests(unittest.TestCase):
     setUp = baseline.OrchestrationTests.setUp
+
+    def test_config_defaults_and_independent_command_overrides_reach_factory(self):
+        cases = [
+            ({}, AgentOptions("codex", "gpt-6-astra", "high")),
+            ({"agent_kind": "pi"}, AgentOptions("pi", "gpt-6-astra", "high")),
+            ({"model": "run-model"}, AgentOptions("codex", "run-model", "high")),
+            ({"mode": "low"}, AgentOptions("codex", "gpt-6-astra", "low")),
+            ({"agent_kind": "pi", "model": "pi-model", "mode": "medium"},
+             AgentOptions("pi", "pi-model", "medium")),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(kwargs=kwargs):
+                self.agent.reset_mock()
+                self.agent.launch.return_value = LaunchResult(expected.kind, "w7:p8", "working")
+                with patch("task_start.cli.adapter_for", return_value=self.agent) as factory:
+                    cli.start("DEV-7", **kwargs)
+                factory.assert_called_once_with(expected)
+                execution = self.agent.launch.call_args.args[0]
+                self.assertEqual(execution.options, expected)
+                self.assertEqual(execution.repository, Path("/projects/knowledge-base").resolve())
+                self.assertEqual(execution.purpose, "implementation")
+
+    def test_no_agent_conflicts_with_execution_overrides_before_mutation(self):
+        for kwargs in [{"agent_kind": "pi"}, {"model": "model"}, {"mode": "high"}]:
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(TaskError, "conflicts"):
+                cli.start("DEV-7", no_agent=True, **kwargs)
+        self.git.update_base.assert_not_called()
+        self.herdr.prepare.assert_not_called()
+        self.linear.start.assert_not_called()
 
     def test_handoff_order_and_fresh_context(self):
         self.workspace = replace(self.workspace, slice="codex-handoff")
@@ -336,32 +742,33 @@ class HandoffOrchestrationTests(unittest.TestCase):
         self.git.update_base.side_effect = lambda *a: order.append("base")
         self.herdr.prepare.side_effect = lambda *a: order.append("workspace") or self.workspace
         self.linear.start.side_effect = lambda *a: order.append("linear")
-        self.agent.launch.side_effect = lambda *a: order.append("agent") or "working"
+        self.agent.launch.side_effect = lambda *a: order.append("agent") or LaunchResult(
+            "codex", self.workspace.pane_id, "working")
         self.linear.get_issue.return_value = replace(ISSUE, title="New title", description="Fresh task\n  exact\n")
         cli.start("DEV-7", slice="Codex Handoff")
         self.assertEqual(order, ["base", "workspace", "linear", "agent"])
-        selected, prompt = self.agent.launch.call_args.args
-        self.assertIs(selected, self.workspace)
-        self.assertIn("New title", prompt)
-        self.assertIn("Fresh task\n  exact\n", prompt)
+        execution = self.agent.launch.call_args.args[0]
+        self.assertIs(execution.workspace, self.workspace)
+        self.assertIn("New title", execution.handoff)
+        self.assertIn("Fresh task\n  exact\n", execution.handoff)
         self.assertEqual(self.herdr.prepare.call_args.args[2:], ("dev-7-codex-handoff", "DEV-7", "codex-handoff"))
-        self.assertIn("Slice: codex-handoff", prompt)
+        self.assertIn("Slice: codex-handoff", execution.handoff)
 
     def test_no_requested_slice_uses_resolved_slice_in_prompt(self):
         selected = replace(self.workspace, branch="dev-7-importer", slice="importer")
         self.herdr.prepare.return_value = selected
         cli.start("DEV-7")
         self.assertIsNone(self.herdr.prepare.call_args.args[-1])
-        workspace, prompt = self.agent.launch.call_args.args
-        self.assertEqual(workspace, selected)
-        self.assertIn("Slice: importer\nImplement only this slice of the task.", prompt)
+        execution = self.agent.launch.call_args.args[0]
+        self.assertEqual(execution.workspace, selected)
+        self.assertIn("Slice: importer\nImplement only this slice of the task.", execution.handoff)
 
     def test_no_agent_still_prepares_and_updates_status(self):
-        with patch("task_start.cli.Codex") as codex:
+        with patch("task_start.cli.adapter_for") as adapter:
             output = cli.start("DEV-7", no_agent=True)
         self.herdr.prepare.assert_called_once()
         self.linear.start.assert_called_once_with(ISSUE)
-        codex.assert_not_called()
+        adapter.assert_not_called()
         self.assertIn("skipped (--no-agent)", output)
 
     def test_preparation_or_status_failure_never_launches(self):

@@ -3,8 +3,10 @@ import re
 import sys
 
 from . import TaskError
-from .agent import Codex, task_prompt
+from .agent import (AgentExecution, AgentOverrides, adapter_for,
+                    resolve_agent_options)
 from .config import load_local, load_projects, repository_path, resolve_project
+from .handoff import implementation_handoff
 from .linear import Linear
 from .workspace import Git, Herdr, branch_name, slice_slug
 
@@ -22,8 +24,19 @@ def parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start", help="Create or reopen a task workspace")
     start.add_argument("issue", type=issue_identifier)
     start.add_argument("--slice", type=parse_slice, help="Select an explicit implementation slice (branch suffix)")
-    start.add_argument("--no-agent", action="store_true", help="Prepare/focus the workspace without starting Codex")
+    add_agent_options(start, include_no_agent=True)
     return result
+
+
+def add_agent_options(command: argparse.ArgumentParser, *, include_no_agent: bool = False) -> None:
+    """Add reusable execution selection flags to a workflow subcommand."""
+    command.add_argument("--agent", dest="agent_kind", metavar="KIND",
+                         help="Override the configured execution agent (codex or pi)")
+    command.add_argument("--model", help="Override the configured model for this run")
+    command.add_argument("--mode", help="Override reasoning/thinking mode for this run")
+    if include_no_agent:
+        command.add_argument("--no-agent", action="store_true",
+                             help="Prepare/focus the workspace without starting an execution agent")
 
 
 def parse_slice(value: str) -> str:
@@ -33,16 +46,20 @@ def parse_slice(value: str) -> str:
         raise argparse.ArgumentTypeError(str(error)) from None
 
 
-def start(identifier: str, *, no_agent: bool = False, slice: str | None = None) -> str:
+def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
+          agent_kind: str | None = None, model: str | None = None,
+          mode: str | None = None) -> str:
     if slice is not None:
         slice = slice_slug(slice)
+    overrides = AgentOverrides(agent_kind, model, mode)
+    if no_agent and any(value is not None for value in (agent_kind, model, mode)):
+        raise TaskError("--no-agent conflicts with --agent, --model, and --mode")
     local = load_local(no_agent=no_agent)
     agent = None
+    options = None
     if not no_agent:
-        if local.agent is None:
-            raise TaskError("Configure [agent] kind, model and reasoning in ~/.agentic-workflows/config.toml "
-                            "or use --no-agent")
-        agent = Codex(local.agent)
+        options = resolve_agent_options(local.agent, overrides)
+        agent = adapter_for(options)
         agent.check_available()
     projects = load_projects()
     linear = Linear(local.api_key)
@@ -57,7 +74,12 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None) 
         linear.start(issue)
     except TaskError as error:
         raise TaskError(f"Workspace ready on {workspace.branch}, but status update failed: {error}") from None
-    status = agent.launch(workspace, task_prompt(issue, workspace)) if agent else "skipped (--no-agent)"
+    if agent:
+        execution = AgentExecution(issue, repo, workspace, options,
+                                   implementation_handoff(issue, workspace))
+        status = agent.launch(execution).summary
+    else:
+        status = "skipped (--no-agent)"
     return (f"{issue.identifier}  {issue.title}\nRepo:   {repo}\nBranch: {workspace.branch}\n"
             f"Worktree: {workspace.path}\nHerdr:  {workspace.action}\nLinear: In Progress\nAgent:  {status}")
 
@@ -65,7 +87,8 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None) 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        print(start(args.issue, no_agent=args.no_agent, slice=args.slice))
+        print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
+                    agent_kind=args.agent_kind, model=args.model, mode=args.mode))
     except TaskError as error:
         print(f"task: {error}", file=sys.stderr)
         return 1

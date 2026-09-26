@@ -8,6 +8,7 @@ api_key = ""
 
 [agent]
 kind = "codex"
-# Use a model ID accepted by your installed Codex CLI/account.
+# Use a model ID accepted by the selected agent and account.
 model = "gpt-6-astra"
-reasoning = "high"
+# Workflow mode means Codex reasoning effort or Pi thinking level.
+mode = "high"

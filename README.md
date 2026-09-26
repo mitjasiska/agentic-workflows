@@ -43,8 +43,10 @@ Descriptions use Linear's API Markdown form `+++ Section title … +++` for coll
 ## Setup and use
 
 Requires Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
-Agent handoff also requires an installed, authenticated Codex CLI. The commands and
-JSON responses were checked against Herdr 0.9.1 and Codex CLI 0.156.1.
+Agent handoff also requires the selected, authenticated Codex or Pi CLI on `PATH`.
+The commands and JSON responses were checked against Herdr 0.9.1 and Codex CLI
+0.157.0. Pi transport was checked against Pi CLI 0.87.1 and Herdr 0.9.1;
+run `pi --help` to verify the installed interface.
 
 1. Clone `agentic-workflows` and your project repositories.
 2. Copy `config/local.example.toml` to `~/.agentic-workflows/config.toml` (create the directory first).
@@ -75,17 +77,42 @@ api_key = "" # Fill in your personal API key locally
 [agent]
 kind = "codex"
 model = "gpt-6-astra"
-reasoning = "high"
+mode = "high"
 ```
 
-Model names are passed unchanged to Codex's `--model`; use the actual model ID
-accepted by your CLI/account. There is no hard-coded model whitelist or workflow
-alias expansion. Reasoning is passed as `--config 'model_reasoning_effort="high"'`.
-The workflow validates the configuration's shape and reasoning values; support
-for a particular model/effort combination and account access is determined by Codex.
-See the [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
-Only `kind = "codex"` is currently supported. Login, repository trust, and Codex's
-own permission settings remain under your control.
+`kind` may be `codex` (the default implementation) or `pi`. `model` and `mode`
+are optional; when omitted, the selected agent's own local default is used. The
+legacy `reasoning = "high"` field remains accepted as an alias for `mode` so
+existing Codex installations continue to work. Do not set both fields.
+
+Model names are passed unchanged to the selected CLI. Workflow `mode` means
+reasoning/thinking effort, not Pi's unrelated `--mode text|json|rpc` output flag.
+Codex receives it as `--config 'model_reasoning_effort="high"'`; Pi receives it
+as `--thinking high`. `none` and `off` are mapped to the spelling used by each
+agent. Codex supports `none`/`off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`, and `ultra`; Pi supports `off`/`none` through `max` but not `ultra`.
+Unknown mode names fail before workspace or Linear mutation. When a Pi mode is
+requested, the adapter uses Pi's local RPC mode in the exact worktree before task
+submission to resolve the selected model, supported thinking levels, and effective
+level. It rejects a model/mode pair if Pi would silently clamp it. Model/account
+support is ultimately determined by the selected CLI. Login, repository trust,
+and each agent's own permission settings remain under your control. Although Pi
+itself accepts thinking suffixes such as `model:high`, Agentic Workflows rejects
+that syntax because Pi may silently clamp it. Keep `model` plain and put every
+thinking choice in workflow `mode`/`--mode` so it follows one validated path.
+
+Per-command choices override machine-local configuration without modifying it:
+
+```sh
+task start DEV-7 --agent pi
+task start DEV-7 --agent codex --model gpt-6-astra --mode high
+```
+
+`--agent`, `--model`, and `--mode` resolve independently. For example,
+`--agent pi` retains the configured model and mode; it does not silently choose
+Pi-specific values. Precedence is command override, then `[agent]`, then the
+selected CLI's local default for an omitted model or mode. An unavailable or
+unknown requested agent fails; there is no fallback to Codex.
 
 A repository is resolved as `projects_root / repo_name`. Each must be its permanent Git checkout, already on the configured base branch, with a clean working tree (including untracked files) and no unfinished Git operation. The base must track a same-named branch on a remote. `task start` fetches that upstream into `FETCH_HEAD` and updates using `merge --ff-only`; it refuses local-only commits or divergence. It does not switch, stash, reset, or force-update branches.
 
@@ -93,23 +120,64 @@ The command loads the current issue through [Linear's GraphQL API](https://linea
 
 After Git and Herdr confirm the exact checkout and focus, the command sets the
 issue to its team's exact `In Progress` status (unless it is already there). It
-then starts Codex in the returned pane, with `--cd` set to the checkout. After a
-harmless readiness exchange identifies that session, it queues the current
-identifier, title, and exact description with standard instructions. It confirms the queued message became a
-recorded Codex turn before reporting handoff success. Codex is told to read repository instructions,
-inspect before editing, implement the requested scope, run relevant validation,
-and stop for independent review without committing, pushing, merging, or opening
-a PR. The Python workflow owns the Linear lookup; Codex is told not to contact
-Linear or read its credentials. No task description file is written into the
-worktree. The prompt is delivered over local stdio and remains visible in Codex's
-session history.
+then starts the selected adapter in the returned pane and sends the same workflow-
+owned handoff: current identifier, title, exact description, resolved checkout,
+branch, optional slice, and standard implementation instructions. Both agents
+are told to read repository instructions, inspect before editing, implement the
+requested scope, run relevant validation, and stop for independent review without
+committing, pushing, merging, or opening a PR. The Python workflow owns the Linear
+lookup; the execution agent is told not to contact Linear or read its credentials.
+No task description file is written into the worktree.
 
-To prepare/focus the workspace without Codex (also works without `[agent]` or a
-Codex installation):
+Codex is launched with `--cd` and uses its local app-server API for a readiness
+exchange, durable queue submission, and exact recorded-turn confirmation. Pi has
+no working-directory flag: Herdr starts it in the already-confirmed task pane and
+the adapter validates both reported working directories before submitting the full
+handoff through `herdr agent prompt`. Herdr confirms prompt submission, but does
+not identify a Pi turn for that prompt. Both remain interactive sessions.
+
+To prepare/focus the workspace without an agent (also works without `[agent]` or
+an agent installation):
 
 ```sh
 task start DEV-7 --no-agent
 ```
+
+## Agent execution architecture
+
+Agentic Workflows is multi-agent by design. Codex is the current default and most
+mature adapter, not the architecture; Pi is the second supported implementation
+used to keep the boundary portable. Future agents such as OpenCode should be added
+as adapters without rewriting task lifecycle logic.
+
+The shared contract in `task_start/agent.py` is deliberately small:
+
+- `AgentOptions` is the resolved agent, model, and workflow mode.
+- `AgentExecution` carries the fresh issue snapshot, resolved repository and exact
+  worktree, execution purpose, an already-constructed semantic handoff, and an
+  extensible workflow-policy mapping. It does not invent purpose-specific wording.
+- `LaunchResult` contains the pane/session/turn information deterministic workflow
+  code may report. `AgentAdapter` is the launch boundary.
+
+Responsibility is split as follows:
+
+- Core owns fresh Linear retrieval, project/repository resolution, deterministic
+  Git and Herdr workspace preparation, status transition, option precedence, and
+  construction of the semantic implementation handoff. The task-start-specific
+  builder lives in `task_start/handoff.py`; future review logic must provide its
+  own review handoff rather than inheriting implementation framing.
+- An adapter owns executable availability, supported values and mappings, CLI
+  arguments, working-directory behavior, prompt transport/receipt mechanics, and
+  agent-specific launch validation. Agent-specific capability should stay there
+  instead of being forced into the shared contract.
+- Machine-local configuration owns credentials, paths, the default agent/model/
+  mode, and each CLI's authentication, trust, provider, and permission settings.
+- Linear content owns task-specific intent and constraints. It is fetched fresh,
+  transported in memory, and is never copied into tracked repository files.
+
+New workflow commands such as review should reuse `add_agent_options`,
+`resolve_agent_options`, `AgentExecution`, and the adapter registry. They should
+target the shared boundary unless behavior genuinely belongs to one agent.
 
 ## Workspace lifecycle and slices
 
@@ -133,11 +201,11 @@ task start DEV-13 --slice workspace-lifecycle
 These create/reuse `dev-13-codex-handoff` and `dev-13-workspace-lifecycle`.
 Slice names normalize accents, case, spaces and underscores to an ASCII branch
 suffix; empty names, path/ref syntax, control characters and suffixes over 100
-characters are rejected. The prompt names the slice and instructs Codex to ask if
-its scope is unclear. Other slices remain untouched.
+characters are rejected. The prompt names the slice and instructs the selected
+agent to ask if its scope is unclear. Other slices remain untouched.
 
 Without `--slice`, exactly one candidate can be reused, including one originally
-created as a slice. The resolved workspace's recorded scope is used in the Codex
+created as a slice. The resolved workspace's recorded scope is used in the agent
 prompt, so an `importer` slice retains its restriction when reopened without
 `--slice`, even after a Linear title or Herdr label changes.
 
@@ -146,7 +214,7 @@ matching their branch suffix establishes their scope. A branch name matching the
 current title is not proof of default scope. Invalid/mismatched records and
 explicit selectors conflicting with recorded scope are refused; existing scope
 is never overwritten. If a metadata write fails, the workspace remains intact
-and neither the Linear transition nor Codex startup proceeds.
+and neither the Linear transition nor agent startup proceeds.
 
 Multiple candidate branches/worktrees (including live remote
 branches) are listed and refused. Use `--slice` with the desired branch's suffix
@@ -180,9 +248,10 @@ work manually, or choose a new slice; the command never cleans it up for you.
 
 ## Failure and retry behavior
 
-If Git/Herdr preparation fails, Linear is not updated and Codex is not started.
-If the Linear update fails, the valid workspace remains available and Codex is not
-started. Check Linear and rerun.
+Agent selection, option validation, and executable availability are checked before
+Git, Herdr, or Linear mutation. If Git/Herdr preparation fails, Linear is not
+updated and no agent is started. If the Linear update fails, the valid workspace
+remains available and no agent is started. Check Linear and rerun.
 
 Codex starts with a short native prompt containing a random readiness marker. It
 asks only for `READY`, without tools or edits. The local stdio app-server API's
@@ -194,29 +263,43 @@ never selects the latest session or infers its identity from a title.
 with a unique message ID. History polling must find the same session, checkout,
 message ID, exact text, and a turn ID before success. The helper never creates,
 resumes, or executes a model session and exits after confirmation. No shared daemon
-or service is installed. These APIs (including the experimental queue endpoint) were validated
-with Codex CLI 0.156.1; unsupported or malformed responses fail clearly.
+or service is installed. These APIs (including the experimental queue endpoint)
+were validated with Codex CLI 0.157.0; unsupported or malformed responses fail
+clearly.
 
-Herdr's `interactive_ready` and `working` states alone do not prove receipt:
+Herdr's `interactive_ready` and `working` states alone do not prove a Codex turn:
 startup/trust dialogs can consume terminal input, and `agent prompt --wait` does
-not track individual turns. Task text is therefore never pasted into the terminal.
-Receipt polling has a 30-second deadline and never resends input. A blocked
+not track individual turns. Codex task text is therefore never pasted into the
+terminal. Receipt polling has a 30-second deadline and never resends input. A blocked
 startup, delivery failure, or timeout is an error, with pane and session IDs for
 inspection. First-time repository trust or authentication may require action in
 Codex; the workflow never approves those dialogs. A queued task may start after
 you resolve a blocker, so inspect that session before retrying.
 
-This confirms the handoff, not eventual implementation success; later model/API or
-implementation failures remain visible in Codex. The workspace and Linear's
-`In Progress` status remain intact on handoff failure.
+Pi starts with only supported `--model`/`--thinking` flags (or no arguments).
+Although Pi CLI accepts an initial message, Herdr 0.9.1 rejects the multiline
+handoff as an `agent start` argument (`invalid_agent_argument`). After confirming
+the canonical `pi` process, exact argv, pane, and foreground/current directories,
+the adapter submits the unchanged handoff once through `herdr agent prompt` and
+validates the returned terminal, session, pane, and checkout. It deliberately does
+not wait for Herdr's generic `working` state: unrelated Pi activity could satisfy
+that state, and Herdr does not tie it to a particular prompt. Success therefore
+means only that the prompt was submitted, not that a corresponding Pi turn started
+or completed. A rejection, timeout, or target mismatch is not success; inspect the
+pane before retrying because input may already have been sent. Authentication,
+project trust, or model errors remain visible in the pane.
 
-The returned pane must be an available shell. An existing Codex anywhere in the
-selected workspace prevents another launch. Continue that session, exit it before
-requesting a fresh handoff, or use `--no-agent` to focus it. After a timeout, inspect
-the pane before retrying: the process or prompt may already have started. There
-is no automatic resubmission, fallback session, or killing of a potentially working
-agent. Do not run simultaneous starts for the same repository or edit its base
-checkout during a start.
+Launch confirmation does not prove eventual implementation success; later model,
+provider, or implementation failures remain visible in the selected agent. The
+workspace and Linear's `In Progress` status remain intact on handoff failure.
+
+The returned pane must be an available shell. An existing instance of the selected
+agent anywhere in the workspace prevents a duplicate launch. Continue that session,
+exit it before requesting a fresh handoff, or use `--no-agent` to focus it. After a
+timeout, inspect the pane before retrying: the process or prompt may already have
+started. There is no automatic resubmission, fallback agent/session, or killing of
+a potentially working agent. Do not run simultaneous starts for the same repository
+or edit its base checkout during a start.
 
 ## Tests
 
@@ -224,8 +307,12 @@ checkout during a start.
 python3.12 -m unittest discover -s tests -v
 ```
 
-Tests mock Linear, GitHub, Herdr and Codex boundaries and exercise Git safety and
-authoritative remote lookup in temporary repositories with a local fake remote.
-They cover handoff ordering/failures, exact context, mutable titles, ambiguity,
-slices, squash-merge history and stale tracking refs. They need no API key,
-network access, or real Herdr workspaces.
+Tests mock Linear, GitHub, Herdr, Codex RPC, and process boundaries and exercise Git
+safety and authoritative remote lookup in temporary repositories with a local fake
+remote. Controlled acceptance coverage drives the normal task-start semantics and
+exact handoff construction through both Codex and Pi adapters, including Pi's
+separate startup and prompt submission. It also covers pre-existing Pi activity,
+model-specific thinking-level clamping, purpose-specific handoffs, option
+precedence, unsupported combinations, handoff ordering/failures, exact context,
+mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
+Tests need no API key, network access, agent installation, or real Herdr workspaces.
