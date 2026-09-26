@@ -141,6 +141,9 @@ class AgentTests(unittest.TestCase):
         self.workspace = Workspace("dev-7-old", Path("/exact/checkout"), "w6", "w6:t8", "w6:p20", "ready")
         self.issue = ISSUE
         self.codex = Codex(AgentOptions("codex", "custom/model", "high"))
+        clear_input_patcher = patch.object(self.codex, "clear_shell_input")
+        self.clear_shell_input = clear_input_patcher.start()
+        self.addCleanup(clear_input_patcher.stop)
         self.rpc = MagicMock()
         for target, value in [("CodexRPC", None), ("uuid4", self.message_id)]:
             patcher = patch("task_start.agent." + target, return_value=value)
@@ -204,6 +207,7 @@ class AgentTests(unittest.TestCase):
             result = self.run_launch()
         self.assertEqual(result.turn_id, self.turn_id)
         self.assertEqual(result.session_id, self.thread_id)
+        self.clear_shell_input.assert_called_once_with(self.workspace)
         calls = [c.args[0] for c in run.call_args_list]
         self.assertEqual(calls[1][4:], ["--kind", "codex", "--pane", "w6:p20", "--timeout", "30000", "--", *self.args[1:]])
         self.assertEqual(calls[2:], [["herdr", "agent", "get", "w6:p20"]] * 2)
@@ -211,6 +215,63 @@ class AgentTests(unittest.TestCase):
         self.rpc.request.assert_any_call("thread/queue/add", dict(threadId=self.thread_id,
             clientUserMessageId=self.message_id, input=[dict(type="text", text=self.prompt, text_elements=[])]))
         self.assertFalse(any(c.args[0] in {"thread/start", "thread/resume", "turn/start"} for c in self.rpc.request.call_args_list))
+
+    def test_stale_pi_fragment_is_cleared_before_codex_launch(self):
+        process = dict(type="pane_process_info", process_info=dict(pane_id="w6:p20",
+                       shell_pid=123, foreground_process_group_id=123,
+                       foreground_processes=[dict(pid=123, name="bash", argv=["/bin/bash"])]))
+        shell_input = "pi"
+        canceled_inputs = []
+        launch_argvs = []
+
+        def response(result):
+            return json.dumps(dict(result=result))
+
+        def herdr(args):
+            nonlocal shell_input
+            if args[:3] == ["herdr", "pane", "list"]:
+                return response(self.results[0])
+            if args[:3] == ["herdr", "pane", "process-info"]:
+                return response(process)
+            if args[:3] == ["herdr", "pane", "send-keys"]:
+                self.assertEqual(args[3:], ["w6:p20", "ctrl+c"])
+                canceled_inputs.append(shell_input)
+                shell_input = ""
+                return ""
+            if args[:3] == ["herdr", "agent", "start"]:
+                separator = args.index("--")
+                executable = shell_input + args[args.index("--kind") + 1]
+                shell_input = ""
+                argv = [executable, *args[separator + 1:]]
+                launch_argvs.append(argv)
+                if executable != "codex":
+                    raise TaskError(f"{executable}: command not found")
+                return response(dict(self.results[1], argv=argv))
+            if args[:3] == ["herdr", "agent", "get"]:
+                return response(self.results[2])
+            self.fail(f"Unexpected Herdr call: {args}")
+
+        with patch("task_start.agent.run", side_effect=herdr):
+            # Reproduce the regression: without the preflight/Ctrl+C, Herdr
+            # appends canonical `codex` to the shell's unsubmitted `pi`.
+            with self.assertRaisesRegex(TaskError, "picodex"):
+                self.run_launch()
+            self.assertEqual(launch_argvs[0], ["picodex", *self.args[1:]])
+            self.assertEqual(canceled_inputs, [])
+            self.assertFalse(self.queued)
+
+            # Seed the same terminal state and exercise the production preflight.
+            self.reset_fixture()
+            shell_input = "pi"
+            self.clear_shell_input.reset_mock()
+            self.clear_shell_input.side_effect = lambda workspace: type(self.codex).clear_shell_input(
+                self.codex, workspace)
+            result = self.run_launch()
+
+        self.assertEqual(result.turn_id, self.turn_id)
+        self.assertEqual(canceled_inputs, ["pi"])
+        self.assertEqual(launch_argvs[1], self.args)
+        self.assertNotIn("picodex", launch_argvs[1])
 
     def test_no_task_goes_through_terminal_arguments(self):
         with patch.object(self.codex, "command", side_effect=self.results) as command:
@@ -228,6 +289,7 @@ class AgentTests(unittest.TestCase):
         with patch.object(self.codex, "command", side_effect=self.results) as command, self.assertRaisesRegex(TaskError, "already occupies.*w6:p99"):
             self.run_launch()
         command.assert_called_once_with("pane", "list", "--workspace", "w6")
+        self.clear_shell_input.assert_not_called()
         self.factory.assert_not_called()
 
     def test_mismatched_start_response_prevents_queue(self):
@@ -675,6 +737,7 @@ class ControlledTaskStartAcceptanceTests(unittest.TestCase):
         rpc_factory.return_value.__enter__.return_value = rpc
         with patch("task_start.agent.uuid4", return_value=message_id), \
                 patch("task_start.agent.CodexRPC", rpc_factory), \
+                patch.object(Codex, "clear_shell_input") as clear_shell_input, \
                 patch.object(Codex, "command", side_effect=codex_results):
             codex_output = cli.start("DEV-7")
 
@@ -696,6 +759,7 @@ class ControlledTaskStartAcceptanceTests(unittest.TestCase):
             pi_output = cli.start("DEV-7", agent_kind="pi")
 
         self.assertEqual(codex_handoff, prompt)
+        clear_shell_input.assert_called_once_with(self.workspace)
         self.assertEqual(pi_command.call_args_list[1].args[-len(pi_args):], tuple(pi_args))
         self.assertNotIn(prompt, pi_command.call_args_list[1].args)
         self.assertEqual(pi_command.call_args_list[3].args,

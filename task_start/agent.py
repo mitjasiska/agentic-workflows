@@ -125,6 +125,7 @@ class HerdrAgentAdapter:
     def command(self, group: str, operation: str, *args: str) -> dict:
         output = run(["herdr", group, operation, *args])
         expected = {("pane", "list"): "pane_list", ("agent", "start"): "agent_started",
+                    ("pane", "process-info"): "pane_process_info",
                     ("agent", "get"): "agent_info", ("agent", "prompt"): "agent_prompted"}
         try:
             payload = json.loads(output)
@@ -204,6 +205,20 @@ class CodexAdapter(HerdrAgentAdapter):
             args.extend(["--config", "model_reasoning_effort=" + json.dumps(mode)])
         return [*args, "--", bootstrap]
 
+    def clear_shell_input(self, workspace: Workspace) -> None:
+        # A prior interrupted launch can leave an executable fragment in the
+        # reusable shell's input buffer. Cancel it so Herdr's canonical `codex`
+        # command cannot be appended to stale text (for example, `pi` + `codex`).
+        process = self.command("pane", "process-info", "--pane", workspace.pane_id)["process_info"]
+        foreground = process["foreground_processes"]
+        shell_pid = process["shell_pid"]
+        if (process["pane_id"] != workspace.pane_id or not isinstance(shell_pid, int)
+                or shell_pid <= 0 or process["foreground_process_group_id"] != shell_pid
+                or not isinstance(foreground, list) or len(foreground) != 1
+                or foreground[0]["pid"] != shell_pid):
+            raise ValueError("Codex target is not at an interactive shell prompt")
+        run(["herdr", "pane", "send-keys", workspace.pane_id, "ctrl+c"])
+
     def launch(self, execution: AgentExecution) -> LaunchResult:
         self.validate_execution(execution)
         workspace = execution.workspace
@@ -212,6 +227,7 @@ class CodexAdapter(HerdrAgentAdapter):
         thread_id = None
         try:
             self.check_target(workspace)
+            self.clear_shell_input(workspace)
             # A native, single-line readiness turn survives Codex startup dialogs.
             # Its nonce binds the returned Codex thread to this precise launch.
             message_id = str(uuid4())
