@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import tomllib
+from typing import Mapping
 
 from . import TaskError
 
@@ -32,6 +33,7 @@ class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
     agent: AgentConfig | None = None
+    codex_repository_profiles: Mapping[str, str] = field(default_factory=dict)
 
 
 def read_toml(path: Path) -> dict:
@@ -62,7 +64,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         if not root.is_absolute():
             raise TaskError("projects_root must be absolute (or start with ~)")
         agent = None if no_agent else agent_config(data.get("agent"))
-        return LocalConfig(root.resolve(), api_key, agent)
+        profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
+        return LocalConfig(root.resolve(), api_key, agent, profiles)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 
@@ -94,6 +97,30 @@ def agent_config(data: dict | None) -> AgentConfig | None:
             raise TaskError(f"agent.{mode_key} must be a lowercase execution mode without whitespace")
         mode = mode.strip()
     return AgentConfig(kind, model, mode)
+
+
+def codex_repository_profiles(data: dict | None) -> dict[str, str]:
+    """Read exact repository-to-profile selections from machine-local config."""
+    if data is None:
+        return {}
+    if not isinstance(data, dict) or set(data) - {"repositories"}:
+        raise TaskError("[codex] supports only the repositories table")
+    repositories = data.get("repositories", {})
+    if not isinstance(repositories, dict):
+        raise TaskError("codex.repositories must be a table")
+
+    profiles = {}
+    for repository, override in repositories.items():
+        if (not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repository)):
+            raise TaskError("codex repository names must be portable directory names")
+        if not isinstance(override, dict) or set(override) != {"profile"}:
+            raise TaskError(f"codex.repositories.{repository} requires only profile")
+        profile = required_text(override, "profile")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", profile):
+            raise TaskError("Codex profile must be a portable name without path or option syntax")
+        profiles[repository] = profile
+    return profiles
 
 
 def load_projects(path: Path = REGISTRY) -> list[Project]:
