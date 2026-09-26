@@ -12,3 +12,8 @@ kind = "codex"
 model = "gpt-6-astra"
 # Workflow mode means Codex reasoning effort or Pi thinking level.
 mode = "high"
+
+# Optional Codex-only override for a repository you explicitly trust. The value
+# names $CODEX_HOME/agentic-workflows-trusted.config.toml; see the README.
+# [codex.repositories."agentic-workflows"]
+# profile = "agentic-workflows-trusted"

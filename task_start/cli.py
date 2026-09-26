@@ -4,7 +4,7 @@ import sys
 
 from . import TaskError
 from .agent import (AgentExecution, AgentOverrides, adapter_for,
-                    resolve_agent_options)
+                    codex_repository_policy, resolve_agent_options)
 from .config import load_local, load_projects, repository_path, resolve_project
 from .handoff import implementation_handoff
 from .linear import Linear
@@ -75,8 +75,10 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
     except TaskError as error:
         raise TaskError(f"Workspace ready on {workspace.branch}, but status update failed: {error}") from None
     if agent:
+        policy = (codex_repository_policy(local.codex_repository_profiles, project.repo_name)
+                  if options.kind == "codex" else {})
         execution = AgentExecution(issue, repo, workspace, options,
-                                   implementation_handoff(issue, workspace))
+                                   implementation_handoff(issue, workspace), policy=policy)
         status = agent.launch(execution).summary
     else:
         status = "skipped (--no-agent)"

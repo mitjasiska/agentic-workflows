@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 
 from task_start import TaskError, cli
 from task_start.agent import (AgentExecution, AgentOptions, AgentOverrides, Codex,
-                              LaunchResult, Pi, adapter_for, resolve_agent_options)
-from task_start.config import AgentConfig, agent_config, load_local
+                              LaunchResult, Pi, adapter_for, codex_repository_policy,
+                              resolve_agent_options)
+from task_start.config import (AgentConfig, agent_config, codex_repository_profiles,
+                               load_local)
 from task_start.handoff import IMPLEMENTATION_INSTRUCTIONS, implementation_handoff
 from task_start.linear import Linear
 from task_start.workspace import Workspace, slice_slug
@@ -74,6 +76,47 @@ class ConfigurationAndInputTests(unittest.TestCase):
             self.assertEqual(load_local(path).agent, AgentConfig("codex", "gpt-6-sol", "max"))
             path.write_text(base + '[agent]\nkind = "other"\n')
             self.assertIsNone(load_local(path, no_agent=True).agent)
+
+    def test_codex_repository_profiles_are_explicit_and_exact(self):
+        data = {"repositories": {
+            "agentic-workflows": {"profile": "agentic-workflows-trusted"},
+            "other.repo": {"profile": "other_profile"},
+        }}
+        expected = {"agentic-workflows": "agentic-workflows-trusted",
+                    "other.repo": "other_profile"}
+        self.assertEqual(codex_repository_profiles(data), expected)
+        self.assertEqual(codex_repository_policy(expected, "agentic-workflows"),
+                         {"codex_profile": "agentic-workflows-trusted"})
+        self.assertEqual(codex_repository_policy(expected, "unlisted"), {})
+
+    def test_invalid_codex_repository_profiles_fail_closed(self):
+        cases = [
+            [],
+            {"unknown": {}},
+            {"repositories": []},
+            {"repositories": {"../escape": {"profile": "safe"}}},
+            {"repositories": {"repo": "profile"}},
+            {"repositories": {"repo": {}}},
+            {"repositories": {"repo": {"profile": 3}}},
+            {"repositories": {"repo": {"profile": "../escape"}}},
+            {"repositories": {"repo": {"profile": "-option"}}},
+            {"repositories": {"repo": {"profile": "safe", "sandbox": "danger-full-access"}}},
+        ]
+        for data in cases:
+            with self.subTest(data=data), self.assertRaises(TaskError):
+                codex_repository_profiles(data)
+
+    def test_local_config_loads_profile_but_no_agent_skips_launch_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            base = (f'projects_root = {json.dumps(directory)}\n[linear]\n'
+                    'api_key = "placeholder"\n[agent]\nkind = "codex"\n')
+            path.write_text(base + '[codex.repositories."agentic-workflows"]\n'
+                            'profile = "agentic-workflows-trusted"\n')
+            self.assertEqual(load_local(path).codex_repository_profiles,
+                             {"agentic-workflows": "agentic-workflows-trusted"})
+            path.write_text(base + '[codex.repositories.repo]\nprofile = "../invalid"\n')
+            self.assertEqual(load_local(path, no_agent=True).codex_repository_profiles, {})
 
     def test_slice_normalization_and_flags(self):
         for value in ["codex-handoff", "Codex Handoff", "  Codéx__Handoff  "]:
@@ -197,9 +240,11 @@ class AgentTests(unittest.TestCase):
             return dict(queuedSubmission=dict(id="queue-id", clientUserMessageId=params["clientUserMessageId"], input=params["input"]))
         self.fail("Unexpected session operation " + method)
 
-    def run_launch(self):
+    def run_launch(self, *, policy=None, purpose="implementation", handoff=None):
+        prompt = self.prompt if handoff is None else handoff
         execution = AgentExecution(self.issue, Path("/resolved/repository"), self.workspace,
-                                   self.codex.options, self.prompt)
+                                   self.codex.options, prompt, purpose=purpose,
+                                   policy=policy or {})
         return self.codex.launch(execution)
 
     def test_exact_workspace_model_reasoning_and_confirmed_task(self):
@@ -272,6 +317,35 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(canceled_inputs, ["pi"])
         self.assertEqual(launch_argvs[1], self.args)
         self.assertNotIn("picodex", launch_argvs[1])
+
+    def test_trusted_repository_profile_is_the_only_permission_launch_override(self):
+        policy = {"codex_profile": "agentic-workflows-trusted"}
+        self.results[1]["argv"] = ["codex", "--cd", "/exact/checkout", "--profile",
+                                    "agentic-workflows-trusted", "--model", "custom/model",
+                                    "--config", 'model_reasoning_effort="high"', "--", self.bootstrap]
+        with patch.object(self.codex, "command", side_effect=self.results) as command:
+            self.run_launch(policy=policy)
+        launch = command.call_args_list[1].args
+        self.assertEqual(launch[-len(self.results[1]["argv"]) + 1:],
+                         tuple(self.results[1]["argv"][1:]))
+        self.assertNotIn("--sandbox", launch)
+        self.assertNotIn("--ask-for-approval", launch)
+
+    def test_implementation_and_review_share_repository_profile_not_handoff(self):
+        policy = {"codex_profile": "agentic-workflows-trusted"}
+        implementation = AgentExecution(self.issue, Path("/resolved/repository"), self.workspace,
+                                        self.codex.options, self.prompt, policy=policy)
+        review = replace(implementation, purpose="review",
+                         handoff="Review the prepared changes and report findings only.")
+        self.assertEqual(self.codex.launch_args(implementation, self.bootstrap),
+                         self.codex.launch_args(review, self.bootstrap))
+        self.assertNotEqual(implementation.handoff, review.handoff)
+
+    def test_invalid_profile_policy_cannot_become_cli_syntax(self):
+        for profile in ["../escape", "-option", "contains space", 3]:
+            with self.subTest(profile=profile), self.assertRaisesRegex(TaskError, "portable name"):
+                self.run_launch(policy={"codex_profile": profile})
+        self.factory.assert_not_called()
 
     def test_no_task_goes_through_terminal_arguments(self):
         with patch.object(self.codex, "command", side_effect=self.results) as command:
@@ -791,6 +865,22 @@ class HandoffOrchestrationTests(unittest.TestCase):
                 self.assertEqual(execution.options, expected)
                 self.assertEqual(execution.repository, Path("/projects/knowledge-base").resolve())
                 self.assertEqual(execution.purpose, "implementation")
+
+    def test_only_codex_gets_exact_repository_profile_policy(self):
+        local = replace(LOCAL, codex_repository_profiles={
+            "knowledge-base": "knowledge-base-trusted",
+            "other-repository": "other-trusted",
+        })
+        with patch("task_start.cli.load_local", return_value=local):
+            cli.start("DEV-7")
+        execution = self.agent.launch.call_args.args[0]
+        self.assertEqual(execution.policy, {"codex_profile": "knowledge-base-trusted"})
+
+        self.agent.reset_mock()
+        self.agent.launch.return_value = LaunchResult("pi", "w7:p8", "working")
+        with patch("task_start.cli.load_local", return_value=local):
+            cli.start("DEV-7", agent_kind="pi")
+        self.assertEqual(self.agent.launch.call_args.args[0].policy, {})
 
     def test_no_agent_conflicts_with_execution_overrides_before_mutation(self):
         for kwargs in [{"agent_kind": "pi"}, {"model": "model"}, {"mode": "high"}]:

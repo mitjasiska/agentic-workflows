@@ -45,7 +45,7 @@ Descriptions use Linear's API Markdown form `+++ Section title … +++` for coll
 Requires Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
 Agent handoff also requires the selected, authenticated Codex or Pi CLI on `PATH`.
 The commands and JSON responses were checked against Herdr 0.9.1 and Codex CLI
-0.157.0. Pi transport was checked against Pi CLI 0.87.1 and Herdr 0.9.1;
+0.157.1. Pi transport was checked against Pi CLI 0.87.1 and Herdr 0.9.1;
 run `pi --help` to verify the installed interface.
 
 1. Clone `agentic-workflows` and your project repositories.
@@ -114,6 +114,65 @@ Pi-specific values. Precedence is command override, then `[agent]`, then the
 selected CLI's local default for an omitted model or mode. An unavailable or
 unknown requested agent fails; there is no fallback to Codex.
 
+## Codex permissions for trusted repositories
+
+Agentic Workflows does not relax Codex permissions globally. With no repository
+override, the adapter passes no profile, sandbox, approval, or network option, so
+Codex's active defaults and machine configuration continue to apply. Model and
+reasoning choices are independent of permissions.
+
+A repository that genuinely needs unattended implementation can opt into one
+named Codex configuration profile in the machine-local
+`~/.agentic-workflows/config.toml`. The key is the exact `repo_name` from
+`config/projects.toml`, not a checkout or worktree path. For this repository:
+
+```toml
+[codex.repositories."agentic-workflows"]
+profile = "agentic-workflows-trusted"
+```
+
+Create the selected profile beside Codex's user config. With the usual
+`CODEX_HOME`, the example above names
+`~/.codex/agentic-workflows-trusted.config.toml`:
+
+```toml
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+```
+
+This exact combination was verified with Codex CLI 0.157.1. Agentic Workflows
+launches it as `codex --cd WORKTREE --profile agentic-workflows-trusted ...`;
+Codex loads and enforces the profile. `workspace-write` limits writes to the task
+workspace and Codex's temporary roots while keeping protected paths such as
+`.git` and `.codex` read-only. Network access permits commands inside that sandbox
+to use outbound networking. `approval_policy = "never"` suppresses approval
+prompts; an operation outside the sandbox fails and is returned to the agent
+instead of escaping the sandbox. This setup does not use `danger-full-access` or
+the bypass flag. See Codex's focused documentation for
+[configuration profiles](https://developers.openai.com/codex/config-basic) and
+[sandbox/approval behavior](https://developers.openai.com/codex/security).
+
+Treat the override as a trust decision: the selected profile is layered on the
+machine's Codex configuration and can expose repository content to processes and
+network destinations used by the task. Keep the selection and profile file local;
+do not commit populated local configuration, credentials, or approval state. An
+unlisted repository receives no override, even if it uses the same agent or model.
+
+Codex enforces filesystem, network, and approval boundaries. The task handoff's
+rules—no commit, push, merge, pull request, `sudo`, or destructive Git
+operations—are behavioral instructions, not hard sandbox rules. Implementation
+and future review commands may use the same trusted-repository profile; they stay
+separate through fresh sessions, `AgentExecution.purpose`, and purpose-specific
+handoffs, not through separate permission profiles.
+
+This is deliberately a small Codex-only setup. Pi enforcement, cross-agent
+capability mapping, stronger credential isolation, containers or external
+sandboxing, a dedicated review profile, generalized command rules, and a broader
+security framework remain out of scope.
+
 A repository is resolved as `projects_root / repo_name`. Each must be its permanent Git checkout, already on the configured base branch, with a clean working tree (including untracked files) and no unfinished Git operation. The base must track a same-named branch on a remote. `task start` fetches that upstream into `FETCH_HEAD` and updates using `merge --ff-only`; it refuses local-only commits or divergence. It does not switch, stash, reset, or force-update branches.
 
 The command loads the current issue through [Linear's GraphQL API](https://linear.app/developers/graphql), resolves the project, updates the base, and asks Herdr to create or focus a worktree. Herdr chooses its location. New default branches start with the lowercase issue identifier and a title slug (up to 100 characters). The identifier is the stable identity: renaming a Linear title never renames an existing branch or creates a replacement workspace.
@@ -171,7 +230,8 @@ Responsibility is split as follows:
   agent-specific launch validation. Agent-specific capability should stay there
   instead of being forced into the shared contract.
 - Machine-local configuration owns credentials, paths, the default agent/model/
-  mode, and each CLI's authentication, trust, provider, and permission settings.
+  mode, repository-to-Codex-profile selections, and each CLI's authentication,
+  trust, provider, and permission settings.
 - Linear content owns task-specific intent and constraints. It is fetched fresh,
   transported in memory, and is never copied into tracked repository files.
 
@@ -264,7 +324,7 @@ with a unique message ID. History polling must find the same session, checkout,
 message ID, exact text, and a turn ID before success. The helper never creates,
 resumes, or executes a model session and exits after confirmation. No shared daemon
 or service is installed. These APIs (including the experimental queue endpoint)
-were validated with Codex CLI 0.157.0; unsupported or malformed responses fail
+were validated with Codex CLI 0.157.1; unsupported or malformed responses fail
 clearly.
 
 Herdr's `interactive_ready` and `working` states alone do not prove a Codex turn:

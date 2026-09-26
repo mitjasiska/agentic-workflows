@@ -96,6 +96,12 @@ def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides)
     return AgentOptions(kind, model, mode)
 
 
+def codex_repository_policy(profiles: Mapping[str, str], repository: str) -> dict[str, str]:
+    """Translate one explicit local repository override into adapter policy."""
+    profile = profiles.get(repository)
+    return {"codex_profile": profile} if profile is not None else {}
+
+
 class HerdrAgentAdapter:
     """Shared Herdr transport; subclasses own executable arguments and prompt injection."""
 
@@ -196,8 +202,20 @@ class CodexAdapter(HerdrAgentAdapter):
         if mode is not None and mode not in self.MODES:
             raise TaskError("Codex mode must be none/off, minimal, low, medium, high, xhigh, max, or ultra")
 
-    def launch_args(self, workspace: Workspace, bootstrap: str) -> list[str]:
+    def validate_execution(self, execution: AgentExecution) -> None:
+        super().validate_execution(execution)
+        profile = execution.policy.get("codex_profile")
+        if (profile is not None
+                and (not isinstance(profile, str)
+                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", profile))):
+            raise TaskError("Codex profile must be a portable name without path or option syntax")
+
+    def launch_args(self, execution: AgentExecution, bootstrap: str) -> list[str]:
+        workspace = execution.workspace
         args = ["--cd", str(workspace.path)]
+        profile = execution.policy.get("codex_profile")
+        if profile is not None:
+            args.extend(["--profile", profile])
         if self.options.model is not None:
             args.extend(["--model", self.options.model])
         if self.options.mode is not None:
@@ -233,7 +251,7 @@ class CodexAdapter(HerdrAgentAdapter):
             message_id = str(uuid4())
             bootstrap = (f"Handoff readiness {message_id}. Do not use tools or modify files. "
                          "Reply READY, then wait for the task prompt.")
-            args = self.launch_args(workspace, bootstrap)
+            args = self.launch_args(execution, bootstrap)
             # Verify the receipt API can initialize before starting a terminal agent.
             with CodexRPC(workspace.path) as rpc:
                 started = self.start_agent(workspace, args)

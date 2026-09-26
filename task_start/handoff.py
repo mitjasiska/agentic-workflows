@@ -11,6 +11,7 @@ IMPLEMENTATION_INSTRUCTIONS = """- Treat the task above as the source of truth.
 - Implement only the requested scope.
 - Run relevant tests and practical validation.
 - Do not commit, push, merge, or open a PR.
+- Do not use sudo or destructive Git operations.
 - Stop when the implementation is ready for independent review.
 - Work in the prepared checkout below; do not create another branch or worktree.
 - Do not connect to Linear, re-fetch this issue, or read Linear credentials or the local workflow config.
