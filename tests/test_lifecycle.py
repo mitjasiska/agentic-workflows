@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 from task_start import TaskError, cli
-from task_start.agent import task_prompt
+from task_start.agent import LaunchResult
 from task_start.config import LocalConfig, Project
 from task_start.github import check_history, repository_name
 from task_start.workspace import Git, Herdr
@@ -319,17 +319,21 @@ class RemoteGitIntegrationTests(unittest.TestCase):
         project = Project(baseline.ISSUE.project, self.repo.name, "main")
         with patch("task_start.cli.load_local", return_value=local), \
                 patch("task_start.cli.load_projects", return_value=[project]), \
-                patch("task_start.cli.Linear") as linear, patch("task_start.cli.Codex") as agent, \
+                patch("task_start.cli.Linear") as linear, patch("task_start.cli.adapter_for") as factory, \
                 patch.object(Herdr, "command", side_effect=respond), patch.object(Git, "check_history"):
             linear.return_value.get_issue.return_value = baseline.ISSUE
+            agent = factory.return_value
+            agent.launch.return_value = LaunchResult("codex", "w4:p9", "working")
             cli.start("DEV-7", slice="importer")
             linear.return_value.get_issue.return_value = replace(baseline.ISSUE, title="Completely renamed issue")
             cli.start("DEV-7")
-        selected = [call.args[0] for call in agent.return_value.launch.call_args_list]
+        executions = [call.args[0] for call in agent.launch.call_args_list]
+        selected = [execution.workspace for execution in executions]
         self.assertEqual(len(selected), 2)
-        for workspace, prompt in [call.args for call in agent.return_value.launch.call_args_list]:
+        for execution in executions:
+            workspace = execution.workspace
             self.assertEqual((workspace.path, workspace.branch, workspace.slice), (path, branch, "importer"))
-            self.assertIn("Slice: importer\nImplement only this slice of the task.", prompt)
+            self.assertIn("Slice: importer\nImplement only this slice of the task.", execution.handoff)
         self.assertEqual(operations, ["list", "create", "list", "open"])
         self.assertEqual(selected[0].workspace_id, selected[1].workspace_id)
         self.assertEqual(len(self.git.worktrees()), 2)

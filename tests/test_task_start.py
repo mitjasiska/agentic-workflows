@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 
 from task_start import TaskError
 from task_start import cli
+from task_start.agent import LaunchResult
 from task_start.config import AgentConfig, LocalConfig, Project, load_local, load_projects, repository_path, resolve_project
 from task_start.linear import Issue, Linear
 from task_start.workspace import Git, Herdr, Workspace, branch_name, run
@@ -368,8 +369,8 @@ class OrchestrationTests(unittest.TestCase):
         self.herdr = self.enterContext(patch("task_start.cli.Herdr")).return_value
         self.workspace = Workspace("dev-7-add-ingestion-cli", Path("/selected/worktree"), "w7", "w7:t5", "w7:p8", "workspace created and focused")
         self.herdr.prepare.return_value = self.workspace
-        self.agent = self.enterContext(patch("task_start.cli.Codex")).return_value
-        self.agent.launch.return_value = "Codex working in w7:p8"
+        self.agent = self.enterContext(patch("task_start.cli.adapter_for")).return_value
+        self.agent.launch.return_value = LaunchResult("codex", "w7:p8", "Codex working in w7:p8")
 
     def test_order_and_concise_output(self):
         operations = Mock()

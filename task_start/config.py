@@ -18,8 +18,13 @@ class Project:
 @dataclass(frozen=True)
 class AgentConfig:
     kind: str
-    model: str
-    reasoning: str
+    model: str | None = None
+    mode: str | None = None
+
+    @property
+    def reasoning(self) -> str | None:
+        """Compatibility name for configurations written before workflow modes."""
+        return self.mode
 
 
 @dataclass(frozen=True)
@@ -67,15 +72,28 @@ def agent_config(data: dict | None) -> AgentConfig | None:
     if data is None:
         return None
     kind = required_text(data, "kind")
-    if kind != "codex":
-        raise TaskError("agent.kind must be codex")
-    model = required_text(data, "model")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model):
-        raise TaskError("agent.model must be a Codex model name without whitespace or control characters")
-    reasoning = required_text(data, "reasoning")
-    if reasoning not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
-        raise TaskError("agent.reasoning must be none, minimal, low, medium, high, xhigh, max, or ultra")
-    return AgentConfig(kind, model, reasoning)
+    if not re.fullmatch(r"[a-z][a-z0-9_-]*", kind):
+        raise TaskError("agent.kind must be a lowercase agent name such as codex or pi")
+
+    model = data.get("model")
+    if model is not None:
+        if (not isinstance(model, str) or not model.strip()
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@*+-]*", model.strip())):
+            raise TaskError("agent.model must be a model name without whitespace or control characters")
+        model = model.strip()
+
+    # `reasoning` was the original Codex-shaped field. `mode` is the
+    # agent-independent spelling; accepting exactly one makes migration explicit.
+    if "mode" in data and "reasoning" in data:
+        raise TaskError("[agent] must use either mode or legacy reasoning, not both")
+    mode_key = "mode" if "mode" in data else "reasoning"
+    mode = data.get(mode_key)
+    if mode is not None:
+        if (not isinstance(mode, str) or not mode.strip()
+                or not re.fullmatch(r"[a-z][a-z0-9_-]*", mode.strip())):
+            raise TaskError(f"agent.{mode_key} must be a lowercase execution mode without whitespace")
+        mode = mode.strip()
+    return AgentConfig(kind, model, mode)
 
 
 def load_projects(path: Path = REGISTRY) -> list[Project]:
