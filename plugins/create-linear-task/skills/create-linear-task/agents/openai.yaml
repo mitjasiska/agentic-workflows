@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Linear Task"
+  short_description: "Draft agent-ready Linear development tasks"
+  default_prompt: "Use $create-linear-task to turn this rough development idea into a concise, agent-ready Linear issue."
