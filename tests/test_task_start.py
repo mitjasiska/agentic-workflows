@@ -20,7 +20,7 @@ from task_start.workspace import Git, Herdr, Workspace, branch_name, run
 
 
 PROJECT = Project("KnowledgeBase", "knowledge-base", "main")
-ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started")
+ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started", state_type="unstarted")
 # Deliberately not an API key; no real credentials are used by these tests.
 LOCAL = LocalConfig(Path("/projects"), "test-placeholder", AgentConfig("codex", "gpt-6-astra", "high"))
 
@@ -30,7 +30,7 @@ def issue_data():
         "id": "issue-id", "identifier": "DEV-7", "title": "Add ingestion CLI",
         "description": "",
         "project": {"id": "project-id", "name": "KnowledgeBase"},
-        "state": {"id": "todo", "name": "Todo"},
+        "state": {"id": "todo", "name": "Todo", "type": "unstarted"},
         "team": {"id": "team-id", "states": {
             "nodes": [{"id": "todo", "name": "Todo"}, {"id": "started", "name": "In Progress"}],
             "pageInfo": {"hasNextPage": False},
@@ -48,7 +48,7 @@ class ParsingTests(unittest.TestCase):
         for args in (["start", value] for value in ["DEV", "DEV-0", "DEV-07", "-7", "../DEV-7", "DEV-7;ls", "DEV-7\n"]):
             with self.subTest(args=args), patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args(args)
-        for command in ["review", "cleanup"]:
+        for command in ["review"]:
             with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args([command, "DEV-7"])
 

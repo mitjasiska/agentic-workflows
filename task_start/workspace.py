@@ -7,7 +7,7 @@ import subprocess
 import unicodedata
 
 from . import TaskError
-from .github import check_history, repository_name
+from .github import MergedPull, check_history, merged_pull, repository_name
 
 
 def branch_name(identifier: str, title: str) -> str:
@@ -36,6 +36,20 @@ class Workspace:
     pane_id: str
     action: str
     slice: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskWorktree:
+    branch: str
+    path: Path
+    open_workspace_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CleanupState:
+    branch_commit: str
+    base_commit: str
+    pull: MergedPull | None = None
 
 
 def run(args: list[str]) -> str:
@@ -147,20 +161,45 @@ class Git:
                     branches.add(branch)
         return sorted(branches)
 
-    def check_history(self, base: str, branch: str, *, existing: bool) -> None:
+    def history_remote(self, base: str, branch: str) -> str:
         remote = self.command("config", "--default", "", "--get", f"branch.{base}.remote").strip()
         url = self.command("remote", "get-url", remote).strip()
+        repo_name = repository_name(url)
+        for other in self.command("remote").splitlines():
+            other_url = self.command("remote", "get-url", other).strip()
+            other_repo = repository_name(other_url)
+            if other_url != url and (repo_name is None or other_repo is None
+                                     or other_repo.casefold() != repo_name.casefold()):
+                raise TaskError(f"Cannot establish complete PR history for {branch}: remotes point to "
+                                "different repositories. Inspect cross-repository PR/merge state manually "
+                                "or choose a new --slice; no workspace was opened or deleted")
+        return url
+
+    def check_history(self, base: str, branch: str, *, existing: bool) -> None:
         if existing:
-            repo_name = repository_name(url)
-            for other in self.command("remote").splitlines():
-                other_url = self.command("remote", "get-url", other).strip()
-                other_repo = repository_name(other_url)
-                if other_url != url and (repo_name is None or other_repo is None
-                                         or other_repo.casefold() != repo_name.casefold()):
-                    raise TaskError(f"Cannot establish complete PR history for {branch}: remotes point to "
-                                    "different repositories. Inspect cross-repository PR/merge state manually "
-                                    "or choose a new --slice; no workspace was opened or deleted")
+            url = self.history_remote(base, branch)
+        else:
+            remote = self.command("config", "--default", "", "--get", f"branch.{base}.remote").strip()
+            url = self.command("remote", "get-url", remote).strip()
         check_history(url, branch, existing=existing)
+
+    def cleanup_merge(self, base: str, branch: str) -> CleanupState:
+        head = self.command("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}").strip()
+        base_commit = self.command("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip()
+        if self.command("rev-list", "--count", f"{base_commit}..{head}").strip() == "0":
+            return CleanupState(head, base_commit)
+        try:
+            if self.command("config", "--default", "", "--get", f"branch.{base}.merge").strip() != f"refs/heads/{base}":
+                raise TaskError("Base upstream must match the configured base branch")
+            pull = merged_pull(self.history_remote(base, branch), branch, base, head)
+            # A merged PR is insufficient if the checkout's base is stale or
+            # the resulting commit belongs to some other line of development.
+            if self.command("rev-list", "--count", f"{base_commit}..{pull.merge_commit}").strip() != "0":
+                raise TaskError(f"GitHub PR #{pull.number} merge commit is not present in the expected base {base!r}")
+        except TaskError as error:
+            raise TaskError(f"Task branch {branch!r} is not fully merged into {base!r} by ancestry, "
+                            f"and its PR merge could not be verified: {error}; nothing was removed") from None
+        return CleanupState(head, base_commit, pull)
 
     def worktrees(self) -> list[dict]:
         output = self.command("worktree", "list", "--porcelain", "-z")
@@ -173,6 +212,145 @@ class Git:
                     raise TaskError("Unexpected Git worktree response; inspect workspace state")
                 entries.append(fields)
         return entries
+
+    def check_cleanup_target(self, base: str, target: TaskWorktree, identifier: str) -> None:
+        """Revalidate all local target identity and safety checks without external lookups."""
+        self.check_base(base)
+        path, branch = target.path, target.branch
+        common = Path(self.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        if (branch == base or not belongs_to_issue(branch, identifier)
+                or path == self.repo or self.repo.is_relative_to(path)
+                or common.is_relative_to(path) or path.is_relative_to(common)):
+            raise TaskError("Cleanup target overlaps the permanent checkout or Git metadata; nothing was removed")
+        trees = self.worktrees()
+        matches = [tree for tree in trees if tree.get("branch") == f"refs/heads/{branch}"
+                   or Path(tree["worktree"]).resolve() == path]
+        if (len(matches) != 1 or matches[0].get("branch") != f"refs/heads/{branch}"
+                or Path(matches[0]["worktree"]).resolve() != path
+                or any(flag in matches[0] for flag in ("locked", "prunable", "bare", "detached"))):
+            raise TaskError("Git task worktree registration changed or is unusable; nothing was removed")
+        if any(Path(tree["worktree"]).resolve().is_relative_to(path)
+               for tree in trees if tree is not matches[0]):
+            raise TaskError("Another registered worktree is inside the cleanup target; nothing was removed")
+        checkout = Git(path)
+        git_dir = Path(checkout.command("rev-parse", "--absolute-git-dir").strip()).resolve()
+        if (not (path / ".git").is_file() or git_dir == common
+                or Path(checkout.command("rev-parse", "--show-toplevel").strip()).resolve() != path
+                or Path(checkout.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve() != common
+                or checkout.command("symbolic-ref", "HEAD").strip() != f"refs/heads/{branch}"):
+            raise TaskError("Cleanup checkout does not match its registered repository/branch; nothing was removed")
+        try:
+            if Path(os.fsdecode((git_dir / "gitdir").read_bytes()).rstrip("\n")).resolve() != path / ".git":
+                raise TaskError("Cleanup checkout metadata points to another worktree; nothing was removed")
+        except (OSError, UnicodeError):
+            raise TaskError("Cannot verify cleanup checkout metadata; nothing was removed") from None
+        if not self.scope_file(path).is_file():
+            raise TaskError(f"Cleanup task identity is unknown for {branch!r}: workspace scope metadata is missing; "
+                            "inspect it manually; nothing was removed")
+        self.resolve_scope(path, branch, identifier, None)
+        self.check_task_clean(path, git_dir)
+
+    def check_cleanup(self, base: str, target: TaskWorktree, identifier: str) -> CleanupState:
+        """Check local prerequisites and collect merge evidence without changing task state."""
+        self.check_cleanup_target(base, target, identifier)
+        branch = target.branch
+        state = self.cleanup_merge(base, branch)
+        if state.pull is None and self.command("-c", f"branch.{branch}.remote=", "for-each-ref",
+                                              "--format=%(upstream)", f"refs/heads/{branch}").strip():
+            raise TaskError("Cannot bind safe branch deletion to the permanent base checkout; nothing was removed")
+        return state
+
+    def check_task_clean(self, path: Path, git_dir: Path) -> None:
+        checkout = Git(path)
+        if any(entry and (entry[0].islower() or entry[0] == "S")
+               for entry in checkout.command("ls-files", "-v", "-z").split("\0")):
+            raise TaskError("Task worktree has assume-unchanged or skip-worktree files; "
+                            "cleanliness cannot be verified; nothing was removed")
+        # Unlike normal status, include ignored files: worktree remove would
+        # otherwise discard ignored notes, build output, or local configuration.
+        # Do not let permissive repository settings hide mode/type changes.
+        if checkout.command("-c", "core.fileMode=true", "-c", "core.symlinks=true",
+                            "status", "--porcelain", "--untracked-files=all",
+                            "--ignored", "--ignore-submodules=none").strip():
+            raise TaskError(f"Task worktree is dirty (modified, untracked or ignored files): {path}; nothing was removed")
+        for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
+                       "rebase-apply", "sequencer", "BISECT_LOG"):
+            if (git_dir / marker).exists():
+                raise TaskError("Task worktree has an unfinished Git operation; nothing was removed")
+        # Git refuses non-force removal of worktrees containing submodules.
+        if any(entry.startswith("160000 ") for entry in checkout.command("ls-files", "--stage", "-z").split("\0")):
+            raise TaskError("Task worktree contains submodules; inspect it manually; nothing was removed")
+
+    def describe_worktree_removal(self, path: Path) -> str:
+        # A failed/timed-out command may already have removed the worktree.
+        # Inspect both sources even when one cannot be read. lstat also sees
+        # dangling symlinks, which must not count as an absent checkout path.
+        try:
+            path.lstat()
+            present = True
+        except FileNotFoundError:
+            present = False
+        except OSError:
+            present = None
+        try:
+            registered = any(Path(tree["worktree"]).resolve() == path for tree in self.worktrees())
+        except (TaskError, OSError, RuntimeError):
+            registered = None
+        if present is False and registered is False:
+            return f"Confirmed removed worktree: {path}"
+        if present is True and registered is True:
+            return f"Worktree path is still present and registered (contents may be incomplete): {path}"
+        return f"Worktree removal state is unknown or inconsistent: {path}"
+
+    def remove_task(self, base: str, target: TaskWorktree, identifier: str,
+                    expected: CleanupState) -> None:
+        if self.check_cleanup(base, target, identifier) != expected:
+            raise TaskError("Task, base branch or merge evidence changed during cleanup; nothing was removed")
+        if (self.command("rev-parse", "--verify", f"refs/heads/{target.branch}^{{commit}}").strip(),
+                self.command("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip()) != (
+                    expected.branch_commit, expected.base_commit):
+            raise TaskError("Task or base branch changed during merge verification; nothing was removed")
+        # External evidence can take time: re-read the entire local target,
+        # including registration, symbolic HEAD and scope, immediately before
+        # removal. A clean checkout alone is not proof of its identity.
+        self.check_cleanup_target(base, target, identifier)
+        try:
+            self.command("worktree", "remove", "--", str(target.path))
+        except TaskError as error:
+            state = self.describe_worktree_removal(target.path)
+            raise TaskError(f"Worktree removal command failed or was uncertain: {error}. {state}. "
+                            f"Local branch {target.branch!r} was not deleted; inspect Git state before retrying") from None
+        removal_confirmed = False
+        try:
+            if (target.path.exists() or any(Path(tree["worktree"]).resolve() == target.path
+                                           for tree in self.worktrees())):
+                raise TaskError("Git did not confirm worktree removal")
+            removal_confirmed = True
+            current = (self.command("rev-parse", "--verify", f"refs/heads/{target.branch}^{{commit}}").strip(),
+                       self.command("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip())
+            if current != (expected.branch_commit, expected.base_commit):
+                raise TaskError("Task or base branch changed after worktree removal")
+            # With no upstream, branch -d checks HEAD (the validated base).
+            # Disable tracking only for this invocation; merge is multivalued
+            # and cannot be safely replaced by appending a -c override.
+            if self.command("symbolic-ref", "HEAD").strip() != f"refs/heads/{base}":
+                raise TaskError("Permanent checkout changed branches after worktree removal")
+            if expected.pull is None:
+                self.command("-c", f"branch.{target.branch}.remote=",
+                             "branch", "--delete", "--", target.branch)
+            else:
+                # Squashed commits cannot pass branch -d's ancestry guard.
+                # Use the verified PR proof and atomically require the exact
+                # original head. Never follow a symbolic ref or force-delete.
+                if any(tree.get("branch") == f"refs/heads/{target.branch}" for tree in self.worktrees()):
+                    raise TaskError("Task branch is still checked out in a registered worktree")
+                self.command("update-ref", "--no-deref", "-d", f"refs/heads/{target.branch}", expected.branch_commit)
+        except TaskError as error:
+            worktree_state = (f"Removed worktree: {target.path}" if removal_confirmed else
+                              f"Worktree removal could not be confirmed: {target.path}")
+            raise TaskError(f"Task cleanup is incomplete. {worktree_state}. "
+                            f"Local branch deletion could not be confirmed for {target.branch!r}: {error}. "
+                            "Inspect local state before retrying") from None
 
     def scope_file(self, path: Path) -> Path:
         directory = Git(path).command("rev-parse", "--absolute-git-dir").strip()
@@ -245,8 +423,9 @@ class Herdr:
         except (ValueError, KeyError, TypeError):
             raise TaskError(f"Unexpected Herdr {operation} response; inspect workspace state before retrying") from None
 
-    def prepare(self, git: Git, base: str, branch: str, identifier: str,
-                slice: str | None = None) -> Workspace:
+    def resolve_task(self, git: Git, identifier: str, *, branch: str | None = None,
+                     slice: str | None = None, include_remotes: bool = True) -> TaskWorktree | None:
+        """Select existing state without opening, creating or changing a workspace."""
         label = identifier if slice is None else f"{identifier} / {slice}"
 
         def selected(name: str) -> bool:
@@ -271,7 +450,7 @@ class Herdr:
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TaskError("Unexpected Herdr worktree list") from None
         branches = [b for b in git.branches(identifier) if selected(b)]
-        remotes = [b for b in git.remote_branches(identifier) if selected(b)]
+        remotes = [b for b in git.remote_branches(identifier) if selected(b)] if include_remotes else []
         git_trees = git.worktrees()
         candidates = [w for w in git_trees if selected(w.get("branch", "").removeprefix("refs/heads/"))]
         names = set(branches + remotes + [w.get("branch") or "(detached)" for w in matches]
@@ -279,39 +458,53 @@ class Herdr:
         details = "; ".join(sorted(names))
         paths = "; ".join(w["path"] for w in matches)
         if len(names) > 1:
+            hint = ("Use --slice <branch suffix after the issue ID> to select one, or "
+                    "inspect/retire historical work manually." if include_remotes else
+                    "Inspect Git and Herdr manually.")
             raise TaskError(f"Ambiguous workspaces for {identifier}: {details}. Paths: {paths or '(none)'}. "
-                            "Use --slice <branch suffix after the issue ID> to select one, "
-                            "or inspect/retire historical work manually. Nothing was deleted.")
+                            f"{hint} Nothing was deleted.")
         if not branches and not matches and not candidates:
             if remotes:
                 raise TaskError(f"A live remote branch for {identifier} already exists: {details}; "
                                 "inspect it manually or choose another --slice")
-            git.check_history(base, branch, existing=False)
-            created = self.command("create", "--base", base, "--branch", branch,
-                                   "--label", label, "--focus")
-            workspace = self.confirm(created, branch, "workspace created and focused")
-            self.confirm_git(git, workspace)
-            git.save_scope(workspace.path, branch, identifier, slice)
-            return replace(workspace, slice=slice)
+            return None
         if len(branches) != 1 or len(matches) != 1 or len(candidates) != 1:
             raise TaskError(f"Existing branch/worktree state for {identifier} is ambiguous or branch-only: "
                             f"{details}. Paths: {paths or '(none)'}. Inspect Git and Herdr; nothing was deleted")
         branch = branches[0]
         match, tree = matches[0], candidates[0]
         path = Path(match["path"]).resolve()
+        if path == self.repo or Path(tree["worktree"]).resolve() == self.repo:
+            raise TaskError("The resolved task worktree is the permanent checkout; nothing was removed")
         if (match.get("branch") != branch or tree.get("branch") != f"refs/heads/{branch}"
                 or path != Path(tree["worktree"]).resolve() or not path.is_dir()
+                or sum(Path(w["path"]).resolve() == path for w in entries) != 1
+                or sum(Path(w["worktree"]).resolve() == path for w in git_trees) != 1
                 or match.get("is_linked_worktree") is not True
                 or match.get("is_bare") is not False or match.get("is_detached") is not False
-                or match.get("is_prunable") is not False or "prunable" in tree or "locked" in tree
-                or path == self.repo):
+                or match.get("is_prunable") is not False or "prunable" in tree or "locked" in tree):
             raise TaskError("Git and Herdr do not identify a single usable task worktree; inspect them manually")
+        return TaskWorktree(branch, path, match.get("open_workspace_id"))
+
+    def prepare(self, git: Git, base: str, branch: str, identifier: str,
+                slice: str | None = None) -> Workspace:
+        target = self.resolve_task(git, identifier, branch=branch, slice=slice)
+        if target is None:
+            git.check_history(base, branch, existing=False)
+            label = identifier if slice is None else f"{identifier} / {slice}"
+            created = self.command("create", "--base", base, "--branch", branch,
+                                   "--label", label, "--focus")
+            workspace = self.confirm(created, branch, "workspace created and focused")
+            self.confirm_git(git, workspace)
+            git.save_scope(workspace.path, branch, identifier, slice)
+            return replace(workspace, slice=slice)
+        branch, path = target.branch, target.path
         git.check_history(base, branch, existing=True)
         scope = git.resolve_scope(path, branch, identifier, slice)
         label = identifier if scope is None else f"{identifier} / {scope}"
         opened = self.command("open", "--path", str(path), "--label", label, "--focus")
         workspace = self.confirm(opened, branch, "workspace reopened and focused", path)
-        if match.get("open_workspace_id") is not None and workspace.workspace_id != match["open_workspace_id"]:
+        if target.open_workspace_id is not None and workspace.workspace_id != target.open_workspace_id:
             raise TaskError("Herdr opened a different workspace ID; inspect it before retrying")
         self.confirm_git(git, workspace)
         git.save_scope(path, branch, identifier, scope)

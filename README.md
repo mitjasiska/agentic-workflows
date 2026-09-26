@@ -244,8 +244,8 @@ target the shared boundary unless behavior genuinely belongs to one agent.
 An existing workspace is reused only when Git and Herdr agree on one usable branch
 and checkout. Dirty task worktrees are preserved; the permanent base checkout
 must remain clean. Branch-only, locked, prunable, inconsistent, or ambiguous state
-stops with an error. No branch, worktree, workspace, or session is deleted by this
-workflow. Scope is recorded in `agentic-workflows-scope.json` in the worktree's
+stops with an error. `task start` never deletes a branch, worktree, workspace, or
+session. Scope is recorded in `agentic-workflows-scope.json` in the worktree's
 private Git directory (`git rev-parse --absolute-git-dir`), outside tracked files.
 The record contains only its version, issue identifier, branch and slice name
 (or explicit `null` for a default workspace), never the Linear description.
@@ -361,6 +361,57 @@ started. There is no automatic resubmission, fallback agent/session, or killing 
 a potentially working agent. Do not run simultaneous starts for the same repository
 or edit its base checkout during a start.
 
+## Task cleanup
+
+After a task is completed and its branch is merged into the configured local base:
+
+```sh
+task cleanup DEV-7
+```
+
+Cleanup uses the same Linear project/repository mapping and Git/Herdr workspace
+resolver as `task start`. It requires Linear's `completed` state type, regardless
+of the status display name. The issue identifier, registered branch, checkout,
+and recorded task scope must agree; the current title and filesystem naming are
+not used to locate the worktree. Exactly one local task branch and one matching
+registered Herdr worktree are required. Multiple slices are refused.
+
+The permanent checkout must be clean and on the configured base. Cleanup checks
+the local base without fetching or updating it; update it separately if needed.
+If the task tip is reachable from that base, Git ancestry proves the merge.
+Otherwise cleanup uses the existing GitHub PR-history lookup for the base's
+upstream repository. It requires exactly one PR for the task branch, confirmed
+merged into the configured base, with a head SHA identical to the local task tip.
+The PR's resulting merge/squash commit must also be reachable from the local base.
+The complete PR listing and individual PR response must agree. Extra local commits,
+missing/ambiguous evidence, another head/base/repository, unavailable API access,
+or a merge commit absent from the local base all cause refusal. Linear completion,
+matching titles/messages, and patch similarity alone never prove a merge.
+
+Squash verification supports `github.com` and uses the same optional `GH_TOKEN` or
+`GITHUB_TOKEN` as the existing history checks. It reads PR evidence without changing
+GitHub state. Non-ancestor cleanup on other hosts is refused.
+
+All removal preconditions are checked before deletion and checked again just
+before removal. Cleanup refuses dirty task worktrees (including untracked and
+ignored files), index flags that hide modifications, unfinished Git operations,
+submodules, locked/prunable/detached or mismatched worktrees, missing/invalid task
+scope metadata, and any target that could remove the permanent checkout, Git
+metadata, or another registered worktree. Resolve the reported condition manually.
+
+On success, non-force Git commands remove the exact registered worktree and then
+its local branch; the output names both. Ancestry-proven branches use `branch -d`.
+For a verified squash/rebase PR, cleanup rechecks that no worktree uses the branch
+and deletes its exact local ref with `update-ref --no-deref -d`, supplying the
+verified old SHA so a changed branch cannot be deleted. It does not use `-D` or
+rewrite the task branch to manufacture ancestry. Remote branches, PRs, Linear
+status, and agent sessions are not changed. A repeat with no remaining local task state reports
+that there is nothing to clean up. If worktree removal fails, branch deletion is
+not attempted. If branch deletion fails afterward, cleanup reports the partial
+result; a branch-only retry refuses and leaves that branch for manual inspection.
+Run cleanup after exiting the task's agent/shell sessions, and do not modify the
+repository or task worktree concurrently with cleanup.
+
 ## Tests
 
 ```sh
@@ -375,4 +426,6 @@ separate startup and prompt submission. It also covers pre-existing Pi activity,
 model-specific thinking-level clamping, purpose-specific handoffs, option
 precedence, unsupported combinations, handoff ordering/failures, exact context,
 mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
+Cleanup tests exercise actual worktree/branch removal in disposable repositories,
+preservation on refusal, repeat runs, and partial-failure reporting.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.

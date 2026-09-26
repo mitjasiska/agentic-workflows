@@ -19,12 +19,14 @@ def issue_identifier(value: str) -> str:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="task", description="Prepare a Linear task workspace in Herdr")
+    result = argparse.ArgumentParser(prog="task", description="Manage Linear task workspaces in Herdr")
     commands = result.add_subparsers(dest="command", required=True)
     start = commands.add_parser("start", help="Create or reopen a task workspace")
     start.add_argument("issue", type=issue_identifier)
     start.add_argument("--slice", type=parse_slice, help="Select an explicit implementation slice (branch suffix)")
     add_agent_options(start, include_no_agent=True)
+    cleanup_command = commands.add_parser("cleanup", help="Remove a completed, merged task worktree and local branch safely")
+    cleanup_command.add_argument("issue", type=issue_identifier)
     return result
 
 
@@ -86,11 +88,36 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
             f"Worktree: {workspace.path}\nHerdr:  {workspace.action}\nLinear: In Progress\nAgent:  {status}")
 
 
+def cleanup(identifier: str) -> str:
+    local = load_local(no_agent=True)
+    issue = Linear(local.api_key).get_issue(identifier)
+    project = resolve_project(load_projects(), issue.project)
+    repo = repository_path(local, project)
+    if issue.state_type != "completed":
+        raise TaskError(f"{identifier} is not completed (Linear status: {issue.state_name}); nothing was removed")
+    git, herdr = Git(repo), Herdr(repo)
+    # Check, but never fetch or advance the base during cleanup.
+    git.check_base(project.base_branch)
+    target = herdr.resolve_task(git, issue.identifier, include_remotes=False)
+    if target is None:
+        return (f"{issue.identifier}: no local task branch or registered Herdr worktree remains in {repo}. "
+                "Nothing to clean up.")
+    snapshot = git.check_cleanup(project.base_branch, target, issue.identifier)
+    if herdr.resolve_task(git, issue.identifier, include_remotes=False) != target:
+        raise TaskError("Git/Herdr cleanup target changed during validation; nothing was removed")
+    git.remove_task(project.base_branch, target, issue.identifier, snapshot)
+    return (f"{issue.identifier}: cleanup complete\nRepo: {repo}\n"
+            f"Removed worktree: {target.path}\nRemoved local branch: {target.branch}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
-                    agent_kind=args.agent_kind, model=args.model, mode=args.mode))
+        if args.command == "cleanup":
+            print(cleanup(args.issue))
+        else:
+            print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
+                        agent_kind=args.agent_kind, model=args.model, mode=args.mode))
     except TaskError as error:
         print(f"task: {error}", file=sys.stderr)
         return 1
