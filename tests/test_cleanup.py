@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from task_start import TaskError, cli
 from task_start.config import LocalConfig, Project
 from task_start.linear import Linear
-from task_start.workspace import Git, Herdr, run
+from task_start.workspace import Git, Herdr, HerdrRetirement, run
 import test_task_start as baseline
 
 
@@ -39,7 +39,15 @@ class CleanupTests(unittest.TestCase):
             self.issue.project, self.repo.name, "main")]))
         self.linear = self.enterContext(patch("task_start.cli.Linear")).return_value
         self.linear.get_issue.return_value = self.issue
+        self.workspace_id = None
+        self.workspace_active = True
+        self.workspace_path = self.path
+        self.workspace_label = "Untrusted display label"
+        self.workspace_close_error = None
+        self.extra_workspaces = []
         self.herdr = self.enterContext(patch.object(Herdr, "command", side_effect=self.list_worktrees))
+        self.herdr_workspace = self.enterContext(patch.object(
+            Herdr, "workspace_command", side_effect=self.workspace_commands))
         self.runner = self.enterContext(patch("task_start.workspace.run", wraps=run))
         for method in ("update_base", "remote_branches", "check_history"):
             self.enterContext(patch.object(Git, method, side_effect=AssertionError("Unexpected remote/base mutation")))
@@ -57,7 +65,40 @@ class CleanupTests(unittest.TestCase):
                 is_bare="bare" in tree, is_detached="detached" in tree,
                 is_prunable="prunable" in tree, open_workspace_id=None,
             ))
+        if self.workspace_id is not None:
+            for entry in entries:
+                if Path(entry["path"]) == self.path:
+                    entry["open_workspace_id"] = self.workspace_id
         return dict(source=dict(repo_root=str(self.repo)), worktrees=entries)
+
+    def workspace_entry(self, workspace_id=None, path=None, label=None):
+        return dict(workspace_id=workspace_id or self.workspace_id,
+                    label=self.workspace_label if label is None else label,
+                    focused=False, pane_count=1, tab_count=1, active_tab_id="unused:t1",
+                    agent_status="idle", number=7,
+                    worktree=dict(repo_root=str(self.repo), checkout_path=str(path or self.workspace_path),
+                                  repo_key=str(self.repo / ".git"), repo_name=self.repo.name,
+                                  is_linked_worktree=True))
+
+    def workspace_commands(self, operation, *args):
+        if operation == "list":
+            entries = copy.deepcopy(self.extra_workspaces)
+            if self.workspace_id is not None and self.workspace_active:
+                entries.append(self.workspace_entry())
+            return dict(type="workspace_list", workspaces=entries)
+        self.assertEqual((operation, args), ("close", (self.workspace_id,)))
+        if self.workspace_close_error is not None:
+            raise self.workspace_close_error
+        closed = self.workspace_entry()
+        self.workspace_active = False
+        return dict(type="workspace_closed", workspace_id=self.workspace_id, workspace=closed)
+
+    def ignore_python_cache(self):
+        ignore = self.path / ".gitignore"
+        ignore.write_text(ignore.read_text() + "__pycache__/\n")
+        self.command(self.path, "add", ".gitignore")
+        self.command(self.path, "commit", "-m", "ignore Python cache")
+        self.command(self.repo, "merge", "--ff-only", self.branch)
 
     def assert_refused(self, message):
         refs = self.command(self.repo, "show-ref")
@@ -124,6 +165,234 @@ class CleanupTests(unittest.TestCase):
                     file.write_bytes(original)
                     if state == "staged":
                         self.command(self.path, "add", name)
+
+    def test_ignored_python_cache_is_removed_only_after_complete_classification(self):
+        self.ignore_python_cache()
+        first = self.path / "task_start" / "__pycache__"
+        second = self.path / "tests" / "__pycache__"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        (first / "workspace.cpython-312.pyc").write_bytes(b"generated")
+        (first / "workspace.cpython-312.opt-1.pyc").write_bytes(b"generated")
+        (second / "legacy.pyo").write_bytes(b"generated")
+        self.assertIn("cleanup complete", cli.cleanup("DEV-7"))
+        self.assertFalse(self.path.exists())
+
+    def test_unknown_content_blocks_without_removing_allowlisted_cache(self):
+        self.ignore_python_cache()
+        cache = self.path / "task_start" / "__pycache__"
+        cache.mkdir(parents=True)
+        bytecode = cache / "workspace.cpython-312.pyc"
+        bytecode.write_bytes(b"generated")
+        unknowns = [cache / "notes.txt", self.path / "loose.pyc", self.path / "local-notes.txt"]
+        for unknown in unknowns:
+            with self.subTest(unknown=unknown.relative_to(self.path)):
+                unknown.parent.mkdir(parents=True, exist_ok=True)
+                unknown.write_text("valuable\n")
+                self.assert_refused("dirty")
+                self.assertEqual(unknown.read_text(), "valuable\n")
+                self.assertEqual(bytecode.read_bytes(), b"generated")
+                unknown.unlink()
+
+    def test_nested_python_cache_structure_is_not_disposable(self):
+        self.ignore_python_cache()
+        nested = self.path / "__pycache__" / "unexpected" / "__pycache__"
+        nested.mkdir(parents=True)
+        bytecode = nested / "nested.cpython-312.pyc"
+        bytecode.write_bytes(b"generated")
+        self.assert_refused("dirty")
+        self.assertEqual(bytecode.read_bytes(), b"generated")
+
+    def test_source_change_blocks_without_removing_allowlisted_cache(self):
+        self.ignore_python_cache()
+        cache = self.path / "__pycache__"
+        cache.mkdir()
+        bytecode = cache / "task.cpython-312.pyc"
+        bytecode.write_bytes(b"generated")
+        (self.path / "tracked.txt").write_text("valuable source change\n")
+        self.assert_refused("dirty")
+        self.assertEqual(bytecode.read_bytes(), b"generated")
+
+    def test_symlink_in_python_cache_is_not_disposable(self):
+        self.ignore_python_cache()
+        cache = self.path / "__pycache__"
+        cache.mkdir()
+        target = self.path / "tracked.txt"
+        original = target.read_text()
+        link = cache / "task.cpython-312.pyc"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Filesystem does not support symlinks")
+        self.assert_refused("dirty")
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_text(), original)
+
+    def test_exact_herdr_workspace_is_retired_and_unrelated_workspace_remains(self):
+        self.workspace_id = "w-task"
+        unrelated = self.workspace_entry("w-other", self.repo.parent / "other-checkout")
+        unrelated["worktree"]["repo_root"] = str(self.remote)
+        unrelated["worktree"]["repo_key"] = str(self.remote / ".git")
+        self.extra_workspaces = [unrelated]
+        output = cli.cleanup("DEV-7")
+        self.assertIn("Retired Herdr workspace: w-task", output)
+        self.assertFalse(self.workspace_active)
+        close_calls = [call for call in self.herdr_workspace.call_args_list
+                       if call.args and call.args[0] == "close"]
+        self.assertEqual([call.args for call in close_calls], [("close", "w-task")])
+        self.assertEqual(self.extra_workspaces, [unrelated])
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
+
+    def test_wrong_or_ambiguous_herdr_workspace_is_never_retired(self):
+        self.workspace_id = "w-task"
+        original_path = self.workspace_path
+        for state in ("wrong", "ambiguous"):
+            with self.subTest(state=state):
+                self.workspace_path = (self.repo.parent / "other-checkout"
+                                       if state == "wrong" else original_path)
+                self.extra_workspaces = ([self.workspace_entry("w-task", original_path)]
+                                         if state == "ambiguous" else [])
+                self.assert_refused("does not exactly match|Unexpected Herdr workspace list")
+                self.assertFalse(any(call.args and call.args[0] == "close"
+                                     for call in self.herdr_workspace.call_args_list))
+                self.herdr_workspace.reset_mock()
+        self.workspace_path = original_path
+        self.extra_workspaces = []
+
+    def test_conflicting_saved_workspace_identity_blocks_git_and_herdr_cleanup(self):
+        self.workspace_id = "w-task"
+        wrong = HerdrRetirement("DEV-7", "main", self.branch, self.path, "w-other")
+        self.git.save_retirement(wrong)
+        self.assert_refused("Pending Herdr retirement state does not match")
+        self.assertFalse(any(call.args and call.args[0] == "close"
+                             for call in self.herdr_workspace.call_args_list))
+
+    def test_retirement_failure_is_partial_and_repeat_finishes_stale_workspace(self):
+        self.workspace_id = "w-task"
+        self.workspace_close_error = TaskError("close refused")
+        with self.assertRaisesRegex(TaskError, "Removed worktree.*Removed local branch.*could not be confirmed retired"):
+            cli.cleanup("DEV-7")
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.git.branches("DEV-7"), [])
+        self.assertTrue(self.workspace_active)
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+
+        self.workspace_close_error = None
+        output = cli.cleanup("DEV-7")
+        self.assertIn("Git worktree and local branch were already removed", output)
+        self.assertIn("Retired Herdr workspace: w-task", output)
+        self.assertFalse(self.workspace_active)
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
+
+    def test_retry_refuses_reused_checkout_path_and_keeps_retirement_state(self):
+        self.workspace_id = "w-task"
+        self.workspace_close_error = TaskError("close refused")
+        with self.assertRaisesRegex(TaskError, "could not be confirmed retired"):
+            cli.cleanup("DEV-7")
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+
+        self.herdr_workspace.reset_mock()
+        self.workspace_close_error = None
+        self.workspace_label = "DEV-8"
+        reused_branch = "dev-8-unrelated"
+        self.command(self.repo, "worktree", "add", "-b", reused_branch, str(self.path))
+        with self.assertRaisesRegex(TaskError, "reused or still exists"):
+            cli.cleanup("DEV-7")
+        trees = [tree for tree in self.git.worktrees()
+                 if Path(tree["worktree"]).resolve() == self.path]
+        self.assertEqual([tree.get("branch") for tree in trees], ["refs/heads/" + reused_branch])
+        self.assertTrue(self.path.is_dir())
+        self.assertTrue(self.workspace_active)
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+        self.assertFalse(any(call.args and call.args[0] == "close"
+                             for call in self.herdr_workspace.call_args_list))
+
+    def test_legacy_stale_herdr_workspace_is_retired_without_local_git_state(self):
+        self.workspace_id = "w-task"
+        self.workspace_label = "DEV-7"
+        stale_path = self.repo.parent / "herdr-worktrees" / self.repo.name / self.branch
+        stale_path.parent.mkdir(parents=True)
+        self.command(self.repo, "worktree", "move", str(self.path), str(stale_path))
+        self.path = stale_path
+        self.workspace_path = stale_path
+        self.command(self.repo, "worktree", "remove", "--", str(stale_path))
+        self.command(self.repo, "branch", "--delete", "--", self.branch)
+        unrelated = self.workspace_entry(
+            "w-other", self.repo.parent / "other-checkout", label="OTHER-9")
+        unrelated["worktree"]["repo_root"] = str(self.remote)
+        unrelated["worktree"]["repo_key"] = str(self.remote / ".git")
+        unrelated["worktree"]["repo_name"] = self.remote.name
+        self.extra_workspaces = [unrelated]
+
+        self.assertEqual(self.git.branches("DEV-7"), [])
+        self.assertFalse(stale_path.exists())
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
+        output = cli.cleanup("DEV-7")
+        self.assertIn("Git worktree and local branch were already removed", output)
+        self.assertIn("Retired Herdr workspace: w-task", output)
+        close_calls = [call.args for call in self.herdr_workspace.call_args_list
+                       if call.args and call.args[0] == "close"]
+        self.assertEqual(close_calls, [("close", "w-task")])
+        self.assertEqual(self.extra_workspaces, [unrelated])
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
+
+    def test_legacy_stale_workspace_needs_both_exact_label_and_checkout_identity(self):
+        self.workspace_id = "w-task"
+        stale_path = self.repo.parent / "herdr-worktrees" / self.repo.name / self.branch
+        stale_path.parent.mkdir(parents=True)
+        self.command(self.repo, "worktree", "move", str(self.path), str(stale_path))
+        self.path = stale_path
+        self.command(self.repo, "worktree", "remove", "--", str(stale_path))
+        self.command(self.repo, "branch", "--delete", "--", self.branch)
+        for label, path in (("DEV-7", stale_path.with_name("unrelated-task")),
+                            ("Renamed display label", stale_path)):
+            with self.subTest(label=label, path=path.name):
+                self.workspace_label = label
+                self.workspace_path = path
+                with self.assertRaisesRegex(TaskError, "exact stale task identity cannot be proven"):
+                    cli.cleanup("DEV-7")
+                self.assertFalse(any(call.args and call.args[0] == "close"
+                                     for call in self.herdr_workspace.call_args_list))
+                self.herdr_workspace.reset_mock()
+
+    @unittest.skipUnless(os.name == "posix", "Requires POSIX symlink semantics")
+    def test_legacy_stale_workspace_refuses_dangling_and_live_checkout_symlinks(self):
+        self.workspace_id = "w-task"
+        self.workspace_label = "DEV-7"
+        stale_path = self.repo.parent / "herdr-worktrees" / self.repo.name / self.branch
+        stale_path.parent.mkdir(parents=True)
+        self.command(self.repo, "worktree", "move", str(self.path), str(stale_path))
+        self.path = stale_path
+        self.workspace_path = stale_path
+        self.command(self.repo, "worktree", "remove", "--", str(stale_path))
+        self.command(self.repo, "branch", "--delete", "--", self.branch)
+        for target in (stale_path.parent / "missing-target", self.repo):
+            with self.subTest(dangling=not target.exists()):
+                stale_path.symlink_to(target, target_is_directory=True)
+                with self.assertRaisesRegex(TaskError, "exact stale task identity cannot be proven"):
+                    cli.cleanup("DEV-7")
+                self.assertTrue(stale_path.is_symlink())
+                self.assertTrue(self.workspace_active)
+                self.assertFalse(self.git.retirement_file("DEV-7").exists())
+                self.assertFalse(any(call.args and call.args[0] == "close"
+                                     for call in self.herdr_workspace.call_args_list))
+                stale_path.unlink()
+                self.herdr_workspace.reset_mock()
+
+    def test_uncertain_close_is_success_only_when_absence_is_confirmed(self):
+        self.workspace_id = "w-task"
+
+        def close_then_error(operation, *args):
+            if operation == "close":
+                self.workspace_active = False
+                raise TaskError("response lost")
+            return self.workspace_commands(operation, *args)
+
+        self.herdr_workspace.side_effect = close_then_error
+        output = cli.cleanup("DEV-7")
+        self.assertIn("Retired Herdr workspace: w-task", output)
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
 
     @unittest.skipUnless(os.name == "posix", "Requires POSIX executable-bit semantics")
     def test_filemode_config_cannot_hide_executable_bit_change(self):
@@ -209,13 +478,14 @@ class CleanupTests(unittest.TestCase):
     def test_herdr_mismatches_are_refused(self):
         original = self.list_worktrees("list")
         for field, value in (("path", str(self.repo)), ("branch", "dev-8-other"),
-                             ("is_linked_worktree", False), ("is_prunable", True)):
+                             ("is_linked_worktree", False), ("is_prunable", True),
+                             ("open_workspace_id", 7)):
             with self.subTest(field=field):
                 listing = copy.deepcopy(original)
                 listing["worktrees"][1][field] = value
                 self.herdr.side_effect = None
                 self.herdr.return_value = listing
-                self.assert_refused("Git and Herdr|ambiguous or branch-only|permanent checkout")
+                self.assert_refused("Git and Herdr|ambiguous or branch-only|permanent checkout|Unexpected Herdr")
         self.herdr.return_value = dict(original, source=dict(repo_root=str(self.remote)))
         self.assert_refused("Unexpected Herdr")
         self.herdr.return_value = dict(original, worktrees=original["worktrees"] + [original["worktrees"][1]])
@@ -448,6 +718,8 @@ class SquashCleanupTests(unittest.TestCase):
     command = CleanupTests.command
     list_worktrees = CleanupTests.list_worktrees
     assert_refused = CleanupTests.assert_refused
+    workspace_entry = CleanupTests.workspace_entry
+    workspace_commands = CleanupTests.workspace_commands
 
     def setUp(self):
         CleanupTests.setUp(self)
@@ -717,6 +989,33 @@ class CleanupInputTests(unittest.TestCase):
             data["issue"]["state"]["type"] = value
             with patch.object(linear, "request", return_value=data), self.assertRaises(TaskError):
                 linear.get_issue("DEV-7")
+
+
+class HerdrRetirementCommandTests(unittest.TestCase):
+    def test_workspace_list_and_close_use_the_exact_stable_id(self):
+        repo = Path("/repo").resolve()
+        responses = [
+            json.dumps({"result": {"type": "workspace_list", "workspaces": []}}),
+            json.dumps({"result": {"type": "workspace_closed", "workspace_id": "w9",
+                                    "workspace": None}}),
+        ]
+        with patch("task_start.workspace.run", side_effect=responses) as runner:
+            herdr = Herdr(repo)
+            self.assertEqual(herdr.workspace_command("list")["type"], "workspace_list")
+            self.assertEqual(herdr.workspace_command("close", "w9")["workspace_id"], "w9")
+        self.assertEqual([call.args[0] for call in runner.call_args_list], [
+            ["herdr", "workspace", "list"], ["herdr", "workspace", "close", "w9"]])
+
+    def test_malformed_workspace_response_is_not_retirement_success(self):
+        herdr = Herdr(Path("/repo"))
+        with patch("task_start.workspace.run", return_value=json.dumps(
+                {"result": {"type": "workspace_list", "workspace_id": "w9"}})), \
+                self.assertRaisesRegex(TaskError, "Unexpected Herdr workspace close response"):
+            herdr.workspace_command("close", "w9")
+        with patch("task_start.workspace.run", return_value=json.dumps(
+                {"result": {"type": "workspace_list", "workspaces": "invalid"}})), \
+                self.assertRaisesRegex(TaskError, "Unexpected Herdr workspace list"):
+            herdr.workspaces()
 
 
 if __name__ == "__main__":

@@ -98,16 +98,54 @@ def cleanup(identifier: str) -> str:
     git, herdr = Git(repo), Herdr(repo)
     # Check, but never fetch or advance the base during cleanup.
     git.check_base(project.base_branch)
+    pending = git.load_retirement(issue.identifier, project.base_branch)
     target = herdr.resolve_task(git, issue.identifier, include_remotes=False)
     if target is None:
+        if pending is None:
+            pending = herdr.stale_retirement(git, issue.identifier, project.base_branch)
+            if pending is not None:
+                git.save_retirement(pending)
+        if pending is not None:
+            try:
+                retired = herdr.retire(git, pending)
+            except TaskError as error:
+                raise TaskError(f"Git cleanup is already complete, but Herdr workspace "
+                                f"{pending.workspace_id!r} could not be confirmed retired: {error}. "
+                                f"Rerun task cleanup {issue.identifier} after resolving the Herdr problem") from None
+            git.clear_retirement(pending)
+            status = (f"Retired Herdr workspace: {pending.workspace_id}" if retired else
+                      f"Herdr workspace already absent: {pending.workspace_id}")
+            return (f"{issue.identifier}: cleanup complete\nRepo: {repo}\n"
+                    "Git worktree and local branch were already removed\n" + status)
         return (f"{issue.identifier}: no local task branch or registered Herdr worktree remains in {repo}. "
                 "Nothing to clean up.")
+    git.discard_cleanup_artifacts(project.base_branch, target, issue.identifier)
     snapshot = git.check_cleanup(project.base_branch, target, issue.identifier)
     if herdr.resolve_task(git, issue.identifier, include_remotes=False) != target:
         raise TaskError("Git/Herdr cleanup target changed during validation; nothing was removed")
+    retirement = herdr.retirement(target, issue.identifier, project.base_branch)
+    if pending is not None and retirement != pending:
+        raise TaskError("Pending Herdr retirement state does not match the exact current task workspace; "
+                        "nothing was removed")
+    if retirement is not None:
+        git.save_retirement(retirement)
+    if herdr.resolve_task(git, issue.identifier, include_remotes=False) != target:
+        raise TaskError("Git/Herdr cleanup target changed before removal; nothing was removed")
     git.remove_task(project.base_branch, target, issue.identifier, snapshot)
+    herdr_status = "No open Herdr workspace was registered"
+    if retirement is not None:
+        try:
+            retired = herdr.retire(git, retirement)
+        except TaskError as error:
+            raise TaskError(f"Task cleanup is incomplete. Removed worktree: {target.path}. "
+                            f"Removed local branch: {target.branch}. Herdr workspace "
+                            f"{retirement.workspace_id!r} could not be confirmed retired: {error}. "
+                            f"Rerun task cleanup {issue.identifier} to finish retirement") from None
+        git.clear_retirement(retirement)
+        herdr_status = (f"Retired Herdr workspace: {retirement.workspace_id}" if retired else
+                        f"Herdr workspace already absent: {retirement.workspace_id}")
     return (f"{issue.identifier}: cleanup complete\nRepo: {repo}\n"
-            f"Removed worktree: {target.path}\nRemoved local branch: {target.branch}")
+            f"Removed worktree: {target.path}\nRemoved local branch: {target.branch}\n{herdr_status}")
 
 
 def main(argv: list[str] | None = None) -> int:
