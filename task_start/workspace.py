@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import unicodedata
 
@@ -50,6 +51,15 @@ class CleanupState:
     branch_commit: str
     base_commit: str
     pull: MergedPull | None = None
+
+
+@dataclass(frozen=True)
+class HerdrRetirement:
+    identifier: str
+    base: str
+    branch: str
+    path: Path
+    workspace_id: str
 
 
 def run(args: list[str]) -> str:
@@ -213,7 +223,8 @@ class Git:
                 entries.append(fields)
         return entries
 
-    def check_cleanup_target(self, base: str, target: TaskWorktree, identifier: str) -> None:
+    def check_cleanup_target(self, base: str, target: TaskWorktree, identifier: str,
+                             *, require_clean: bool = True) -> None:
         """Revalidate all local target identity and safety checks without external lookups."""
         self.check_base(base)
         path, branch = target.path, target.branch
@@ -248,7 +259,18 @@ class Git:
             raise TaskError(f"Cleanup task identity is unknown for {branch!r}: workspace scope metadata is missing; "
                             "inspect it manually; nothing was removed")
         self.resolve_scope(path, branch, identifier, None)
-        self.check_task_clean(path, git_dir)
+        if require_clean:
+            self.check_task_clean(path, git_dir)
+
+    def discard_cleanup_artifacts(self, base: str, target: TaskWorktree, identifier: str) -> bool:
+        """Remove only a complete, positively classified Python cache dirty state."""
+        self.check_cleanup_target(base, target, identifier, require_clean=False)
+        git_dir = Path(Git(target.path).command("rev-parse", "--absolute-git-dir").strip()).resolve()
+        removed = self.check_task_clean(target.path, git_dir, discard_disposable=True)
+        # Re-run the complete target validation after the only permitted
+        # mutation. New or changed content must block worktree removal.
+        self.check_cleanup_target(base, target, identifier)
+        return removed
 
     def check_cleanup(self, base: str, target: TaskWorktree, identifier: str) -> CleanupState:
         """Check local prerequisites and collect merge evidence without changing task state."""
@@ -260,26 +282,146 @@ class Git:
             raise TaskError("Cannot bind safe branch deletion to the permanent base checkout; nothing was removed")
         return state
 
-    def check_task_clean(self, path: Path, git_dir: Path) -> None:
+    def check_task_clean(self, path: Path, git_dir: Path, *, discard_disposable: bool = False) -> bool:
         checkout = Git(path)
-        if any(entry and (entry[0].islower() or entry[0] == "S")
-               for entry in checkout.command("ls-files", "-v", "-z").split("\0")):
-            raise TaskError("Task worktree has assume-unchanged or skip-worktree files; "
-                            "cleanliness cannot be verified; nothing was removed")
+        hidden_index_state = any(entry and (entry[0].islower() or entry[0] == "S")
+                                 for entry in checkout.command("ls-files", "-v", "-z").split("\0"))
         # Unlike normal status, include ignored files: worktree remove would
         # otherwise discard ignored notes, build output, or local configuration.
         # Do not let permissive repository settings hide mode/type changes.
-        if checkout.command("-c", "core.fileMode=true", "-c", "core.symlinks=true",
-                            "status", "--porcelain", "--untracked-files=all",
-                            "--ignored", "--ignore-submodules=none").strip():
-            raise TaskError(f"Task worktree is dirty (modified, untracked or ignored files): {path}; nothing was removed")
-        for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
-                       "rebase-apply", "sequencer", "BISECT_LOG"):
-            if (git_dir / marker).exists():
-                raise TaskError("Task worktree has an unfinished Git operation; nothing was removed")
-        # Git refuses non-force removal of worktrees containing submodules.
-        if any(entry.startswith("160000 ") for entry in checkout.command("ls-files", "--stage", "-z").split("\0")):
+        status_output = checkout.command("-c", "core.fileMode=true", "-c", "core.symlinks=true",
+                                         "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                                         "--ignored", "--ignore-submodules=none")
+        unfinished = any((git_dir / marker).exists() for marker in (
+            "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
+            "rebase-apply", "sequencer", "BISECT_LOG"))
+        has_submodules = any(entry.startswith("160000 ")
+                             for entry in checkout.command("ls-files", "--stage", "-z").split("\0"))
+        # Inspect every safety input before deleting even an allowlisted cache.
+        if hidden_index_state:
+            raise TaskError("Task worktree has assume-unchanged or skip-worktree files; "
+                            "cleanliness cannot be verified; nothing was removed")
+        if unfinished:
+            raise TaskError("Task worktree has an unfinished Git operation; nothing was removed")
+        if has_submodules:
+            # Git refuses non-force removal of worktrees containing submodules.
             raise TaskError("Task worktree contains submodules; inspect it manually; nothing was removed")
+        if not status_output:
+            return False
+        if discard_disposable and self._discard_python_cache(path, status_output):
+            return True
+        if status_output:
+            raise TaskError(f"Task worktree is dirty (modified, untracked or ignored files): {path}; nothing was removed")
+        return False
+
+    def _discard_python_cache(self, path: Path, status_output: str) -> bool:
+        records = status_output.split("\0")
+        if records and not records[-1]:
+            records.pop()
+        cache_files: dict[Path, set[str]] = {}
+        for record in records:
+            # Only Git-confirmed ignored entries may be disposable. In
+            # particular, an untracked .pyc remains valuable unknown content.
+            if not record.startswith("!! "):
+                return False
+            relative = Path(record[3:])
+            if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                    or relative.parent.name != "__pycache__"
+                    or relative.parent.parts.count("__pycache__") != 1
+                    or relative.suffix not in {".pyc", ".pyo"}):
+                return False
+            cache_files.setdefault(relative.parent, set()).add(relative.name)
+        if not cache_files:
+            return False
+
+        # Validate every directory and every entry before changing anything.
+        # This also protects clean tracked files or ignored notes that happen to
+        # live beside generated bytecode in a __pycache__ directory.
+        try:
+            for directory, expected_names in cache_files.items():
+                current = path
+                for component in directory.parts:
+                    current /= component
+                    if not stat.S_ISDIR(current.lstat().st_mode):
+                        return False
+                actual_names = set(os.listdir(current))
+                if actual_names != expected_names:
+                    return False
+                for name in actual_names:
+                    if (Path(name).suffix not in {".pyc", ".pyo"}
+                            or not stat.S_ISREG((current / name).lstat().st_mode)):
+                        return False
+            for directory, names in cache_files.items():
+                cache = path / directory
+                for name in sorted(names):
+                    (cache / name).unlink()
+            for directory in sorted(cache_files, key=lambda item: len(item.parts), reverse=True):
+                (path / directory).rmdir()
+        except OSError as error:
+            raise TaskError("Disposable Python cache cleanup could not be completed safely; "
+                            "inspect the task worktree before retrying; Git cleanup was not started") from error
+        return True
+
+    def retirement_file(self, identifier: str) -> Path:
+        if not re.fullmatch(r"[A-Z][A-Z0-9]*-[1-9][0-9]*", identifier):
+            raise TaskError("Cannot store cleanup state for an invalid task identifier")
+        common = Path(self.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+        if not common.is_absolute():
+            raise TaskError("Git did not identify its private metadata directory")
+        return common / "agentic-workflows-cleanup" / f"{identifier}.json"
+
+    def load_retirement(self, identifier: str, base: str) -> HerdrRetirement | None:
+        record = self.retirement_file(identifier)
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            raise TaskError(f"Cannot read pending Herdr retirement state: {record}; inspect it manually") from None
+        try:
+            if (not isinstance(data, dict) or type(data.get("version")) is not int
+                    or any(not isinstance(data.get(key), str) for key in (
+                        "identifier", "base", "branch", "path", "workspace_id"))):
+                raise ValueError("invalid retirement fields")
+            path = Path(data["path"])
+            state = HerdrRetirement(data["identifier"], data["base"], data["branch"],
+                                    path.resolve(), data["workspace_id"])
+            if (data != {"version": 1, "identifier": state.identifier, "base": state.base,
+                         "branch": state.branch, "path": str(path),
+                         "workspace_id": state.workspace_id}
+                    or state.identifier != identifier or state.base != base
+                    or not belongs_to_issue(state.branch, identifier) or not path.is_absolute()
+                    or not isinstance(state.workspace_id, str) or not state.workspace_id.strip()):
+                raise ValueError("retirement identity mismatch")
+        except (KeyError, TypeError, ValueError, OSError):
+            raise TaskError(f"Invalid pending Herdr retirement state: {record}; inspect it manually") from None
+        return state
+
+    def save_retirement(self, state: HerdrRetirement) -> None:
+        record = self.retirement_file(state.identifier)
+        data = {"version": 1, "identifier": state.identifier, "base": state.base,
+                "branch": state.branch, "path": str(state.path),
+                "workspace_id": state.workspace_id}
+        try:
+            record.parent.mkdir(mode=0o700, exist_ok=True)
+            with record.open("x", encoding="utf-8") as output:
+                json.dump(data, output)
+                output.write("\n")
+        except FileExistsError:
+            if self.load_retirement(state.identifier, state.base) != state:
+                raise TaskError("Pending Herdr retirement state identifies a different task workspace; "
+                                "nothing was removed") from None
+        except OSError:
+            raise TaskError(f"Could not save exact Herdr retirement state in {record}; nothing was removed") from None
+
+    def clear_retirement(self, state: HerdrRetirement) -> None:
+        if self.load_retirement(state.identifier, state.base) != state:
+            raise TaskError("Pending Herdr retirement state changed; it was not cleared")
+        try:
+            self.retirement_file(state.identifier).unlink()
+        except OSError:
+            raise TaskError("Herdr workspace retirement was confirmed, but its private retry state "
+                            "could not be cleared; inspect Git metadata before retrying") from None
 
     def describe_worktree_removal(self, path: Path) -> str:
         # A failed/timed-out command may already have removed the worktree.
@@ -423,6 +565,210 @@ class Herdr:
         except (ValueError, KeyError, TypeError):
             raise TaskError(f"Unexpected Herdr {operation} response; inspect workspace state before retrying") from None
 
+    def workspace_command(self, operation: str, *args: str) -> dict:
+        output = run(["herdr", "workspace", operation, *args])
+        try:
+            payload = json.loads(output)
+            result = payload["result"]
+            expected = {"list": "workspace_list", "close": "workspace_closed"}
+            if payload.get("error") or result["type"] != expected[operation]:
+                raise ValueError("unexpected result")
+            return result
+        except (ValueError, KeyError, TypeError):
+            raise TaskError(f"Unexpected Herdr workspace {operation} response; "
+                            "inspect workspace state before retrying") from None
+
+    def workspaces(self) -> list[dict]:
+        result = self.workspace_command("list")
+        try:
+            entries = result["workspaces"]
+            if not isinstance(entries, list):
+                raise ValueError("invalid workspaces")
+            ids = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("invalid workspace")
+                workspace_id = entry["workspace_id"]
+                if (not isinstance(workspace_id, str) or not workspace_id.strip()
+                        or not isinstance(entry.get("label"), str)):
+                    raise ValueError("invalid workspace identity")
+                ids.append(workspace_id)
+            if len(set(ids)) != len(ids):
+                raise ValueError("duplicate workspace ID")
+            return entries
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Unexpected Herdr workspace list; inspect workspace state before retrying") from None
+
+    def retirement(self, target: TaskWorktree, identifier: str,
+                   base: str) -> HerdrRetirement | None:
+        if target.open_workspace_id is None:
+            return None
+        state = HerdrRetirement(identifier, base, target.branch, target.path,
+                                target.open_workspace_id)
+        common = Path(Git(self.repo).command(
+            "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        self._retirement_workspace(state, self.workspaces(), allow_absent=False, common=common)
+        return state
+
+    def stale_retirement(self, git: Git, identifier: str,
+                         base: str) -> HerdrRetirement | None:
+        """Resolve a legacy stale workspace without trusting its display label alone."""
+        common = Path(git.command(
+            "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        entries = self.workspaces()
+        candidates = []
+        for entry in entries:
+            label_match = entry["label"] == identifier
+            location = entry.get("worktree")
+            checkout_value = location.get("checkout_path") if isinstance(location, dict) else None
+            checkout = (Path(checkout_value) if isinstance(checkout_value, str)
+                        and Path(checkout_value).is_absolute() else None)
+            path_match = checkout is not None and belongs_to_issue(checkout.name, identifier)
+            if not label_match and not path_match:
+                continue
+            # Either signal in isolation can be user-edited or coincidental.
+            # Require both, then bind them to Herdr's exact repository identity.
+            try:
+                if not label_match or not path_match or checkout is None:
+                    raise ValueError("partial task identity")
+                try:
+                    checkout.lstat()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    raise ValueError("checkout absence cannot be confirmed") from None
+                else:
+                    raise ValueError("checkout path still exists")
+                # Resolve only after lstat proved the original reported path is
+                # absent. A dangling symlink is an existing object, not proof
+                # that its target checkout disappeared.
+                repo_key = Path(location["repo_key"])
+                if (not isinstance(location["repo_root"], str)
+                        or not isinstance(location["repo_name"], str)
+                        or not isinstance(location["is_linked_worktree"], bool)
+                        or not Path(location["repo_root"]).is_absolute()
+                        or not repo_key.is_absolute()
+                        or Path(location["repo_root"]).resolve() != self.repo
+                        or repo_key.resolve() != common
+                        or location["repo_name"] != self.repo.name
+                        or location["is_linked_worktree"] is not True):
+                    raise ValueError("repository identity mismatch")
+                path = checkout.resolve()
+                if (path == self.repo or self.repo.is_relative_to(path)
+                        or common.is_relative_to(path) or path.is_relative_to(common)):
+                    raise ValueError("unsafe checkout path")
+                candidates.append(HerdrRetirement(
+                    identifier, base, checkout.name, path, entry["workspace_id"]))
+            except (KeyError, TypeError, ValueError, OSError):
+                raise TaskError(f"Herdr workspace {entry['workspace_id']!r} partially matches {identifier}, "
+                                "but its exact stale task identity cannot be proven; it was not retired") from None
+        if len(candidates) > 1:
+            ids = ", ".join(state.workspace_id for state in candidates)
+            raise TaskError(f"Multiple stale Herdr workspaces match {identifier}: {ids}; none was retired")
+        if not candidates:
+            return None
+        state = candidates[0]
+        branches = git.branches(identifier)
+        trees = [tree for tree in git.worktrees()
+                 if (belongs_to_issue(tree.get("branch", "").removeprefix("refs/heads/"), identifier)
+                     or Path(tree["worktree"]).resolve() == state.path)]
+        if branches or trees:
+            raise TaskError("Git task state reappeared while resolving its stale Herdr workspace; "
+                            "nothing was retired")
+        self._retirement_workspace(state, entries, allow_absent=False, common=common)
+        return state
+
+    def _retirement_workspace(self, state: HerdrRetirement, entries: list[dict],
+                              *, allow_absent: bool, common: Path | None = None) -> dict | None:
+        matches = [entry for entry in entries if entry.get("workspace_id") == state.workspace_id]
+        if not matches and allow_absent:
+            return None
+        try:
+            if len(matches) != 1:
+                raise ValueError("workspace ID is absent or ambiguous")
+            match = matches[0]
+            location = match["worktree"]
+            if (not isinstance(location, dict)
+                    or not isinstance(location["repo_root"], str)
+                    or not isinstance(location["repo_key"], str)
+                    or not isinstance(location["repo_name"], str)
+                    or not isinstance(location["checkout_path"], str)
+                    or not Path(location["repo_root"]).is_absolute()
+                    or not Path(location["repo_key"]).is_absolute()
+                    or not Path(location["checkout_path"]).is_absolute()
+                    or Path(location["repo_root"]).resolve() != self.repo
+                    or (common is not None and Path(location["repo_key"]).resolve() != common)
+                    or location["repo_name"] != self.repo.name
+                    or Path(location["checkout_path"]).resolve() != state.path
+                    or location["is_linked_worktree"] is not True):
+                raise ValueError("workspace checkout mismatch")
+            return match
+        except (KeyError, TypeError, ValueError, OSError):
+            raise TaskError(f"Herdr workspace {state.workspace_id!r} does not exactly match the cleaned "
+                            "task checkout; it was not retired") from None
+
+    def revalidate_retirement(self, git: Git, state: HerdrRetirement) -> list[dict]:
+        """Prove saved retirement state is still stale immediately before close."""
+        try:
+            state.path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise TaskError(f"Cannot confirm saved checkout path is absent: {state.path}; "
+                            "Herdr workspace was not retired") from None
+        else:
+            raise TaskError(f"Saved checkout path has been reused or still exists: {state.path}; "
+                            "Herdr workspace was not retired")
+        common = Path(git.command(
+            "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        if any(Path(tree["worktree"]).resolve() == state.path for tree in git.worktrees()):
+            raise TaskError(f"A registered Git worktree occupies saved checkout path {state.path}; "
+                            "Herdr workspace was not retired")
+        entries = self.workspaces()
+        match = self._retirement_workspace(
+            state, entries, allow_absent=True, common=common)
+        if match is not None:
+            label = match["label"]
+            claimed = re.fullmatch(
+                r"([A-Z][A-Z0-9]*-[1-9][0-9]*)(?:\s*/\s*.+)?", label, re.IGNORECASE)
+            if claimed is not None and claimed.group(1).upper() != state.identifier:
+                raise TaskError(f"Herdr workspace {state.workspace_id!r} now identifies task "
+                                f"{claimed.group(1).upper()}, not {state.identifier}; it was not retired")
+        return entries
+
+    def retire(self, git: Git, state: HerdrRetirement) -> bool:
+        """Close one exact workspace and confirm it disappeared; False means already absent."""
+        common = Path(git.command(
+            "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+        before = self.revalidate_retirement(git, state)
+        if self._retirement_workspace(
+                state, before, allow_absent=True, common=common) is None:
+            return False
+        try:
+            result = self.workspace_command("close", state.workspace_id)
+            if result.get("workspace_id") != state.workspace_id:
+                raise TaskError("Herdr close response identified a different workspace")
+            closed = result.get("workspace")
+            if closed is not None:
+                self._retirement_workspace(
+                    state, [closed], allow_absent=False, common=common)
+        except TaskError as error:
+            try:
+                after = self.workspaces()
+                if self._retirement_workspace(
+                        state, after, allow_absent=True, common=common) is None:
+                    return True
+            except TaskError as inspection_error:
+                raise TaskError(f"Herdr workspace retirement failed and its result could not be confirmed: "
+                                f"{error}. Post-failure inspection also failed: {inspection_error}") from None
+            raise TaskError(f"Herdr workspace {state.workspace_id!r} remains after retirement failed: "
+                            f"{error}") from None
+        after = self.workspaces()
+        if self._retirement_workspace(
+                state, after, allow_absent=True, common=common) is not None:
+            raise TaskError(f"Herdr did not confirm retirement of workspace {state.workspace_id!r}")
+        return True
+
     def resolve_task(self, git: Git, identifier: str, *, branch: str | None = None,
                      slice: str | None = None, include_remotes: bool = True) -> TaskWorktree | None:
         """Select existing state without opening, creating or changing a workspace."""
@@ -445,6 +791,10 @@ class Herdr:
                     raise ValueError("invalid branch")
                 if not isinstance(entry["label"], str):
                     raise ValueError("invalid label")
+                workspace_id = entry.get("open_workspace_id")
+                if workspace_id is not None and (not isinstance(workspace_id, str)
+                                                  or not workspace_id.strip()):
+                    raise ValueError("invalid workspace ID")
             matches = [w for w in entries if selected(w.get("branch") or "")
                        or w["label"].casefold() == label.casefold()]
         except (KeyError, TypeError, ValueError, AttributeError):

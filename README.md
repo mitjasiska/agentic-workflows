@@ -393,24 +393,53 @@ Squash verification supports `github.com` and uses the same optional `GH_TOKEN` 
 GitHub state. Non-ancestor cleanup on other hosts is refused.
 
 All removal preconditions are checked before deletion and checked again just
-before removal. Cleanup refuses dirty task worktrees (including untracked and
-ignored files), index flags that hide modifications, unfinished Git operations,
-submodules, locked/prunable/detached or mismatched worktrees, missing/invalid task
-scope metadata, and any target that could remove the permanent checkout, Git
-metadata, or another registered worktree. Resolve the reported condition manually.
+before removal. Cleanup normally refuses dirty task worktrees (including
+untracked and ignored files), index flags that hide modifications, unfinished Git
+operations, submodules, locked/prunable/detached or mismatched worktrees,
+missing/invalid task scope metadata, and any target that could remove the
+permanent checkout, Git metadata, or another registered worktree.
+
+The sole dirty-state exception is ignored Python bytecode directly inside
+`__pycache__` directories. Cleanup first inspects the complete tracked,
+untracked, and ignored state. It removes those directories only when every dirty
+entry is a regular `.pyc` or `.pyo` file in such a directory and every directory
+entry was present in that Git snapshot. A source change, symlink, loose bytecode,
+nested/unknown cache content, or any other ignored or untracked file preserves
+everything and refuses cleanup. The complete target validation runs again after
+cache removal.
 
 On success, non-force Git commands remove the exact registered worktree and then
 its local branch; the output names both. Ancestry-proven branches use `branch -d`.
 For a verified squash/rebase PR, cleanup rechecks that no worktree uses the branch
 and deletes its exact local ref with `update-ref --no-deref -d`, supplying the
 verified old SHA so a changed branch cannot be deleted. It does not use `-D` or
-rewrite the task branch to manufacture ancestry. Remote branches, PRs, Linear
-status, and agent sessions are not changed. A repeat with no remaining local task state reports
-that there is nothing to clean up. If worktree removal fails, branch deletion is
-not attempted. If branch deletion fails afterward, cleanup reports the partial
-result; a branch-only retry refuses and leaves that branch for manual inspection.
-Run cleanup after exiting the task's agent/shell sessions, and do not modify the
-repository or task worktree concurrently with cleanup.
+rewrite the task branch to manufacture ancestry. Remote branches, PRs, and Linear
+status are not changed.
+
+After Git cleanup, the command closes the exact open Herdr workspace identified
+by the stable ID returned for the validated worktree. It confirms the ID's
+repository and checkout path before closing it and confirms the ID disappeared
+afterward; labels are never used as retirement identity. The exact association is
+saved in Git-private metadata before removal, so a retry can finish closing a
+stale workspace after the worktree and branch are already gone. Conflicting,
+missing, or ambiguous identity refuses retirement. A close failure reports Git's
+completed portion without claiming Herdr success and retains the retry state.
+Each retry first uses a no-follow filesystem check to prove the saved checkout
+path has no object, confirms no Git worktree has reused it, and revalidates the
+workspace's repository key and task identity. Reuse or inconsistency preserves
+both the workspace and retry record.
+For a legacy cleanup that predates this retry metadata, the command checks Herdr
+before reporting that nothing remains. It accepts exactly one absent linked
+checkout only when Herdr's stable workspace ID, exact repository root/key, exact
+issue label, and issue-prefixed checkout basename all agree. A label or path match
+alone is insufficient; partial or multiple matches are left untouched.
+
+If worktree removal fails, branch deletion and Herdr retirement are not attempted.
+If branch deletion fails afterward, cleanup reports the partial result; a
+branch-only retry refuses and leaves that branch for manual inspection. Run
+cleanup from outside the task workspace after exiting its agent/shell sessions,
+and do not modify the repository, task worktree, or Herdr workspace concurrently
+with cleanup.
 
 ## Tests
 
@@ -427,5 +456,6 @@ model-specific thinking-level clamping, purpose-specific handoffs, option
 precedence, unsupported combinations, handoff ordering/failures, exact context,
 mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
 Cleanup tests exercise actual worktree/branch removal in disposable repositories,
-preservation on refusal, repeat runs, and partial-failure reporting.
+narrow Python-cache disposal, exact Herdr workspace retirement, preservation on
+refusal, repeat runs, and partial-failure reporting.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
