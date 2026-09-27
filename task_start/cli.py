@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 import re
 import sys
 
@@ -6,6 +7,7 @@ from . import TaskError
 from .agent import (AgentExecution, AgentOverrides, adapter_for,
                     codex_repository_policy, resolve_agent_options)
 from .config import load_local, load_projects, repository_path, resolve_project
+from .contexts import ContextRegistry, HerdrContexts, inspect_contexts, launch_registered
 from .handoff import implementation_handoff
 from .linear import Linear
 from .workspace import Git, Herdr, branch_name, slice_slug
@@ -27,6 +29,9 @@ def parser() -> argparse.ArgumentParser:
     add_agent_options(start, include_no_agent=True)
     cleanup_command = commands.add_parser("cleanup", help="Remove a completed, merged task worktree and local branch safely")
     cleanup_command.add_argument("issue", type=issue_identifier)
+    contexts = commands.add_parser("contexts", help="Inspect machine-local workflow contexts (read-only)")
+    contexts.add_argument("issue", nargs="?", type=issue_identifier)
+    contexts.add_argument("--all", action="store_true", help="Include retired contexts")
     return result
 
 
@@ -81,7 +86,7 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
                   if options.kind == "codex" else {})
         execution = AgentExecution(issue, repo, workspace, options,
                                    implementation_handoff(issue, workspace), policy=policy)
-        status = agent.launch(execution).summary
+        status = launch_registered(agent, execution).summary
     else:
         status = "skipped (--no-agent)"
     return (f"{issue.identifier}  {issue.title}\nRepo:   {repo}\nBranch: {workspace.branch}\n"
@@ -112,11 +117,14 @@ def cleanup(identifier: str) -> str:
                 raise TaskError(f"Git cleanup is already complete, but Herdr workspace "
                                 f"{pending.workspace_id!r} could not be confirmed retired: {error}. "
                                 f"Rerun task cleanup {issue.identifier} after resolving the Herdr problem") from None
+            retire_contexts(issue.identifier, repo, pending.path, pending.workspace_id)
+            retire_missing_contexts(issue.identifier, repo, herdr, pending.path)
             git.clear_retirement(pending)
             status = (f"Retired Herdr workspace: {pending.workspace_id}" if retired else
                       f"Herdr workspace already absent: {pending.workspace_id}")
             return (f"{issue.identifier}: cleanup complete\nRepo: {repo}\n"
                     "Git worktree and local branch were already removed\n" + status)
+        retire_missing_contexts(issue.identifier, repo, herdr)
         return (f"{issue.identifier}: no local task branch or registered Herdr worktree remains in {repo}. "
                 "Nothing to clean up.")
     git.discard_cleanup_artifacts(project.base_branch, target, issue.identifier)
@@ -141,11 +149,58 @@ def cleanup(identifier: str) -> str:
                             f"Removed local branch: {target.branch}. Herdr workspace "
                             f"{retirement.workspace_id!r} could not be confirmed retired: {error}. "
                             f"Rerun task cleanup {issue.identifier} to finish retirement") from None
+        retire_contexts(issue.identifier, repo, retirement.path, retirement.workspace_id)
+        retire_missing_contexts(issue.identifier, repo, herdr, target.path)
         git.clear_retirement(retirement)
         herdr_status = (f"Retired Herdr workspace: {retirement.workspace_id}" if retired else
                         f"Herdr workspace already absent: {retirement.workspace_id}")
+    else:
+        retire_missing_contexts(issue.identifier, repo, herdr, target.path)
     return (f"{issue.identifier}: cleanup complete\nRepo: {repo}\n"
             f"Removed worktree: {target.path}\nRemoved local branch: {target.branch}\n{herdr_status}")
+
+
+def retire_contexts(identifier, repo, path, workspace_id):
+    registry = ContextRegistry()
+    contexts = [c for c in registry.list(identifier) if c["repository"] == str(repo)
+                and c["worktree"] == str(path) and c["workspace_id"] == workspace_id]
+    if not contexts:
+        return
+    herdr = HerdrContexts()
+    endpoint = herdr.endpoint()
+    contexts = [c for c in contexts if c["endpoint"] == endpoint]
+    terminals = {c["terminal_id"] for c in contexts if c["terminal_id"]}
+    if terminals:
+        for pane in herdr.snapshot():
+            if pane["terminal_id"] in terminals:
+                raise TaskError(f"A task context terminal still exists at {pane['pane_id']} after workspace "
+                                "cleanup (possibly moved by a human); registry mappings were retained. "
+                                f"Inspect it, then rerun task cleanup {identifier}")
+    registry.retire(identifier, repo, path, endpoint=endpoint, workspace_id=workspace_id)
+
+
+def retire_missing_contexts(identifier, repo, herdr, path=None):
+    """Finish registry retirement after a workspace was manually closed or a retry.
+
+    A missing pane alone is insufficient: require the exact checkout and workspace
+    to be absent. Other servers' mappings remain untouched.
+    """
+    registry = ContextRegistry()
+    contexts = [c for c in registry.list(identifier) if c["repository"] == str(repo)
+                and c["worktree"] and (path is None or c["worktree"] == str(path))]
+    if not contexts:
+        return
+    endpoint = HerdrContexts().endpoint()
+    live = {w["workspace_id"] for w in herdr.workspaces()}
+    for context in contexts:
+        if context["endpoint"] != endpoint or context["workspace_id"] in live:
+            continue
+        try:
+            Path(context["worktree"]).lstat()
+        except FileNotFoundError:
+            retire_contexts(identifier, repo, Path(context["worktree"]), context["workspace_id"])
+        except OSError:
+            raise TaskError("Cannot confirm context checkout absence; registry mappings were retained") from None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -153,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "cleanup":
             print(cleanup(args.issue))
+        elif args.command == "contexts":
+            print(inspect_contexts(args.issue, include_retired=args.all))
         else:
             print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
                         agent_kind=args.agent_kind, model=args.model, mode=args.mode))

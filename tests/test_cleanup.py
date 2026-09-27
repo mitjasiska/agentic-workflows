@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from task_start import TaskError, cli
 from task_start.config import LocalConfig, Project
+from task_start.contexts import ContextRegistry
 from task_start.linear import Linear
 from task_start.workspace import Git, Herdr, HerdrRetirement, run
 import test_task_start as baseline
@@ -24,6 +25,8 @@ class CleanupTests(unittest.TestCase):
 
     def setUp(self):
         baseline.LocalGitIntegrationTests.setUp(self)
+        self.registry_path = self.repo.parent / "contexts.sqlite3"
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=self.registry_path))
         self.path = self.repo.parent / "arbitrary café checkout"
         self.branch = "dev-7-original-title"
         self.command(self.repo, "worktree", "add", "-b", self.branch, str(self.path))
@@ -242,6 +245,174 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual([call.args for call in close_calls], [("close", "w-task")])
         self.assertEqual(self.extra_workspaces, [unrelated])
         self.assertFalse(self.git.retirement_file("DEV-7").exists())
+
+    def register_contexts(self):
+        self.enterContext(patch("task_start.cli.HerdrContexts.endpoint", return_value="/test.sock"))
+        self.context_snapshot = self.enterContext(patch("task_start.cli.HerdrContexts.snapshot", return_value=[]))
+        registry = ContextRegistry(self.registry_path)
+        for role in ("implementation", "review", "review"):
+            context_id = registry.allocate("DEV-7", role, agent="codex", repository=str(self.repo),
+                worktree=str(self.path), endpoint="/test.sock", workspace_id="w-task", terminal_id="term-task")
+            registry.update(context_id, state="active", session_id="opaque", resumability="yes")
+        return registry
+
+    def test_context_cleanup_then_restart_never_reuses_ordinals(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+        self.assertEqual(len(registry.list(include_retired=True)), 3)
+        # A fresh process/registry object sees the same retained allocation history.
+        restarted = ContextRegistry(self.registry_path)
+        self.assertEqual(restarted.allocate("DEV-7", "implementation", agent="codex"), "DEV-7-I2")
+        self.assertEqual(restarted.allocate("DEV-7", "review", agent="codex"), "DEV-7-R3")
+
+    def test_uncertain_cleanup_preserves_contexts_until_confirmed_retry(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        self.workspace_close_error = TaskError("close refused")
+        with self.assertRaisesRegex(TaskError, "could not be confirmed retired"):
+            cli.cleanup("DEV-7")
+        self.assertEqual(len(registry.list()), 3)
+        self.assertTrue(all(c["session_id"] == "opaque" for c in registry.list()))
+        self.workspace_close_error = None
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_manually_closed_workspace_contexts_retire_only_after_git_cleanup(self):
+        registry = self.register_contexts()
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_registry_write_failure_after_close_is_retryable_without_reusing_ids(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        with patch.object(ContextRegistry, "retire", side_effect=TaskError("registry unavailable")):
+            with self.assertRaisesRegex(TaskError, "registry unavailable"):
+                cli.cleanup("DEV-7")
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+        self.assertEqual(len(registry.list()), 3)
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_human_moved_terminal_is_not_retired_with_its_old_workspace(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        self.context_snapshot.return_value = [dict(terminal_id="term-task", pane_id="w-other:p9")]
+        with self.assertRaisesRegex(TaskError, "possibly moved by a human"):
+            cli.cleanup("DEV-7")
+        self.assertEqual(len(registry.list()), 3)
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+        self.context_snapshot.return_value = []
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def older_context(self, registry, **overrides):
+        metadata = dict(agent="codex", repository=str(self.repo), worktree=str(self.path),
+                        endpoint="/test.sock", workspace_id="w-previous", terminal_id="term-previous")
+        metadata.update(overrides)
+        context_id = registry.allocate("DEV-7", "implementation", **metadata)
+        registry.update(context_id, state="active", session_id="older-session")
+        return context_id
+
+    def test_cleanup_reopened_checkout_retires_older_workspaces_and_keeps_ordinals(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        self.older_context(registry)
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+        self.assertEqual(len(registry.list(include_retired=True)), 4)
+        restarted = ContextRegistry(self.registry_path)
+        self.assertEqual(restarted.allocate("DEV-7", "implementation", agent="codex"), "DEV-7-I3")
+        self.assertEqual(restarted.allocate("DEV-7", "review", agent="codex"), "DEV-7-R3")
+
+    def test_cleanup_retry_retires_older_instances_only_after_confirmed_close(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        self.older_context(registry)
+        self.workspace_close_error = TaskError("close refused")
+        with self.assertRaisesRegex(TaskError, "could not be confirmed retired"):
+            cli.cleanup("DEV-7")
+        self.assertEqual(len(registry.list()), 4)
+        self.workspace_close_error = None
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+        self.assertEqual(len(registry.list(include_retired=True)), 4)
+
+    def test_cleanup_without_pending_receipt_recovers_older_context_retirement(self):
+        registry = self.register_contexts()
+        self.older_context(registry)
+        with patch("task_start.cli.retire_missing_contexts", side_effect=TaskError("interrupted")):
+            with self.assertRaisesRegex(TaskError, "interrupted"):
+                cli.cleanup("DEV-7")
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.git.retirement_file("DEV-7").exists())
+        self.assertEqual(len(registry.list()), 4)
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_older_context_scope_and_live_workspace_guards_survive_cleanup(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        safe_to_retire = self.older_context(registry)
+        retained = {
+            self.older_context(registry, endpoint="/other-server.sock"),
+            self.older_context(registry, repository=str(self.remote)),
+            self.older_context(registry, worktree=str(self.repo.parent / "other-checkout")),
+            self.older_context(registry, workspace_id="w-still-live"),
+            registry.allocate("DEV-8", "implementation", agent="codex", repository=str(self.repo),
+                              worktree=str(self.path), endpoint="/test.sock", workspace_id="w-previous"),
+        }
+        self.extra_workspaces = [self.workspace_entry("w-still-live", self.repo.parent / "unrelated")]
+        cli.cleanup("DEV-7")
+        self.assertEqual({c["context_id"] for c in registry.list()}, retained)
+        history = {c["context_id"]: c for c in registry.list(include_retired=True)}
+        self.assertEqual(history[safe_to_retire]["state"], "retired")
+
+    def test_older_moved_terminal_retains_session_and_pending_cleanup_receipt(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        older = self.older_context(registry)
+        self.context_snapshot.return_value = [dict(terminal_id="term-previous", pane_id="w-human:p9")]
+        with self.assertRaisesRegex(TaskError, "possibly moved by a human"):
+            cli.cleanup("DEV-7")
+        remaining = registry.list()
+        self.assertEqual([c["context_id"] for c in remaining], [older])
+        self.assertEqual(remaining[0]["session_id"], "older-session")
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+        self.context_snapshot.return_value = []
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_uncertain_older_terminal_absence_retains_mapping_for_retry(self):
+        self.workspace_id = "w-task"
+        registry = self.register_contexts()
+        older = self.older_context(registry)
+        self.context_snapshot.side_effect = [[], TaskError("snapshot unavailable")]
+        with self.assertRaisesRegex(TaskError, "snapshot unavailable"):
+            cli.cleanup("DEV-7")
+        self.assertEqual([c["context_id"] for c in registry.list()], [older])
+        self.assertTrue(self.git.retirement_file("DEV-7").exists())
+        self.context_snapshot.side_effect = None
+        cli.cleanup("DEV-7")
+        self.assertEqual(registry.list(), [])
+
+    def test_existing_or_uncertain_checkout_does_not_retire_older_contexts(self):
+        registry = self.register_contexts()
+        self.older_context(registry)
+        cli.retire_missing_contexts("DEV-7", self.repo, Herdr(self.repo), self.path)
+        self.assertEqual(len(registry.list()), 4)
+        original_lstat = Path.lstat
+
+        def uncertain(path, *args, **kwargs):
+            if path == self.path:
+                raise PermissionError("cannot inspect checkout")
+            return original_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", uncertain):
+            with self.assertRaisesRegex(TaskError, "Cannot confirm context checkout absence"):
+                cli.retire_missing_contexts("DEV-7", self.repo, Herdr(self.repo), self.path)
+        self.assertEqual(len(registry.list()), 4)
 
     def test_wrong_or_ambiguous_herdr_workspace_is_never_retired(self):
         self.workspace_id = "w-task"

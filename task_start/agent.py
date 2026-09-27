@@ -8,13 +8,14 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from . import TaskError
 from .codex_rpc import CodexRPC
 from .config import AgentConfig
 from .linear import Issue
+from .sessions import same_session, session_identity
 from .workspace import Workspace, run
 
 
@@ -56,6 +57,8 @@ class AgentExecution:
     handoff: str
     purpose: str = "implementation"
     policy: Mapping[str, object] = field(default_factory=dict)
+    # Optional workflow-owned persistence hook; never includes the semantic handoff.
+    runtime_observer: Callable[[dict], None] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.handoff, str) or not self.handoff.strip():
@@ -75,6 +78,8 @@ class LaunchResult:
     summary: str
     session_id: str | None = None
     turn_id: str | None = None
+    session_kind: str | None = None
+    resumability: str = "unknown"
 
 
 class AgentAdapter(Protocol):
@@ -181,13 +186,39 @@ class HerdrAgentAdapter:
             raise ValueError(f"{self.display_name} launch/readiness not confirmed")
         return result["agent"]
 
-    def confirm_target(self, workspace: Workspace, started: dict) -> None:
-        agent = self.command("agent", "get", workspace.pane_id)["agent"]
-        self.validate_agent(agent, workspace)
-        if (agent["terminal_id"] != started["terminal_id"]
-                or (started.get("agent_session") is not None
-                    and agent.get("agent_session") != started["agent_session"])):
-            raise ValueError("agent session changed during handoff")
+    def observe_agent(self, execution: AgentExecution, agent: dict,
+                      previous: dict | None = None, *, expected_session=None) -> dict:
+        """Validate every observation and persist a newly discovered reference immediately."""
+        self.validate_agent(agent, execution.workspace)
+        reference = agent.get("agent_session")
+        identity = session_identity(reference, self.kind)
+        established = None
+        if previous is not None:
+            if agent["terminal_id"] != previous["terminal_id"]:
+                raise TaskError("agent terminal changed during handoff")
+            established = previous.get("_session_reference", previous.get("agent_session"))
+            if established is not None and not same_session(established, reference, self.kind):
+                raise TaskError("agent session changed or is no longer reported during handoff")
+        if reference is not None and expected_session is not None:
+            if not same_session(expected_session, reference, self.kind):
+                raise TaskError("agent session does not match the provider session during handoff")
+        # Keep known identity fields even if a later legacy report omits the kind.
+        # The raw report (including source) is persisted separately below.
+        if identity is not None:
+            known = session_identity(established, self.kind)
+            established = dict(agent=identity[0], kind=known[1] if known and known[1] else identity[1],
+                               value=identity[2])
+        if execution.runtime_observer:
+            values = dict(terminal_id=agent["terminal_id"])
+            if identity is not None:
+                values.update(herdr_session=json.dumps(reference), session_id=established["value"],
+                              session_kind=established["kind"])
+            execution.runtime_observer(values)
+        return dict(agent, _session_reference=established)
+
+    def confirm_target(self, execution: AgentExecution, previous: dict, *, expected_session=None) -> dict:
+        agent = self.command("agent", "get", execution.workspace.pane_id)["agent"]
+        return self.observe_agent(execution, agent, previous, expected_session=expected_session)
 
 
 class CodexAdapter(HerdrAgentAdapter):
@@ -254,11 +285,21 @@ class CodexAdapter(HerdrAgentAdapter):
             args = self.launch_args(execution, bootstrap)
             # Verify the receipt API can initialize before starting a terminal agent.
             with CodexRPC(workspace.path) as rpc:
-                started = self.start_agent(workspace, args)
+                observed = self.observe_agent(execution, self.start_agent(workspace, args))
                 phase = "readiness confirmation"
                 thread_id = self.find_session(rpc, workspace, bootstrap)
+                provider_session = dict(agent=self.kind, kind="id", value=thread_id)
+                if observed.get("agent_session") is not None and not same_session(
+                        observed["agent_session"], provider_session, self.kind):
+                    raise TaskError("agent session does not match the provider session during handoff")
+                if execution.runtime_observer:
+                    execution.runtime_observer(dict(session_id=thread_id, session_kind="id"))
                 self.confirm_prompt(rpc, workspace, thread_id, None, bootstrap)
-                self.confirm_target(workspace, started)
+                # Unlike Herdr metadata, the separate receipt API has now read
+                # this exact session's persisted readiness turn.
+                if execution.runtime_observer:
+                    execution.runtime_observer(dict(resumability="yes"))
+                observed = self.confirm_target(execution, observed, expected_session=provider_session)
                 phase = "prompt queue"
                 inputs = [{"type": "text", "text": prompt, "text_elements": []}]
                 queued = rpc.request("thread/queue/add", {"threadId": thread_id,
@@ -268,9 +309,9 @@ class CodexAdapter(HerdrAgentAdapter):
                     raise ValueError("Codex queue acknowledgement mismatch")
                 phase = "prompt delivery/start"
                 turn_id = self.confirm_prompt(rpc, workspace, thread_id, message_id, prompt)
-            self.confirm_target(workspace, started)
+            self.confirm_target(execution, observed, expected_session=provider_session)
             summary = f"Codex turn {turn_id} confirmed in {workspace.pane_id} (session {thread_id})"
-            return LaunchResult(self.kind, workspace.pane_id, summary, thread_id, turn_id)
+            return LaunchResult(self.kind, workspace.pane_id, summary, thread_id, turn_id, "id", "yes")
         except (KeyError, TypeError, ValueError, OSError):
             raise TaskError(f"Codex {phase} was not confirmed in pane {workspace.pane_id}; "
                             f"inspect it before retrying. Session: {thread_id or 'not created'}. "
@@ -429,23 +470,21 @@ class PiAdapter(HerdrAgentAdapter):
             self.validate_model_mode(workspace)
             phase = "startup"
             self.check_target(workspace)
-            started = self.start_agent(workspace, self.launch_args())
-            self.confirm_target(workspace, started)
-            session = started.get("agent_session")
-            if session is not None and (not isinstance(session, str) or not session):
-                raise ValueError("invalid Pi session identifier")
+            observed = self.observe_agent(execution, self.start_agent(workspace, self.launch_args()))
+            observed = self.confirm_target(execution, observed)
             phase = "prompt submission"
             prompted = self.command("agent", "prompt", workspace.pane_id, execution.handoff)["agent"]
-            self.validate_agent(prompted, workspace)
-            if (prompted.get("agent_status") not in {"idle", "done", "working"}
-                    or prompted["terminal_id"] != started["terminal_id"]
-                    or (session is not None and prompted.get("agent_session") != session)):
+            observed = self.observe_agent(execution, prompted, observed)
+            if prompted.get("agent_status") not in {"idle", "done", "working"}:
                 raise ValueError("Pi prompt submission target changed")
-            self.confirm_target(workspace, started)
+            observed = self.confirm_target(execution, observed)
+            identity = session_identity(observed["_session_reference"], self.kind)
+            session_id, session_kind = (identity[2], identity[1]) if identity else (None, None)
             summary = f"Pi prompt submitted in {workspace.pane_id}"
-            if session:
-                summary += f" (session {session})"
-            return LaunchResult(self.kind, workspace.pane_id, summary, session)
+            if session_id:
+                summary += f" (session {session_id})"
+            return LaunchResult(self.kind, workspace.pane_id, summary, session_id,
+                                session_kind=session_kind)  # Herdr metadata alone cannot prove resumability.
         except (KeyError, TypeError, ValueError, OSError):
             raise TaskError(f"Pi {phase} was not confirmed in pane {workspace.pane_id}; "
                             "inspect it before retrying. Workspace left intact") from None
