@@ -866,7 +866,9 @@ class PiAdapterTests(unittest.TestCase):
     def test_review_handoff_is_delivered_without_implementation_framing(self):
         handoff = "Review DEV-7. Report findings only; do not implement changes."
         execution = replace(self.execution, purpose="review", handoff=handoff)
-        with patch.object(self.pi, "command", side_effect=self.results) as command:
+        results = copy.deepcopy(self.results)
+        results[1]["argv"] = ["pi", *self.pi.review_args()]
+        with patch.object(self.pi, "command", side_effect=results) as command:
             self.pi.launch(execution)
         submitted = command.call_args_list[3].args[3]
         self.assertEqual(submitted, handoff)

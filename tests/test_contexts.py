@@ -194,7 +194,7 @@ class LaunchAndInspectionTests(unittest.TestCase):
             self.launch_agent(execution)
             return LaunchResult("codex", "w1:p1", "started", "replacement", session_kind="id")
         self.adapter.launch.side_effect = launch
-        with self.assertRaisesRegex(TaskError, "session changed during registration"):
+        with self.assertRaisesRegex(TaskError, "session changed"):
             self.launch()
         row = self.registry.list()[0]
         self.assertEqual((row["state"], row["session_id"]), ("uncertain", "real-session"))

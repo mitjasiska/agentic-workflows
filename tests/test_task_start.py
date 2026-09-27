@@ -48,7 +48,7 @@ class ParsingTests(unittest.TestCase):
         for args in (["start", value] for value in ["DEV", "DEV-0", "DEV-07", "-7", "../DEV-7", "DEV-7;ls", "DEV-7\n"]):
             with self.subTest(args=args), patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args(args)
-        for command in ["review"]:
+        for command in ["unknown"]:
             with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args([command, "DEV-7"])
 

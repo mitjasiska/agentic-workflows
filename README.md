@@ -256,13 +256,139 @@ New workflow commands such as review should reuse `add_agent_options`,
 `resolve_agent_options`, `AgentExecution`, and the adapter registry. They should
 target the shared boundary unless behavior genuinely belongs to one agent.
 
+## Task review
+
+Review the existing task checkout in a new independent reviewer pane:
+
+```sh
+task review DEV-20
+task review DEV-20 --agent pi --model <provider/model> --mode high
+task review DEV-20 --resume DEV-20-R2
+task review DEV-20 --resume DEV-20-R2 --json
+```
+
+Configure review separately from implementation in the machine-local config:
+
+```toml
+[reviewer]
+kind = "codex"
+model = "gpt-6-astra"
+mode = "high"
+```
+
+The fresh form always allocates the next DEV-41 review context (`DEV-20-R1`,
+`DEV-20-R2`, etc.). It splits a pane in the existing task tab, preserving focus,
+and labels it with that exact context ID. It never prepares another worktree or
+inherits implementation or previous reviewer conversation. Codex and Pi use the
+shared execution adapters and repository permission profiles. Those permission
+capabilities do not authorize task writes during review.
+
+Each pass fetches the latest Linear issue and resolves the configured repository,
+local base branch, exact existing task branch/worktree, scope metadata, and
+DEV-41 mappings. No title-derived branch guesses, fetch, base advancement, worktree
+repair, Linear mutation, PR operation, or automatic routing of findings occurs.
+The permanent checkout must pass the existing base safety checks; the task checkout
+may have staged, unstaged, and untracked work. Ambiguous slices/worktrees and
+missing or inconsistent mappings stop before reviewer launch.
+
+Review pins the current local base commit. A versioned SHA-256 fingerprint covers
+that commit, task HEAD/branch, semantic index entries/flags, Git status, file names,
+bytes, executable bits, symlink targets, and non-ignored untracked files. Initialized
+submodule state is included recursively. Conflicted/unfinished Git operations and
+unsupported file types (such as non-regular untracked files) fail closed. Index
+stat-cache refreshes and mtimes do not affect the fingerprint. Ignored validation
+artifacts are excluded. Two matching reads establish each snapshot. Checkpoints run
+immediately after launch/resume returns, at result/status polls, and immediately
+before accepting the final result. Any checkpoint that observes drift permanently
+invalidates that pass, even if the original bytes are later restored. Final acceptance
+also requires the ending fingerprint to match the pinned starting fingerprint.
+A mutation perfectly restored between checkpoints is an accepted v1 limitation;
+no worktree lock or filesystem watcher is installed.
+
+`--resume` selects only the exact registered review context. It checks role, issue,
+repository, checkout, server, terminal, and persisted provider history. It retains
+the actual conversation and the recorded agent/model/mode. Fresh review requires
+explicit model and mode (config or flags) so provider defaults cannot drift between
+passes. Resume rejects selection flags; use a fresh reviewer for different settings.
+Unknown, retired, uncertain, busy, mismatched, or non-resumable IDs never fall back
+to fresh review. A verified missing pane can be recreated in the task's currently verified tab
+with the same context ID/session. A terminal uniquely relocated to another pane
+within the task workspace retains its context and session; only the verified pane/tab
+location is updated. Conflicting or ambiguous runtime/session evidence fails. Tab
+rearrangement within the task workspace and manual pane renaming do not select a
+different reviewer. Codex uses its exact thread queue and persisted prompt receipt;
+Pi requires an exact persisted session-file reference from Herdr.
+Pi review launches and restarts explicitly load the bundled session-reporting
+extension, so discovery does not depend on a globally installed Herdr integration.
+It reports Pi's native session path; a startup path may precede persisted history.
+Pi resume rechecks the saved model/thinking mode through the same capability check
+as fresh launch; unsupported or clamped settings fail before the follow-up prompt.
+Pi verification retains the immutable conversation ID from the persisted header in
+the existing DEV-41 session reference. Resume checks that ID and actual history
+again after startup, before delivering instructions; recreating an empty session at
+the same path is rejected. Session references first reported during review polling
+are recorded through the same registry observer as launch. Later conflicting
+identities fail; a reported path alone never establishes resumability. Explicit
+empty, blank, or malformed `--resume` selectors fail before allocation.
+
+Herdr may infer `idle` while Pi is still working. Idle/done without a structured
+result, startup gaps, and temporarily absent/unknown observations remain pending;
+elapsed startup time or an earlier working observation does not establish completion.
+Acceptance requires validated output and idle/done, plus final identity/state checks.
+Without conclusive output or a verified failure, the existing workflow timeout bounds
+the wait, including when a stopped process is only reported as absent/unknown.
+
+The handoff separates authoritative read-only review instructions, resolved and
+pinned metadata, and latest Linear requirements. Embedded implementation-agent
+instructions remain task context. Reviewers may inspect and validate, but cannot
+edit task files, fix, stage, commit, push, merge, modify Linear, or change PRs.
+Their only output-file write is a private temporary JSON result outside the task
+checkout. The workflow waits for the same terminal/session to settle, validates a
+pass-specific nonce and strict result shape, then removes the temporary directory.
+No durable semantic report is stored. A blocked pass, timeout, or interruption leaves
+the pane intact. Context health and resumability are determined separately from the
+pass verdict using live pane/terminal/session identity and provider history. A verified
+reviewer remains resumable after a pause or tab move; release the pause before submitting
+its next follow-up. If the agent exits back to its shell, explicit resume restarts it in
+the same mapped pane and verifies the retained conversation before sending the handoff.
+Closing a pane preserves verified session evidence for later exact resume and pane recreation.
+Temporary verification failures retain last-known verified resumability; every resume
+still rechecks provider history. Missing, ambiguous, or replaced identity remains uncertain and cannot
+be resumed implicitly. `--timeout` defaults to 1800 seconds after prompt delivery.
+
+`--json` emits a version-1 `ReviewResult`, independent of human CLI formatting:
+
+- `state`: `clean`, `findings`, `blocked`, or `failed`; `invalidated` distinguishes
+  implementation-state invalidation from other blocking conditions.
+- `findings`: severity (`critical`, `high`, `medium`, `low`), explanation, concrete
+  file/location or other evidence, and optional requirement/test linkage text.
+- `checks`: name, result (`passed`, `failed`, `not_run`), and details.
+- `context_id`, `pass_id`, `pass_kind` (`fresh`/`resumed`), `execution`
+  (`kind`/`model`/`mode`), pinned `review_state`, and `post_fingerprint`.
+- `summary`: a human-readable explanation, never an automation verdict source.
+
+Exit status is 0 for clean, 2 for findings, 3 for blocked/invalidated, and 1 for
+failure. Missing/malformed output cannot be clean; drift overrides any model verdict.
+Preflight errors stop before a pass exists and are reported on stderr. Findings,
+validation limitations, and stopped/blocked agents require human action; no fix loop
+or implementation resume is included.
+
+Controlled fresh/resume acceptance tests use real disposable Git task worktrees and
+the DEV-41 SQLite registry, with deterministic Linear/Herdr/provider boundaries.
+They verify distinct fresh sessions, exact resume, saved settings, stable state,
+and mutation invalidation. The 2026-09-27 live check confirmed Herdr 0.9.1 pane split
+identity and preserved task-tab placement, then closed that disposable pane. A live
+model fresh/resume smoke could not run in the managed sandbox: Pi could not acquire
+its settings/auth locks and Codex's receipt API could not initialize. No live review
+verdict is claimed from that check.
+
 ## Workflow context identities
 
 Each new implementation launch receives a visible pane label such as `DEV-20-I1`.
 The identifier is the canonical Linear issue ID, followed by `I` (implementation)
 or `R` (review) and a monotonic ordinal. These identify agent contexts, not Git
-worktrees: contexts can share a checkout. Review allocation is available to future
-workflow code; there is no `task review` command yet.
+worktrees: contexts can share a checkout. `task review` consumes the same allocation,
+session identity, and pane-labeling primitives for independent reviewers.
 
 Inspect contexts without loading workflow configuration or contacting Linear:
 
@@ -279,8 +405,8 @@ workspace, tab and pane needed to locate the context. Unspecified model/mode or
 unavailable session evidence is `unknown`. A session reference does not by itself
 establish resumability: Pi references remain `unknown` without persistence evidence,
 while Codex's receipt API confirms a persisted readiness turn before reporting
-`yes`. This does not add a workflow resume command or guarantee the provider will
-retain that history indefinitely.
+`yes`. `task review --resume` rechecks provider history; registry evidence does not
+guarantee that the provider will retain that history indefinitely.
 
 The machine-local registry is `~/.agentic-workflows/contexts.sqlite3`, separate from
 project files and Linear. Python's SQLite support supplies atomic transactions and
@@ -298,6 +424,9 @@ semantic run reports. Adapter observers save real session handles as soon as the
 become available in startup, confirmation, or prompt responses, including before
 later handoff failures. Subsequent observations must match the established session;
 reporting provenance such as `source` is retained separately and is not identity.
+Review passes use `reviewing` while one caller owns that reviewer; an atomic registry
+claim prevents concurrent follow-ups in the same conversation. Clean, findings,
+blocked, and failed verdicts are transient results, not registry lifecycle states.
 A launch interrupted
 before its result can be recorded remains `launching`; another concurrent launch
 cannot claim that pane until the uncertain context is inspected and cleaned up.
