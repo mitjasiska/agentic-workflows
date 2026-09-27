@@ -1,11 +1,12 @@
 """Agent-independent execution contract and the supported launch adapters."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import time
 from typing import Callable, Mapping, Protocol
@@ -15,7 +16,7 @@ from . import TaskError
 from .codex_rpc import CodexRPC
 from .config import AgentConfig
 from .linear import Issue
-from .sessions import same_session, session_identity
+from .sessions import SessionInvalid, merge_session, same_session, session_identity
 from .workspace import Workspace, run
 
 
@@ -80,6 +81,7 @@ class LaunchResult:
     turn_id: str | None = None
     session_kind: str | None = None
     resumability: str = "unknown"
+    context_id: str | None = None
 
 
 class AgentAdapter(Protocol):
@@ -89,13 +91,18 @@ class AgentAdapter(Protocol):
 
     def launch(self, execution: AgentExecution) -> LaunchResult: ...
 
+    def verify_review_session(self, workspace: Workspace, reference: dict) -> dict: ...
 
-def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides) -> AgentOptions:
+    def resume_review(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult: ...
+
+    def review_status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
+
+
+def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides, *, section: str = "agent") -> AgentOptions:
     """Resolve independent CLI-over-config choices without mutating configuration."""
     kind = overrides.kind if overrides.kind is not None else (config.kind if config else None)
     if kind is None:
-        raise TaskError("Configure [agent] kind in ~/.agentic-workflows/config.toml or pass --agent; "
-                        "use --no-agent for workspace-only setup")
+        raise TaskError(f"Configure [{section}] kind in ~/.agentic-workflows/config.toml or pass --agent")
     model = overrides.model if overrides.model is not None else (config.model if config else None)
     mode = overrides.mode if overrides.mode is not None else (config.mode if config else None)
     return AgentOptions(kind, model, mode)
@@ -147,28 +154,31 @@ class HerdrAgentAdapter:
         except (ValueError, KeyError, TypeError):
             raise TaskError(f"Unexpected Herdr {group} {operation} response") from None
 
-    def validate_agent(self, agent: dict, workspace: Workspace) -> None:
-        if (agent["agent"] != self.kind or agent["workspace_id"] != workspace.workspace_id
-                or agent["tab_id"] != workspace.tab_id or agent["pane_id"] != workspace.pane_id
+    def validate_agent(self, agent: dict, workspace: Workspace, *, review: bool = False,
+                       allow_absent: bool = False) -> None:
+        if ((agent["agent"] != self.kind and not (allow_absent and agent["agent"] is None))
+                or agent["workspace_id"] != workspace.workspace_id
+                or (not review and agent["tab_id"] != workspace.tab_id) or agent["pane_id"] != workspace.pane_id
                 or not Path(agent["cwd"]).is_absolute() or not Path(agent["foreground_cwd"]).is_absolute()
                 or not isinstance(agent["terminal_id"], str) or not agent["terminal_id"]
                 or Path(agent["cwd"]).resolve() != workspace.path
                 or Path(agent["foreground_cwd"]).resolve() != workspace.path):
             raise ValueError("agent target mismatch")
 
-    def check_target(self, workspace: Workspace) -> None:
+    def check_target(self, workspace: Workspace, *, review: bool = False) -> None:
         panes = self.command("pane", "list", "--workspace", workspace.workspace_id)["panes"]
         if not isinstance(panes, list):
             raise ValueError("invalid panes")
         for pane in panes:
             if pane["workspace_id"] != workspace.workspace_id:
                 raise ValueError("pane workspace mismatch")
-            if pane.get("agent") == self.kind:
+            if pane.get("agent") == self.kind and not review:
                 raise TaskError(f"{self.display_name} already occupies pane {pane['pane_id']}; "
                                 "inspect/continue it or exit it before starting a fresh task session. "
                                 "Use --no-agent to focus the workspace without launching a duplicate")
         targets = [pane for pane in panes if pane["pane_id"] == workspace.pane_id]
-        if len(targets) != 1 or targets[0]["tab_id"] != workspace.tab_id:
+        if (len(targets) != 1 or (not review and targets[0]["tab_id"] != workspace.tab_id)
+                or targets[0].get("agent")):
             raise ValueError("confirmed pane is no longer present")
 
     def agent_name(self, workspace: Workspace) -> str:
@@ -176,20 +186,20 @@ class HerdrAgentAdapter:
         return "task-" + hashlib.sha256(
             f"{workspace.path}:{workspace.pane_id}".encode()).hexdigest()[:20]
 
-    def start_agent(self, workspace: Workspace, args: list[str]) -> dict:
+    def start_agent(self, workspace: Workspace, args: list[str], *, review: bool = False) -> dict:
         result = self.command("agent", "start", self.agent_name(workspace),
                               "--kind", self.kind, "--pane", workspace.pane_id,
                               "--timeout", "30000", "--", *args)
-        self.validate_agent(result["agent"], workspace)
+        self.validate_agent(result["agent"], workspace, review=review)
         if (result["agent"]["agent_status"] not in {"idle", "done", "working"}
                 or result["argv"] != [self.kind, *args]):
             raise ValueError(f"{self.display_name} launch/readiness not confirmed")
         return result["agent"]
 
     def observe_agent(self, execution: AgentExecution, agent: dict,
-                      previous: dict | None = None, *, expected_session=None) -> dict:
+                      previous: dict | None = None, *, expected_session=None, allow_absent=False) -> dict:
         """Validate every observation and persist a newly discovered reference immediately."""
-        self.validate_agent(agent, execution.workspace)
+        self.validate_agent(agent, execution.workspace, review=execution.purpose == "review", allow_absent=allow_absent)
         reference = agent.get("agent_session")
         identity = session_identity(reference, self.kind)
         established = None
@@ -205,9 +215,7 @@ class HerdrAgentAdapter:
         # Keep known identity fields even if a later legacy report omits the kind.
         # The raw report (including source) is persisted separately below.
         if identity is not None:
-            known = session_identity(established, self.kind)
-            established = dict(agent=identity[0], kind=known[1] if known and known[1] else identity[1],
-                               value=identity[2])
+            established = merge_session(established or expected_session, reference, self.kind)
         if execution.runtime_observer:
             values = dict(terminal_id=agent["terminal_id"])
             if identity is not None:
@@ -219,6 +227,72 @@ class HerdrAgentAdapter:
     def confirm_target(self, execution: AgentExecution, previous: dict, *, expected_session=None) -> dict:
         agent = self.command("agent", "get", execution.workspace.pane_id)["agent"]
         return self.observe_agent(execution, agent, previous, expected_session=expected_session)
+
+    def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
+        raise TaskError(f"{self.display_name} cannot safely resume this reviewer session")
+
+    def resume_args(self, execution: AgentExecution, reference: dict) -> list[str]:
+        raise TaskError(f"{self.display_name} does not support explicit reviewer resume")
+
+    def review_status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str:
+        try:
+            agent = self.command("agent", "get", execution.workspace.pane_id)["agent"]
+        except (TaskError, KeyError, TypeError):
+            return "unknown"  # Unavailable observation is not proof of completion.
+        if not isinstance(agent, dict):
+            return "unknown"
+        try:
+            if agent["terminal_id"] != terminal_id:
+                raise ValueError("terminal changed")
+            # A known conflicting reference invalidates identity. Missing metadata
+            # during fresh startup is allowed: the pass nonce still binds output.
+            if reference and agent.get("agent_session") is not None and not same_session(
+                    reference, agent["agent_session"], self.kind):
+                raise ValueError("session changed")
+            observed_execution = execution
+            relocated = agent.get("pane_id") != execution.workspace.pane_id
+            if relocated:
+                if not isinstance(agent.get("pane_id"), str) or not agent["pane_id"]:
+                    return "unknown"
+                # A move can race the preceding registry snapshot. Validate all
+                # other identity fields now; let the next snapshot prove unique
+                # placement and persist it before accepting any result.
+                observed_execution = replace(execution, workspace=replace(execution.workspace, pane_id=agent["pane_id"]))
+            self.observe_agent(observed_execution, agent, expected_session=reference, allow_absent=True)
+            status = agent.get("agent_status")
+            if relocated or agent.get("agent") is None or agent.get("launch_pending"):
+                return "unknown"
+            if status not in {"idle", "done", "working", "blocked"}:
+                return "unknown"
+            return status
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Reviewer runtime identity/status changed or is unknown; inspect its pane") from None
+
+    def resume_review(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult:
+        self.validate_execution(execution)
+        reference = self.verify_review_session(execution.workspace, reference)
+        if execution.runtime_observer:
+            execution.runtime_observer(dict(herdr_session=json.dumps(reference)))
+        try:
+            if recreate:
+                self.check_target(execution.workspace, review=True)
+                self.start_agent(execution.workspace, self.resume_args(execution, reference), review=True)
+            observed = self.command("agent", "get", execution.workspace.pane_id)["agent"]
+            self.validate_agent(observed, execution.workspace, review=True)
+            if (not same_session(reference, observed.get("agent_session"), self.kind)
+                    or observed["agent_status"] not in {"idle", "done"}):
+                raise TaskError("Exact reviewer session is not idle and confirmed; no prompt was submitted")
+            observed = self.observe_agent(execution, observed, expected_session=reference)
+            # Authenticate the observed provider conversation AFTER startup. A
+            # path-based provider may have recreated an empty file during launch.
+            self.verify_review_session(execution.workspace, reference)
+            prompted = self.command("agent", "prompt", execution.workspace.pane_id, execution.handoff)["agent"]
+            observed = self.observe_agent(execution, prompted, observed, expected_session=reference)
+            self.confirm_target(execution, observed, expected_session=reference)
+            return LaunchResult(self.kind, execution.workspace.pane_id, "Reviewer follow-up submitted",
+                                reference["value"], session_kind=reference["kind"], resumability="yes")
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Reviewer resume identity or delivery was not confirmed; inspect its pane") from None
 
 
 class CodexAdapter(HerdrAgentAdapter):
@@ -254,6 +328,63 @@ class CodexAdapter(HerdrAgentAdapter):
             args.extend(["--config", "model_reasoning_effort=" + json.dumps(mode)])
         return [*args, "--", bootstrap]
 
+    def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
+        try:
+            if reference["kind"] != "id" or str(UUID(reference["value"])) != reference["value"]:
+                raise ValueError("not an exact Codex ID")
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise SessionInvalid("Codex reviewer history is missing or mismatched; cannot resume") from None
+        try:
+            with CodexRPC(workspace.path) as rpc:
+                thread = rpc.request("thread/read", {"threadId": reference["value"]})["thread"]
+            if (not isinstance(thread["id"], str) or not thread["id"]
+                    or not isinstance(thread["cwd"], str) or not Path(thread["cwd"]).is_absolute()):
+                raise ValueError("unusable provider response")
+            cwd = Path(thread["cwd"]).resolve()
+        except (KeyError, ValueError, TypeError, OSError):
+            # Missing/malformed API responses and transport failures do not prove
+            # deletion. They still stop explicit resume before any handoff.
+            raise TaskError("Codex reviewer history verification is temporarily unavailable; retry before resuming") from None
+        if thread["id"] != reference["value"] or cwd != workspace.path:
+            raise SessionInvalid("Codex reviewer history is missing or mismatched; cannot resume")
+        return dict(reference)
+
+    def resume_args(self, execution: AgentExecution, reference: dict) -> list[str]:
+        return ["resume", *self.launch_args(execution, "")[:-2], "--", reference["value"]]
+
+    def resume_review(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult:
+        """Queue to the exact persisted thread, including when Herdr omits its ID.
+
+        The durable input receipt establishes the recipient; no terminal keystroke
+        can accidentally deliver this follow-up to a different conversation.
+        """
+        self.validate_execution(execution)
+        self.verify_review_session(execution.workspace, reference)
+        thread_id = reference["value"]
+        try:
+            if recreate:
+                self.check_target(execution.workspace, review=True)
+                self.clear_shell_input(execution.workspace)
+                self.start_agent(execution.workspace, self.resume_args(execution, reference), review=True)
+            observed = self.command("agent", "get", execution.workspace.pane_id)["agent"]
+            observed = self.observe_agent(execution, observed, expected_session=reference)
+            if observed["agent_status"] not in {"idle", "done"}:
+                raise TaskError("Reviewer is not idle; no follow-up was queued")
+            message_id = str(uuid4())
+            inputs = [{"type": "text", "text": execution.handoff, "text_elements": []}]
+            with CodexRPC(execution.workspace.path) as rpc:
+                queued = rpc.request("thread/queue/add", {"threadId": thread_id,
+                    "clientUserMessageId": message_id, "input": inputs})["queuedSubmission"]
+                if (queued["clientUserMessageId"] != message_id or queued["input"] != inputs
+                        or not isinstance(queued["id"], str) or not queued["id"]):
+                    raise ValueError("queue acknowledgement mismatch")
+                turn = self.confirm_prompt(rpc, execution.workspace, thread_id, message_id, execution.handoff)
+            self.confirm_target(execution, observed, expected_session=reference)
+            return LaunchResult(self.kind, execution.workspace.pane_id, "Exact reviewer follow-up confirmed",
+                                thread_id, turn, "id", "yes")
+        except (KeyError, ValueError, TypeError, OSError):
+            raise TaskError("Codex reviewer continuation was not confirmed; inspect the mapped pane/session") from None
+
     def clear_shell_input(self, workspace: Workspace) -> None:
         # A prior interrupted launch can leave an executable fragment in the
         # reusable shell's input buffer. Cancel it so Herdr's canonical `codex`
@@ -275,7 +406,7 @@ class CodexAdapter(HerdrAgentAdapter):
         phase = "startup"
         thread_id = None
         try:
-            self.check_target(workspace)
+            self.check_target(workspace, review=execution.purpose == "review")
             self.clear_shell_input(workspace)
             # A native, single-line readiness turn survives Codex startup dialogs.
             # Its nonce binds the returned Codex thread to this precise launch.
@@ -285,7 +416,7 @@ class CodexAdapter(HerdrAgentAdapter):
             args = self.launch_args(execution, bootstrap)
             # Verify the receipt API can initialize before starting a terminal agent.
             with CodexRPC(workspace.path) as rpc:
-                observed = self.observe_agent(execution, self.start_agent(workspace, args))
+                observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
                 phase = "readiness confirmation"
                 thread_id = self.find_session(rpc, workspace, bootstrap)
                 provider_session = dict(agent=self.kind, kind="id", value=thread_id)
@@ -351,23 +482,30 @@ class CodexAdapter(HerdrAgentAdapter):
                                  timeout=max(0, deadline - time.monotonic()))["thread"]
             if thread["id"] != thread_id or Path(thread["cwd"]).resolve() != workspace.path:
                 raise ValueError("Codex receipt workspace/session mismatch")
-            page = rpc.request("thread/items/list", {"threadId": thread_id,
-                               "sortDirection": "asc", "limit": 100},
-                               timeout=max(0, deadline - time.monotonic()))
-            if not isinstance(page["data"], list):
-                raise ValueError("invalid Codex history")
-            for entry in page["data"]:
-                item = entry["item"]
-                if item["type"] != "userMessage" or (message_id is not None and item["clientId"] != message_id):
-                    continue
-                content = item["content"]
-                if (len(content) != 1 or content[0]["type"] != "text"
-                        or content[0]["text"] != prompt
-                        or not isinstance(entry["turnId"], str) or not entry["turnId"]):
-                    raise ValueError("Codex recorded different input")
-                return entry["turnId"]
-            if page.get("nextCursor") is not None:
-                raise ValueError("unexpected history before task input")
+            cursor, seen = None, set()
+            while True:
+                params = {"threadId": thread_id, "sortDirection": "asc", "limit": 100}
+                if cursor is not None:
+                    params["cursor"] = cursor
+                page = rpc.request("thread/items/list", params, timeout=max(0, deadline - time.monotonic()))
+                if not isinstance(page["data"], list):
+                    raise ValueError("invalid Codex history")
+                for entry in page["data"]:
+                    item = entry["item"]
+                    if item["type"] != "userMessage" or (message_id is not None and item["clientId"] != message_id):
+                        continue
+                    content = item["content"]
+                    if (len(content) != 1 or content[0]["type"] != "text"
+                            or content[0]["text"] != prompt
+                            or not isinstance(entry["turnId"], str) or not entry["turnId"]):
+                        raise ValueError("Codex recorded different input")
+                    return entry["turnId"]
+                cursor = page.get("nextCursor")
+                if cursor is None:
+                    break
+                if not isinstance(cursor, str) or not cursor or cursor in seen or len(seen) >= 1000:
+                    raise ValueError("ambiguous Codex history pagination")
+                seen.add(cursor)
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
         raise TaskError("Timed out: Codex did not confirm the exact task prompt in a recorded turn; "
                         "check the pane for startup, trust, authentication, or model errors")
@@ -399,6 +537,54 @@ class PiAdapter(HerdrAgentAdapter):
         # Pi has no --cd flag. Herdr starts it in the confirmed pane cwd.
         # Herdr rejects multiline initial-message arguments; submit after startup.
         return args
+
+    def review_args(self) -> list[str]:
+        # Herdr process detection alone reports no Pi session identity. Load a
+        # session-only reporter for this process; no global integration install.
+        extension = Path(__file__).with_name("pi_session.mjs").resolve()
+        if not extension.is_file():
+            raise TaskError("Pi review session reporter is missing from this workflow installation")
+        return [*self.launch_args(), "--extension", str(extension)]
+
+    def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
+        try:
+            path = Path(reference["value"])
+            if (reference["kind"] != "path" or not path.is_absolute()
+                    or not stat.S_ISREG(path.stat().st_mode)):
+                raise ValueError("an exact persisted Pi session path is required")
+            with path.open(encoding="utf-8") as source:
+                header = json.loads(source.readline())
+                if (header["type"] != "session" or not isinstance(header["id"], str) or not header["id"].strip()
+                        or ("conversation_id" in reference and header["id"] != reference["conversation_id"])
+                        or Path(header["cwd"]).resolve() != workspace.path):
+                    raise ValueError("session header mismatch")
+                has_history = False
+                for line in source:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    if not isinstance(entry, dict):
+                        raise ValueError("invalid session history")
+                    if entry.get("type") == "message":
+                        if not isinstance(entry.get("message"), dict):
+                            raise ValueError("invalid persisted message")
+                        has_history = True
+                        break
+                if not has_history:
+                    raise ValueError("no persisted conversation")
+            return dict(reference, conversation_id=header["id"])
+        except (KeyError, ValueError, TypeError, FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            raise SessionInvalid("Pi reviewer needs an exact persisted session with matching conversation identity, cwd/history") from None
+        except OSError:
+            raise TaskError("Pi reviewer history verification is temporarily unavailable; retry before resuming") from None
+
+    def resume_args(self, execution: AgentExecution, reference: dict) -> list[str]:
+        return [*self.review_args(), "--session", reference["value"]]
+
+    def resume_review(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult:
+        self.validate_execution(execution)
+        self.validate_model_mode(execution.workspace)
+        return super().resume_review(execution, reference, recreate=recreate)
 
     def model_mode_capabilities(self, workspace: Workspace) -> tuple[str, str, tuple[str, ...]]:
         """Ask the installed Pi to resolve the model and report its real mode support."""
@@ -469,8 +655,9 @@ class PiAdapter(HerdrAgentAdapter):
         try:
             self.validate_model_mode(workspace)
             phase = "startup"
-            self.check_target(workspace)
-            observed = self.observe_agent(execution, self.start_agent(workspace, self.launch_args()))
+            self.check_target(workspace, review=execution.purpose == "review")
+            args = self.review_args() if execution.purpose == "review" else self.launch_args()
+            observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
             observed = self.confirm_target(execution, observed)
             phase = "prompt submission"
             prompted = self.command("agent", "prompt", workspace.pane_id, execution.handoff)["agent"]

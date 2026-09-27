@@ -10,7 +10,7 @@ import re
 import sqlite3
 
 from . import TaskError
-from .sessions import same_session, session_identity
+from .sessions import merge_session, same_session
 from .workspace import run
 
 
@@ -126,6 +126,42 @@ class ContextRegistry:
                 WHERE (? IS NULL OR issue=?) AND (? OR retired_at IS NULL)
                 ORDER BY issue, role, ordinal""", (issue, issue, include_retired))]
 
+    def get(self, context_id: str) -> dict:
+        matches = [c for c in self.list(include_retired=True) if c["context_id"] == context_id]
+        if len(matches) != 1:
+            raise TaskError(f"Unknown workflow context {context_id}")
+        return matches[0]
+
+    def claim_review(self, context: dict) -> None:
+        """Serialize passes in one reviewer, without a second identity store."""
+        with self.connection(write=True) as db:
+            current = db.execute("SELECT * FROM contexts WHERE context_id=?",
+                                 (context["context_id"],)).fetchone()
+            if (current is None or dict(current) != context or context["role"] != "review"
+                    or context["state"] != "active" or context["retired_at"]):
+                raise TaskError("Reviewer is stale, retired, busy, or uncertain; inspect its context")
+            db.execute("UPDATE contexts SET state='reviewing' WHERE context_id=?", (context["context_id"],))
+
+    def rebind_review_pane(self, context: dict, pane: dict) -> None:
+        """Update a relocated terminal, or bind a safely resumed replacement pane.
+
+        Relocation requires the same terminal and reconciled session evidence.
+        A replacement requires missing-pane/provider evidence and a claimed pass.
+        The compare-and-set prevents another pass or cleanup from changing the binding.
+        """
+        with self.connection(write=True) as db:
+            current = db.execute("SELECT * FROM contexts WHERE context_id=?",
+                                 (context["context_id"],)).fetchone()
+            relocated = pane["terminal_id"] == context["terminal_id"]
+            expected = context if relocated else dict(context, state="reviewing")
+            if (current is None or dict(current) != expected
+                    or context["role"] != "review" or context["state"] not in {"active", "reviewing"}
+                    or context["retired_at"]
+                    or pane["workspace_id"] != context["workspace_id"]):
+                raise TaskError("Reviewer binding changed; replacement pane was not registered")
+            db.execute("UPDATE contexts SET pane_id=?, terminal_id=?, tab_id=? WHERE context_id=?",
+                       (pane["pane_id"], pane["terminal_id"], pane["tab_id"], context["context_id"]))
+
     def retire(self, issue: str, repository: Path, worktree: Path, *,
                endpoint: str, workspace_id: str | None) -> None:
         if not self.path.exists():
@@ -156,7 +192,7 @@ class HerdrContexts:
             payload = json.loads(run(["herdr", group, operation, *args]))
             result = payload["result"]
             expected = {("api", "snapshot"): "session_snapshot", ("pane", "get"): "pane_info",
-                        ("pane", "rename"): "pane_info"}
+                        ("pane", "rename"): "pane_info", ("pane", "split"): "pane_info"}
             if payload.get("error") or result["type"] != expected[group, operation]:
                 raise ValueError("unexpected response")
             return result
@@ -186,22 +222,94 @@ class HerdrContexts:
         # Recheck the terminal before mutation; position/focus never select a target.
         current = self.command("pane", "get", pane["pane_id"])["pane"]
         if any(current.get(k) != pane.get(k) for k in
-               ("pane_id", "workspace_id", "tab_id", "terminal_id", "agent", "label")):
+               ("pane_id", "workspace_id", "terminal_id", "agent", "label")):
             raise TaskError("Herdr pane changed before labeling; context was not rebound")
         self.command("pane", "rename", pane["pane_id"], context_id)
         current = self.command("pane", "get", pane["pane_id"])["pane"]
         if current.get("terminal_id") != pane["terminal_id"] or current.get("label") != context_id:
             raise TaskError(f"Herdr pane label {context_id} could not be confirmed")
 
+    def split(self, anchor: dict, path: Path) -> dict:
+        current = self.command("pane", "get", anchor["pane_id"])["pane"]
+        if any(current.get(k) != anchor.get(k) for k in
+               ("workspace_id", "tab_id", "pane_id", "terminal_id")):
+            raise TaskError("Task pane changed before split; no reviewer was launched")
+        try:
+            pane = self.command("pane", "split", anchor["pane_id"], "--direction", "down",
+                                "--cwd", str(path), "--no-focus")["pane"]
+            self.validate_pane(pane)
+            if (pane["workspace_id"] != anchor["workspace_id"] or pane["tab_id"] != anchor["tab_id"]
+                    or pane["pane_id"] == anchor["pane_id"] or pane.get("agent")
+                    or Path(pane["cwd"]).resolve() != path):
+                raise ValueError("split target mismatch")
+            return pane
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Herdr did not confirm a new pane in the exact task tab/worktree") from None
+
+
+def context_reference(context: dict) -> dict | None:
+    """Read all identity evidence from the existing DEV-41 mapping."""
+    try:
+        reference = (dict(agent=context["agent"], kind=context["session_kind"], value=context["session_id"])
+                     if context["session_id"] else None)
+        reported = json.loads(context["herdr_session"]) if context["herdr_session"] else None
+        merged = merge_session(reference, reported, context["agent"])
+        return dict(reported, **merged) if isinstance(reported, dict) else merged
+    except (TypeError, ValueError):
+        raise TaskError("Invalid or conflicting workflow session identity") from None
+
+
+def context_observer(registry: ContextRegistry, context_id: str):
+    """Use the same identity guard for launch, resume, and later runtime discovery."""
+    context = registry.get(context_id)
+    established = context_reference(context)
+    resumability = context["resumability"]
+
+    def record(values):
+        nonlocal established, resumability
+        values = dict(values)
+        terminal = values.pop("terminal_id", context["terminal_id"])
+        if terminal != context["terminal_id"]:
+            raise TaskError("Herdr terminal changed during observation; context was not rebound")
+        candidate = established
+        try:
+            reported = json.loads(values["herdr_session"]) if values.get("herdr_session") is not None else None
+            candidate = merge_session(candidate, reported, context["agent"])
+            if values.get("session_id") is not None:
+                candidate = merge_session(candidate, dict(agent=context["agent"], kind=values.get("session_kind"),
+                                          value=values["session_id"]), context["agent"])
+        except (TypeError, ValueError):
+            raise TaskError("Agent session changed or is malformed during observation; context was not rebound") from None
+        values.pop("session_id", None)
+        values.pop("session_kind", None)
+        if reported is None:
+            values.pop("herdr_session", None)
+        elif candidate and "conversation_id" in candidate:
+            # Keep provider-authenticated evidence when a later Herdr observation
+            # supplies only the locator (or changes reporting provenance).
+            reported = dict(reported) if isinstance(reported, dict) else dict(candidate)
+            reported["conversation_id"] = candidate["conversation_id"]
+            values["herdr_session"] = json.dumps(reported)
+        if candidate is not None:
+            values.update(session_id=candidate["value"], session_kind=candidate["kind"])
+        if values.get("resumability") == "unknown" and resumability != "unknown":
+            values.pop("resumability")
+        if values:
+            registry.update(context_id, **values)
+        established = candidate
+        resumability = values.get("resumability", resumability)
+
+    return record
+
 
 def launch_registered(adapter, execution, *, registry: ContextRegistry | None = None,
-                      herdr: HerdrContexts | None = None):
+                      herdr: HerdrContexts | None = None, handoff_factory=None):
     """Register a fresh launch; existing agents are never resumed or relabeled here."""
     registry, herdr = registry or ContextRegistry(), herdr or HerdrContexts()
     workspace = execution.workspace
     endpoint = herdr.endpoint()
     panes = herdr.snapshot()
-    if any(p.get("agent") == execution.options.kind and p["workspace_id"] == workspace.workspace_id
+    if execution.purpose != "review" and any(p.get("agent") == execution.options.kind and p["workspace_id"] == workspace.workspace_id
            for p in panes):
         raise TaskError("An implementation agent already occupies this workspace; inspect/continue it "
                         "or use --no-agent. Its context identity was preserved")
@@ -216,49 +324,18 @@ def launch_registered(adapter, execution, *, registry: ContextRegistry | None = 
         workspace_id=workspace.workspace_id, tab_id=workspace.tab_id, pane_id=workspace.pane_id,
         terminal_id=pane["terminal_id"])
 
-    established = None
-    resumability = "unknown"
-
-    def record(values):
-        nonlocal established, resumability
-        values = dict(values)
-        terminal = values.pop("terminal_id", pane["terminal_id"])
-        if terminal != pane["terminal_id"]:
-            raise TaskError("Herdr terminal changed during launch; context was not rebound")
-        references = []
-        if values.get("herdr_session") is not None:
-            references.append(json.loads(values["herdr_session"]))
-        else:
-            values.pop("herdr_session", None)
-        if values.get("session_id") is not None:
-            references.append(dict(agent=execution.options.kind, kind=values.get("session_kind"),
-                                   value=values["session_id"]))
-        values.pop("session_id", None)
-        values.pop("session_kind", None)
-        for reference in references:
-            identity = session_identity(reference, execution.options.kind)
-            if identity is None:
-                continue
-            if established is not None and not same_session(established, reference, execution.options.kind):
-                raise TaskError("Agent session changed during registration; context was not rebound")
-            kind = established["kind"] if established and established["kind"] else identity[1]
-            established = dict(agent=identity[0], kind=kind, value=identity[2])
-        if established is not None:
-            values.update(session_id=established["value"], session_kind=established["kind"])
-        if values.get("resumability") == "unknown" and resumability != "unknown":
-            values.pop("resumability")  # An omitted result cannot erase earlier provider evidence.
-        resumability = values.get("resumability", resumability)
-        if values:
-            registry.update(context_id, **values)
+    record = context_observer(registry, context_id)
 
     try:
+        if handoff_factory is not None:
+            execution = replace(execution, handoff=handoff_factory(context_id))
         herdr.label(pane, context_id)
         result = adapter.launch(replace(execution, runtime_observer=record))
         if result.kind != execution.options.kind or result.pane_id != workspace.pane_id:
             raise TaskError("Execution result does not match the allocated workflow context")
-        record(dict(state="active", session_id=result.session_id,
+        record(dict(state="reviewing" if execution.purpose == "review" else "active", session_id=result.session_id,
                     session_kind=result.session_kind, resumability=result.resumability))
-        return replace(result, summary=f"{context_id}: {result.summary}")
+        return replace(result, context_id=context_id, summary=f"{context_id}: {result.summary}")
     except BaseException as error:
         # Startup/prompt delivery may have succeeded before a timeout. Keep its identity.
         try:
@@ -270,18 +347,25 @@ def launch_registered(adapter, execution, *, registry: ContextRegistry | None = 
         raise
 
 
-def reconcile(context: dict, panes: list[dict]) -> tuple[dict | None, list[str]]:
-    """Read-only reconciliation; even a moved terminal does not rewrite its binding."""
+def reconcile(context: dict, panes: list[dict], *, allow_relocation: bool = False) -> tuple[dict | None, list[str]]:
+    """Read-only identity reconciliation; callers explicitly persist verified placement."""
     matches = [p for p in panes if p["pane_id"] == context["pane_id"]]
+    terminals = [p for p in panes if context["terminal_id"] and p["terminal_id"] == context["terminal_id"]]
+    if len(matches) > 1 or len(terminals) > 1:
+        return None, ["ambiguous pane/terminal identity; binding unchanged"]
     if not matches:
-        moved = [p for p in panes if context["terminal_id"] and p["terminal_id"] == context["terminal_id"]]
-        if len(moved) == 1:
-            return None, [f"moved/stale: terminal now at {moved[0]['pane_id']} (binding unchanged)"]
-        return None, ["missing pane"]
+        if len(terminals) == 1 and allow_relocation:
+            matches = terminals
+        elif len(terminals) == 1:
+            return None, [f"moved/stale: terminal now at {terminals[0]['pane_id']} (binding unchanged)"]
+        else:
+            return None, ["missing pane"]
     pane = matches[0]
     if pane["terminal_id"] != context["terminal_id"] or pane["workspace_id"] != context["workspace_id"]:
         return None, ["mismatched terminal/workspace; binding unchanged"]
     notes = []
+    if pane["pane_id"] != context["pane_id"]:
+        notes.append("pane changed")
     if pane["tab_id"] != context["tab_id"]:
         notes.append("tab changed")
     if pane.get("label") != context["context_id"]:
@@ -290,9 +374,10 @@ def reconcile(context: dict, panes: list[dict]) -> tuple[dict | None, list[str]]
         notes.append("agent absent; session unknown")
     elif pane["agent"] != context["agent"]:
         notes.append("agent mismatch")
-    expected = (dict(agent=context["agent"], kind=context["session_kind"], value=context["session_id"])
-                if context["session_id"] else
-                json.loads(context["herdr_session"]) if context["herdr_session"] else None)
+    try:
+        expected = context_reference(context)
+    except TaskError:
+        return pane, [*notes, "session identity invalid"]
     actual = pane.get("agent_session")
     if expected:
         try:
@@ -300,7 +385,7 @@ def reconcile(context: dict, panes: list[dict]) -> tuple[dict | None, list[str]]
         except ValueError:
             same = False  # Malformed live evidence is divergence, not a new binding.
         if not same:
-            notes.append("session mismatch" if actual else "session unknown/stale")
+            notes.append("session mismatch" if actual is not None else "session unknown/stale")
     else:
         notes.append("session identity unknown")
     return pane, notes

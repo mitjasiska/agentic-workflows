@@ -34,6 +34,7 @@ class LocalConfig:
     api_key: str = field(repr=False)
     agent: AgentConfig | None = None
     codex_repository_profiles: Mapping[str, str] = field(default_factory=dict)
+    reviewer: AgentConfig | None = None
 
 
 def read_toml(path: Path) -> dict:
@@ -65,7 +66,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
             raise TaskError("projects_root must be absolute (or start with ~)")
         agent = None if no_agent else agent_config(data.get("agent"))
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles)
+        reviewer = None if no_agent else agent_config(data.get("reviewer"))
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 

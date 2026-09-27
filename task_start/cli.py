@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 import re
 import sys
@@ -10,6 +11,7 @@ from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, inspect_contexts, launch_registered
 from .handoff import implementation_handoff
 from .linear import Linear
+from .review import review
 from .workspace import Git, Herdr, branch_name, slice_slug
 
 
@@ -32,6 +34,12 @@ def parser() -> argparse.ArgumentParser:
     contexts = commands.add_parser("contexts", help="Inspect machine-local workflow contexts (read-only)")
     contexts.add_argument("issue", nargs="?", type=issue_identifier)
     contexts.add_argument("--all", action="store_true", help="Include retired contexts")
+    review_command = commands.add_parser("review", help="Run a fresh independent task review or an explicit re-review")
+    review_command.add_argument("issue", type=issue_identifier)
+    review_command.add_argument("--resume", metavar="REVIEW_CONTEXT_ID")
+    add_agent_options(review_command)
+    review_command.add_argument("--json", action="store_true", help="Print the structured review result")
+    review_command.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
     return result
 
 
@@ -210,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
             print(cleanup(args.issue))
         elif args.command == "contexts":
             print(inspect_contexts(args.issue, include_retired=args.all))
+        elif args.command == "review":
+            result = review(args.issue, resume=args.resume, agent_kind=args.agent_kind,
+                            model=args.model, mode=args.mode, timeout=args.timeout)
+            print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
+            return {"clean": 0, "findings": 2, "blocked": 3, "failed": 1}[result.state]
         else:
             print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
                         agent_kind=args.agent_kind, model=args.model, mode=args.mode))
