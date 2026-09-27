@@ -1,0 +1,34 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "create-linear-task",
+  "version": "0.1.0",
+  "description": "Turn rough development ideas into concise, agent-ready Linear issues.",
+  "author": {
+    "name": "Mitja Šiška",
+    "url": "https://github.com/mitjasiska"
+  },
+  "homepage": "https://github.com/mitjasiska/agentic-workflows/tree/main/plugins/create-linear-task",
+  "repository": "https://github.com/mitjasiska/agentic-workflows",
+  "keywords": [
+    "linear",
+    "issue-tracking",
+    "development-workflow"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Create Linear Task",
+        "shortDescription": "Draft concise, agent-ready Linear issues",
+        "longDescription": "Turn a rough development idea into a scoped Linear issue with verifiable acceptance criteria and separate implementation-agent guidance.",
+        "developerName": "Mitja Šiška",
+        "category": "Productivity",
+        "capabilities": [
+          "Write"
+        ],
+        "defaultPrompt": [
+          "Turn this rough development idea into an agent-ready Linear issue."
+        ]
+      }
+    }
+  }
+}
