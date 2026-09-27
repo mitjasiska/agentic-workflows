@@ -16,6 +16,9 @@ PLUGIN = ROOT / "plugins" / "create-linear-task"
 MARKETPLACE = ROOT / ".agents" / "plugins" / "marketplace.json"
 SYNC_SCRIPT = PLUGIN / "scripts" / "sync_plugin.py"
 PACKAGE_SCRIPT = PLUGIN / "scripts" / "package_plugin.py"
+BUNDLED_PREPARE_SCRIPT = (
+    PLUGIN / "skills" / "create-linear-task" / "scripts" / "prepare_issue.py"
+)
 SYNC_SPEC = importlib.util.spec_from_file_location("plugin_synchronizer", SYNC_SCRIPT)
 synchronizer = importlib.util.module_from_spec(SYNC_SPEC)
 sys.modules[SYNC_SPEC.name] = synchronizer
@@ -102,6 +105,50 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
             compatibility["interface"],
             portable["extensions"]["com.openai"]["interface"],
         )
+
+    def test_bundled_renderer_emits_linear_api_collapsible_syntax(self):
+        workflow_labels = ["Feature", "Bug", "Chore", "Docs", "Refactor", "Research"]
+        draft = {
+            "title": "Add export retry limits",
+            "context": None,
+            "outcome": "Export retries stop after the configured limit.",
+            "done_when": ["The retry limit is enforced."],
+            "boundaries": [],
+            "task_kind": "implementation",
+            "primary_category": "feature",
+            "research_modifier": False,
+            "agent": {
+                "repository_context": [],
+                "guidance": [],
+                "constraints": [],
+                "validation": ["Run the focused worker tests."],
+            },
+            "existing_target": None,
+            "existing_labels": [],
+            "workspace_labels": [
+                {"id": f"{name.casefold()}-id", "name": name}
+                for name in workflow_labels
+            ],
+        }
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(BUNDLED_PREPARE_SCRIPT),
+                "--repository",
+                str(ROOT),
+            ],
+            input=json.dumps(draft),
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        description = json.loads(completed.stdout)["issue"]["description"]
+
+        self.assertIn("+++ Agent instructions\n", description)
+        self.assertTrue(description.endswith("\n+++\n"))
+        self.assertNotIn(">>> Agent instructions", description)
 
     def test_sync_check_detects_bundled_skill_drift(self):
         with tempfile.TemporaryDirectory() as directory:
