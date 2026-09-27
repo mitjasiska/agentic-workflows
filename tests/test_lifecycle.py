@@ -319,6 +319,7 @@ class RemoteGitIntegrationTests(unittest.TestCase):
         project = Project(baseline.ISSUE.project, self.repo.name, "main")
         with patch("task_start.cli.load_local", return_value=local), \
                 patch("task_start.cli.load_projects", return_value=[project]), \
+                patch("task_start.cli.launch_registered", side_effect=lambda agent, execution: agent.launch(execution)), \
                 patch("task_start.cli.Linear") as linear, patch("task_start.cli.adapter_for") as factory, \
                 patch.object(Herdr, "command", side_effect=respond), patch.object(Git, "check_history"):
             linear.return_value.get_issue.return_value = baseline.ISSUE

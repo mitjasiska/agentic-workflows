@@ -362,6 +362,9 @@ class HerdrTests(unittest.TestCase):
 class OrchestrationTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch("task_start.cli.load_local", return_value=LOCAL))
+        # This suite tests orchestration; registry/Herdr effects have their own tests.
+        self.enterContext(patch("task_start.cli.launch_registered",
+                                side_effect=lambda agent, execution: agent.launch(execution)))
         self.enterContext(patch("task_start.cli.load_projects", return_value=[PROJECT]))
         self.linear = self.enterContext(patch("task_start.cli.Linear")).return_value
         self.linear.get_issue.return_value = ISSUE

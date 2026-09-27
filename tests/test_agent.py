@@ -13,6 +13,7 @@ from task_start.agent import (AgentExecution, AgentOptions, AgentOverrides, Code
                               resolve_agent_options)
 from task_start.config import (AgentConfig, agent_config, codex_repository_profiles,
                                load_local)
+from task_start.contexts import ContextRegistry, HerdrContexts, launch_registered
 from task_start.handoff import IMPLEMENTATION_INSTRUCTIONS, implementation_handoff
 from task_start.linear import Linear
 from task_start.workspace import Workspace, slice_slug
@@ -240,11 +241,11 @@ class AgentTests(unittest.TestCase):
             return dict(queuedSubmission=dict(id="queue-id", clientUserMessageId=params["clientUserMessageId"], input=params["input"]))
         self.fail("Unexpected session operation " + method)
 
-    def run_launch(self, *, policy=None, purpose="implementation", handoff=None):
+    def run_launch(self, *, policy=None, purpose="implementation", handoff=None, runtime_observer=None):
         prompt = self.prompt if handoff is None else handoff
         execution = AgentExecution(self.issue, Path("/resolved/repository"), self.workspace,
                                    self.codex.options, prompt, purpose=purpose,
-                                   policy=policy or {})
+                                   policy=policy or {}, runtime_observer=runtime_observer)
         return self.codex.launch(execution)
 
     def test_exact_workspace_model_reasoning_and_confirmed_task(self):
@@ -485,12 +486,46 @@ class AgentTests(unittest.TestCase):
                     self.reset_fixture()
                     if field == "agent_session":
                         for result in self.results[1:]:
-                            result["agent"][field] = "original"
+                            result["agent"][field] = self.thread_id
                     self.results[index]["agent"][field] = value
                     with patch.object(self.codex, "command", side_effect=self.results), self.assertRaises(TaskError):
                         self.run_launch()
                     if index == 2:
                         self.assertFalse(self.queued)
+
+    def test_codex_late_session_metadata_and_source_changes_are_observed(self):
+        observer = MagicMock()
+        for index, result in enumerate(self.results[2:], 2):
+            result["agent"]["agent_session"] = dict(agent="codex", kind="id",
+                value=self.thread_id, source=f"source-{index}")
+        with patch.object(self.codex, "command", side_effect=self.results):
+            result = self.run_launch(runtime_observer=observer)
+        self.assertEqual(result.session_id, self.thread_id)
+        reports = [json.loads(call.args[0]["herdr_session"]) for call in observer.call_args_list
+                   if "herdr_session" in call.args[0]]
+        self.assertEqual([r["source"] for r in reports], ["source-2", "source-3"])
+
+    def test_codex_late_reference_must_match_discovered_provider_session(self):
+        for index in (2, 3):
+            with self.subTest(index=index):
+                self.reset_fixture()
+                for result in self.results[2:]:
+                    result["agent"]["agent_session"] = dict(agent="codex", kind="id", value=self.thread_id)
+                self.results[index]["agent"]["agent_session"]["value"] = "replacement-session"
+                with patch.object(self.codex, "command", side_effect=self.results):
+                    with self.assertRaisesRegex(TaskError, "session.*handoff"):
+                        self.run_launch()
+                if index == 2:
+                    self.assertFalse(self.queued)
+
+    def test_codex_reference_alone_does_not_establish_resumability(self):
+        observer = MagicMock()
+        with patch.object(self.codex, "command", side_effect=self.results), \
+                patch.object(self.codex, "confirm_prompt", side_effect=TaskError("history unavailable")):
+            with self.assertRaisesRegex(TaskError, "history unavailable"):
+                self.run_launch(runtime_observer=observer)
+        self.assertTrue(any(call.args[0].get("session_id") == self.thread_id for call in observer.call_args_list))
+        self.assertFalse(any(call.args[0].get("resumability") == "yes" for call in observer.call_args_list))
 
     def test_exact_linear_context_and_resolved_slice_reach_queue(self):
         self.workspace = replace(self.workspace, slice="importer")
@@ -557,6 +592,99 @@ class PiAdapterTests(unittest.TestCase):
         self.assertEqual(command.call_args_list[3].args,
                          ("agent", "prompt", "w6:p20", self.handoff))
         self.assertEqual(command.call_args_list[4].args, ("agent", "get", "w6:p20"))
+
+    def registered_pi_launch(self, results):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.registry = ContextRegistry(Path(directory) / "contexts.sqlite3")
+        herdr = MagicMock(spec=HerdrContexts)
+        herdr.endpoint.return_value = "/test.sock"
+        herdr.snapshot.return_value = [dict(self.agent, agent=None, agent_session=None)]
+        with patch.object(self.pi, "command", side_effect=results):
+            return launch_registered(self.pi, self.execution, registry=self.registry, herdr=herdr)
+
+    def test_structured_session_reference_does_not_prove_resumability(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        empty_session = Path(directory) / "session.jsonl"
+        empty_session.touch()  # Even an existing path need not contain persisted history.
+        for kind, value in [("id", "pi-session-id"), ("path", str(empty_session))]:
+            results = copy.deepcopy(self.results)
+            session = dict(agent="pi", kind=kind, value=value, source="hook")
+            for result in results[1:]:
+                result["agent"]["agent_session"] = session
+            result = self.registered_pi_launch(results)
+            self.assertEqual((result.session_id, result.session_kind, result.resumability), (value, kind, "unknown"))
+            row = self.registry.list()[0]
+            self.assertEqual((row["session_id"], row["session_kind"], row["resumability"]),
+                             (value, kind, "unknown"))
+            self.assertEqual(json.loads(row["herdr_session"]), session)
+
+    def test_session_first_reported_after_startup_is_saved(self):
+        # Cover each later response: pre-prompt get, prompt receipt, final get.
+        for first_report in (2, 3, 4):
+            with self.subTest(first_report=first_report):
+                results = copy.deepcopy(self.results)
+                session = dict(agent="pi", kind="id", value="session-A", source="hook")
+                for index, result in enumerate(results[1:], 1):
+                    result["agent"]["agent_session"] = session if index >= first_report else None
+                result = self.registered_pi_launch(results)
+                self.assertEqual(result.session_id, "session-A")
+                row = self.registry.list()[0]
+                self.assertEqual(row["session_id"], "session-A")
+                self.assertEqual(json.loads(row["herdr_session"]), session)
+                self.assertEqual(row["resumability"], "unknown")
+
+    def test_late_discovery_is_persisted_before_later_handoff_failure(self):
+        results = copy.deepcopy(self.results)
+        results[1]["agent"]["agent_session"] = None
+        session = dict(agent="pi", kind="path", value="/sessions/A.jsonl", source="hook")
+        results[2]["agent"]["agent_session"] = session
+        results[3] = TaskError("prompt transport failed")
+        with self.assertRaisesRegex(TaskError, "prompt transport failed"):
+            self.registered_pi_launch(results)
+        row = self.registry.list()[0]
+        self.assertEqual((row["state"], row["session_id"]), ("uncertain", "/sessions/A.jsonl"))
+        self.assertEqual(json.loads(row["herdr_session"]), session)
+
+    def test_late_session_A_then_B_aborts_without_rebinding(self):
+        for first_report, replacement_at in ((2, 3), (2, 4), (3, 4)):
+            with self.subTest(first_report=first_report, replacement_at=replacement_at):
+                results = copy.deepcopy(self.results)
+                results[1]["agent"]["agent_session"] = None
+                for index, result in enumerate(results[2:], 2):
+                    result["agent"]["agent_session"] = (dict(agent="pi", kind="id", source="hook",
+                        value="session-A" if index < replacement_at else "session-B")
+                        if index >= first_report else None)
+                with self.assertRaisesRegex(TaskError, "session changed"):
+                    self.registered_pi_launch(results)
+                row = self.registry.list()[0]
+                self.assertEqual((row["state"], row["session_id"]), ("uncertain", "session-A"))
+                self.assertEqual(json.loads(row["herdr_session"])["value"], "session-A")
+
+    def test_known_session_kind_is_not_forgotten_after_a_legacy_report(self):
+        results = copy.deepcopy(self.results)
+        results[1]["agent"]["agent_session"] = dict(agent="pi", kind="id", value="A", source="hook")
+        results[2]["agent"]["agent_session"] = "A"
+        results[3]["agent"]["agent_session"] = dict(agent="pi", kind="path", value="A", source="hook")
+        with patch.object(self.pi, "command", side_effect=results):
+            with self.assertRaisesRegex(TaskError, "session changed"):
+                self.pi.launch(self.execution)
+
+    def test_provenance_changes_do_not_abort_pi_handoff(self):
+        results = copy.deepcopy(self.results)
+        for index, result in enumerate(results[1:], 1):
+            result["agent"]["agent_session"] = dict(agent="pi", kind="id", value="session-A", source=f"source-{index}")
+        self.registered_pi_launch(results)
+        row = self.registry.list()[0]
+        self.assertEqual((row["state"], row["session_id"]), ("active", "session-A"))
+        self.assertEqual(json.loads(row["herdr_session"])["source"], "source-4")
+
+    def test_absent_herdr_session_is_not_invented(self):
+        results = copy.deepcopy(self.results)
+        for result in results[1:]:
+            result["agent"].pop("agent_session")
+        with patch.object(self.pi, "command", side_effect=results):
+            result = self.pi.launch(self.execution)
+        self.assertEqual((result.session_id, result.session_kind, result.resumability), (None, None, "unknown"))
 
     def test_session_already_working_is_only_reported_as_submitted(self):
         results = copy.deepcopy(self.results)
@@ -755,6 +883,8 @@ class ControlledTaskStartAcceptanceTests(unittest.TestCase):
     """Drive the same mocked workflow boundary through both real adapters."""
 
     def setUp(self):
+        self.enterContext(patch("task_start.cli.launch_registered",
+                                side_effect=lambda agent, execution: agent.launch(execution)))
         self.enterContext(patch("task_start.cli.load_local", return_value=LOCAL))
         self.enterContext(patch("task_start.cli.load_projects", return_value=[baseline.PROJECT]))
         linear = self.enterContext(patch("task_start.cli.Linear")).return_value

@@ -256,6 +256,82 @@ New workflow commands such as review should reuse `add_agent_options`,
 `resolve_agent_options`, `AgentExecution`, and the adapter registry. They should
 target the shared boundary unless behavior genuinely belongs to one agent.
 
+## Workflow context identities
+
+Each new implementation launch receives a visible pane label such as `DEV-20-I1`.
+The identifier is the canonical Linear issue ID, followed by `I` (implementation)
+or `R` (review) and a monotonic ordinal. These identify agent contexts, not Git
+worktrees: contexts can share a checkout. Review allocation is available to future
+workflow code; there is no `task review` command yet.
+
+Inspect contexts without loading workflow configuration or contacting Linear:
+
+```sh
+task contexts
+task contexts DEV-20
+task contexts DEV-20 --all
+```
+
+The default view includes non-retired contexts, including uncertain launches and
+stale mappings. `--all` adds retired history. Output includes selected agent/model/
+mode, recorded lifecycle status, live Herdr status, resumability, and the socket,
+workspace, tab and pane needed to locate the context. Unspecified model/mode or
+unavailable session evidence is `unknown`. A session reference does not by itself
+establish resumability: Pi references remain `unknown` without persistence evidence,
+while Codex's receipt API confirms a persisted readiness turn before reporting
+`yes`. This does not add a workflow resume command or guarantee the provider will
+retain that history indefinitely.
+
+The machine-local registry is `~/.agentic-workflows/contexts.sqlite3`, separate from
+project files and Linear. Python's SQLite support supplies atomic transactions and
+cross-process allocation locking without a service or dependency. The allocation
+commits before labeling or launching; failed and interrupted attempts consume their
+ordinal. Retired rows are small tombstones: they keep identity, allocation time,
+retirement time and former location, but discard provider and terminal handles.
+Cleanup never resets ordinals. Deleting this database is a destructive registry
+reset that discards allocation history; normal operations never do that.
+
+Context identity, runtime/session references, resumability, and lifecycle status
+are independent fields. The registry records `launching`, `active`, `uncertain`,
+and `retired` observations; it does not implement a state-machine framework or
+semantic run reports. Adapter observers save real session handles as soon as they
+become available in startup, confirmation, or prompt responses, including before
+later handoff failures. Subsequent observations must match the established session;
+reporting provenance such as `source` is retained separately and is not identity.
+A launch interrupted
+before its result can be recorded remains `launching`; another concurrent launch
+cannot claim that pane until the uncertain context is inspected and cleaned up.
+
+Herdr owns the live layout. Inspection never renames, focuses, resumes, repairs, or
+rebinds anything. It checks socket, pane and terminal identity, reports manual
+renames, absent/replaced agents, missing panes and session mismatches, and uses the
+live tab when a pane is rearranged. A move to another workspace can change Herdr's
+pane ID; inspection reports a matching terminal at its new location while retaining
+the original binding. Contexts belonging to another Herdr socket remain visible
+with unknown/stale live state; inspect from that server to reconcile them. Focusing,
+typing directly to, or stopping an agent does not change its workflow identity.
+
+Existing `task start` behavior still refuses a duplicate agent and `--no-agent`
+only focuses/prepares the workspace; neither allocates or relabels an existing
+context. A genuinely fresh launch gets the next ordinal. Cleanup retires mappings
+only after confirming removal, scoped to the issue, repository, checkout and Herdr
+workspace/server, including absent older workspace instances for that same cleaned
+checkout. Normal completion and cleanup retries perform the same reconciliation.
+Partial cleanup retains mappings and allocation history for a
+retry. A terminal moved outside the cleaned workspace also retains its mapping
+until its closure can be confirmed. Existing Git/Linear cleanup safety checks
+still apply.
+
+The controlled Herdr 0.9.1 smoke test on 2026-09-27 used a temporary registry and
+disposable Pi workspaces against the existing checkout, with a no-tools prompt.
+It verified visible `DEV-41-I3` and then `DEV-41-I4` after closing the first workspace,
+calling the cleanup retirement hook, and reopening the registry. Earlier failed
+allocations `I1` and `I2` were also retained. The Git-removal part was simulated by
+the retirement hook to preserve the implementation checkout; automated cleanup
+tests exercise real disposable Git worktrees. Codex's local session API did not
+initialize in the sandbox, so the successful live launch used Pi. All disposable
+Herdr workspaces were closed.
+
 ## Workspace lifecycle and slices
 
 An existing workspace is reused only when Git and Herdr agree on one usable branch
