@@ -62,9 +62,9 @@ class HerdrRetirement:
     workspace_id: str
 
 
-def run(args: list[str]) -> str:
+def run(args: list[str], *, input: bytes | None = None, env: dict[str, str] | None = None) -> str:
     try:
-        result = subprocess.run(args, capture_output=True, timeout=120, check=False)
+        result = subprocess.run(args, input=input, env=env, capture_output=True, timeout=120, check=False)
     except FileNotFoundError:
         raise TaskError(f"{args[0]} is not installed or not on PATH") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -193,7 +193,7 @@ class Git:
             url = self.command("remote", "get-url", remote).strip()
         check_history(url, branch, existing=existing)
 
-    def cleanup_merge(self, base: str, branch: str) -> CleanupState:
+    def cleanup_merge(self, base: str, branch: str, identifier: str) -> CleanupState:
         head = self.command("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}").strip()
         base_commit = self.command("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip()
         if self.command("rev-list", "--count", f"{base_commit}..{head}").strip() == "0":
@@ -204,8 +204,32 @@ class Git:
             pull = merged_pull(self.history_remote(base, branch), branch, base, head)
             # A merged PR is insufficient if the checkout's base is stale or
             # the resulting commit belongs to some other line of development.
-            if self.command("rev-list", "--count", f"{base_commit}..{pull.merge_commit}").strip() != "0":
-                raise TaskError(f"GitHub PR #{pull.number} merge commit is not present in the expected base {base!r}")
+            # Missing objects must not trigger an implicit partial-clone fetch.
+            local_env = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
+            try:
+                count = run(["git", "-C", str(self.repo), "rev-list", "--count",
+                             f"{base_commit}..{pull.merge_commit}"], env=local_env).strip()
+            except TaskError:
+                # Batch mode reports a missing object explicitly, without
+                # conflating it with a failed Git command or parsing stderr.
+                try:
+                    missing = run(["git", "-C", str(self.repo), "cat-file",
+                                   "--batch-check=%(objectname) %(objecttype)"],
+                                  input=f"{pull.merge_commit}\n".encode("ascii"),
+                                  env=local_env).strip() == f"{pull.merge_commit} missing"
+                except TaskError:
+                    missing = False
+                if not missing:
+                    raise
+                merge_in_base = False
+            else:
+                if not re.fullmatch(r"[0-9]+", count):
+                    raise TaskError("Unexpected Git merge reachability response; inspect it manually")
+                merge_in_base = count == "0"
+            if not merge_in_base:
+                raise TaskError(f"GitHub confirms PR #{pull.number} is merged, but its merge commit is not present "
+                                f"in the expected local base {base!r}. Update {base!r} with `git pull --ff-only` "
+                                f"in the permanent checkout {str(self.repo)!r}, then rerun `task cleanup {identifier}`")
         except TaskError as error:
             raise TaskError(f"Task branch {branch!r} is not fully merged into {base!r} by ancestry, "
                             f"and its PR merge could not be verified: {error}; nothing was removed") from None
@@ -276,7 +300,7 @@ class Git:
         """Check local prerequisites and collect merge evidence without changing task state."""
         self.check_cleanup_target(base, target, identifier)
         branch = target.branch
-        state = self.cleanup_merge(base, branch)
+        state = self.cleanup_merge(base, branch, identifier)
         if state.pull is None and self.command("-c", f"branch.{branch}.remote=", "for-each-ref",
                                               "--format=%(upstream)", f"refs/heads/{branch}").strip():
             raise TaskError("Cannot bind safe branch deletion to the permanent base checkout; nothing was removed")
