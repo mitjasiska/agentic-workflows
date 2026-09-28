@@ -107,7 +107,7 @@ class CleanupTests(unittest.TestCase):
         refs = self.command(self.repo, "show-ref")
         trees = self.git.worktrees()
         self.runner.reset_mock()
-        with self.assertRaisesRegex(TaskError, message):
+        with self.assertRaisesRegex(TaskError, message) as caught:
             cli.cleanup("DEV-7")
         self.assertEqual(self.command(self.repo, "show-ref"), refs)
         self.assertEqual(self.git.worktrees(), trees)
@@ -118,6 +118,7 @@ class CleanupTests(unittest.TestCase):
             self.assertNotIn("remove", args)
             self.assertNotIn("--delete", args)
         self.linear.start.assert_not_called()
+        return str(caught.exception)
 
     def test_success_removes_only_selected_local_state_and_repeat_is_noop(self):
         unrelated = self.repo.parent / "other-task"
@@ -980,8 +981,54 @@ class SquashCleanupTests(unittest.TestCase):
         self.command(other, "merge", "--squash", self.branch)
         self.command(other, "commit", "-m", "squashed elsewhere")
         self.pull["merge_commit_sha"] = self.command(other, "rev-parse", "HEAD")
-        self.assert_refused("merge commit is not present in the expected base 'main'")
+        message = self.assert_refused("merge commit is not present in the expected local base 'main'")
+        self.assertIn("git pull --ff-only", message)
+        self.assertIn("task cleanup DEV-7", message)
         self.assertTrue(other.is_dir())
+
+    def test_missing_local_merge_commit_explains_how_to_update_base(self):
+        remote_merge = self.repo.parent / "github-merge"
+        self.command(self.repo.parent, "clone", "--no-local", "--branch", self.branch,
+                     str(self.repo), str(remote_merge))
+        self.command(remote_merge, "switch", "-c", "github-main", self.before)
+        self.command(remote_merge, "merge", "--squash", self.branch)
+        self.command(remote_merge, "commit", "-m", "GitHub squash merge")
+        self.pull["merge_commit_sha"] = self.command(remote_merge, "rev-parse", "HEAD")
+        # The confirmed GitHub commit has never been fetched into the local repo.
+        with self.assertRaisesRegex(TaskError, "git rev-list failed"):
+            self.git.command("rev-list", "--count", f"main..{self.pull['merge_commit_sha']}")
+
+        # Even a partial clone must not fetch implicitly while diagnosing this.
+        self.command(self.repo, "config", "remote.origin.promisor", "true")
+        trace = self.repo.parent / "git-trace"
+        with patch.dict(os.environ, {"GIT_TRACE": str(trace), "GIT_ALLOW_PROTOCOL": "file"}):
+            message = self.assert_refused("GitHub confirms PR #22 is merged")
+        self.assertNotIn("fetch", trace.read_text())
+        self.assertIn("expected local base 'main'", message)
+        self.assertIn("Update 'main' with `git pull --ff-only`", message)
+        self.assertIn(f"permanent checkout {str(self.repo)!r}", message)
+        self.assertIn("rerun `task cleanup DEV-7`", message)
+        self.assertNotIn("git rev-list failed", message)
+        self.assertFalse(any(operation in call.args[0][3:] for call in self.runner.call_args_list
+                             for operation in ("fetch", "pull", "reset", "merge", "update-ref")))
+
+    def test_unrelated_merge_verification_failure_retains_generic_diagnostic(self):
+        base_commit = self.command(self.repo, "rev-parse", "main")
+        diagnostic = "git rev-list failed (exit 128); inspect it manually"
+        for probe_fails in (False, True):
+            with self.subTest(probe_fails=probe_fails):
+                def fail_verification(args, **kwargs):
+                    if args[3:] == ["rev-list", "--count", f"{base_commit}..{self.merge_commit}"]:
+                        raise TaskError(diagnostic)
+                    if probe_fails and args[3] == "cat-file":
+                        raise TaskError("git cat-file failed (exit 128); inspect it manually")
+                    return run(args, **kwargs)
+
+                self.runner.side_effect = fail_verification
+                message = self.assert_refused("PR merge could not be verified")
+                self.assertIn(diagnostic, message)
+                self.assertNotIn("Update 'main'", message)
+                self.assertNotIn("git pull", message)
 
     def test_missing_or_ambiguous_merge_evidence_refuses(self):
         for pulls in ([], [self.pull, dict(self.pull, number=23)]):
@@ -1094,8 +1141,8 @@ class SquashCleanupTests(unittest.TestCase):
     def test_squash_branch_checked_out_elsewhere_after_removal_is_preserved(self):
         other = self.repo.parent / "new-checkout"
 
-        def reopen_after_remove(args):
-            output = run(args)
+        def reopen_after_remove(args, **kwargs):
+            output = run(args, **kwargs)
             if args[3:5] == ["worktree", "remove"]:
                 self.command(self.repo, "worktree", "add", str(other), self.branch)
             return output
@@ -1129,10 +1176,10 @@ class SquashCleanupTests(unittest.TestCase):
     def test_squash_branch_delete_checks_exact_tip_atomically(self):
         new_head = self.command(self.repo, "rev-parse", "main")
 
-        def change_tip_before_delete(args):
+        def change_tip_before_delete(args, **kwargs):
             if args[3:6] == ["update-ref", "--no-deref", "-d"]:
                 self.command(self.repo, "update-ref", "refs/heads/" + self.branch, new_head, self.head_commit)
-            return run(args)
+            return run(args, **kwargs)
 
         self.runner.side_effect = change_tip_before_delete
         with self.assertRaisesRegex(TaskError, "Local branch deletion could not be confirmed"):
