@@ -62,9 +62,10 @@ class HerdrRetirement:
     workspace_id: str
 
 
-def run(args: list[str], *, input: bytes | None = None, env: dict[str, str] | None = None) -> str:
+def run(args: list[str], *, input: bytes | None = None, env: dict[str, str] | None = None,
+        timeout: float = 120) -> str:
     try:
-        result = subprocess.run(args, input=input, env=env, capture_output=True, timeout=120, check=False)
+        result = subprocess.run(args, input=input, env=env, capture_output=True, timeout=timeout, check=False)
     except FileNotFoundError:
         raise TaskError(f"{args[0]} is not installed or not on PATH") from None
     except (OSError, subprocess.TimeoutExpired):

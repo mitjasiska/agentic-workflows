@@ -22,6 +22,7 @@ from task_start.sessions import SessionInvalid
 from task_start.workspace import Git, Herdr, Workspace
 from test_task_start import ISSUE
 import test_task_start as baseline
+from codex_startup_fixture import CodexStartupTransport
 
 
 def verdict(pass_id="pass", **changes):
@@ -126,6 +127,107 @@ class ReviewTests(unittest.TestCase):
         self.linear.start.assert_not_called()
         self.assertEqual(len(self.registry.list()), 3)
         self.assertFalse(Path(self.adapter.output).exists())
+
+    def codex_transport(self):
+        self.enterContext(patch("task_start.review.adapter_for", side_effect=Codex))
+        transport = CodexStartupTransport(self, lambda: self.panes)
+        def write_result(prompt):
+            self.prompts.append(prompt)
+            output = re.search(r"output-file write is (.*?)\. This temporary", prompt).group(1)
+            pass_id = re.search(r"Pass ID: ([^\n]+)", prompt).group(1)
+            Path(output).write_text(json.dumps(verdict(pass_id)))
+        transport.on_queue = write_result
+        return transport
+
+    def test_fresh_codex_review_waits_for_shell_and_session_then_delivers_once(self):
+        transport = self.codex_transport()
+        result = review("DEV-7")
+        self.assertEqual((result.context_id, result.state, result.invalidated), ("DEV-7-R1", "clean", False))
+        self.assertEqual(transport.process_reads, 2)
+        self.assertEqual(transport.started_at, 0.25)
+        self.assertEqual(transport.now, 1.75)
+        transport.assert_effects(1, 1)
+        self.assertEqual(len(self.prompts), 1)
+        row = self.registry.get(result.context_id)
+        self.assertEqual((row["state"], row["session_id"], row["resumability"]),
+                         ("active", transport.thread_id, "yes"))
+
+    def test_fresh_codex_review_gets_full_execution_timeout_after_slow_startup(self):
+        transport = self.codex_transport()
+        execution_timeout = 0.5
+        # Confirm the handoff normally, but leave the review unfinished so its
+        # entire execution budget elapses on the transport's mocked clock.
+        transport.on_queue = self.prompts.append
+        poll_times = []
+
+        def pending(*args):
+            poll_times.append(transport.now)
+            return "working"
+
+        with patch.object(Codex, "review_status", side_effect=pending):
+            result = review("DEV-7", timeout=execution_timeout)
+
+        handoff_completed_at = transport.queued_at + transport.receipt_delay
+        self.assertGreater(handoff_completed_at, execution_timeout)
+        self.assertEqual(poll_times, [handoff_completed_at, handoff_completed_at + 0.25])
+        self.assertEqual(transport.now, handoff_completed_at + execution_timeout)
+        self.assertEqual((result.state, result.invalidated), ("failed", False))
+        self.assertIn("Timed out waiting for validated reviewer output", result.summary)
+        transport.assert_effects(1, 1)
+
+    def test_fresh_codex_review_shell_timeout_preserves_primary_failure_and_ordinal(self):
+        transport = self.codex_transport()
+        transport.processes = transport.processes[:1]
+        with patch.object(Codex, "SHELL_READY_TIMEOUT", 0.5), \
+                patch("task_start.review.finalize_reviewer") as finalize:
+            result = review("DEV-7")
+        self.assertEqual((result.context_id, result.state, result.invalidated), ("DEV-7-R1", "failed", False))
+        self.assertIn("pane readiness", result.summary)
+        self.assertIn("foreground_pids=[123, 124, 125]", result.summary)
+        self.assertNotIn("could not be finalized", result.summary)
+        finalize.assert_not_called()
+        transport.keys.assert_not_called()
+        transport.assert_effects(0, 0)
+        row = self.registry.get(result.context_id)
+        self.assertEqual((row["state"], row["session_id"], row["resumability"]), ("uncertain", None, "unknown"))
+        self.assertEqual(row["terminal_id"], "term2")
+        transport.processes = [dict(shell_pid=123, foreground_process_group_id=123, foreground_processes=[dict(pid=123)])]
+        second = review("DEV-7")
+        self.assertEqual((second.context_id, second.state), ("DEV-7-R2", "clean"))
+        self.assertEqual(self.registry.get("DEV-7-R1"), row)
+        self.assertEqual(len(self.panes), 3)
+
+    def test_fresh_codex_review_rejects_ready_observation_after_readiness_deadline(self):
+        transport = self.codex_transport()
+        transport.processes = transport.processes[-1:]
+        transport.process_durations = [31]
+        result = review("DEV-7")
+        self.assertEqual((result.state, result.invalidated), ("failed", False))
+        self.assertIn("pane readiness", result.summary)
+        self.assertIn("Timed out", result.summary)
+        self.assertNotIn("could not be finalized", result.summary)
+        self.assertEqual(transport.process_timeouts, [30])
+        transport.keys.assert_not_called()
+        transport.assert_effects(0, 0)
+        row = self.registry.get(result.context_id)
+        self.assertEqual((row["state"], row["session_id"], row["resumability"]), ("uncertain", None, "unknown"))
+
+    def test_fresh_codex_review_queue_failure_keeps_observed_identity_uncertain(self):
+        transport = self.codex_transport()
+        transport.queue_error = TaskError("queue acknowledgement lost")
+        with patch("task_start.review.finalize_reviewer") as finalize:
+            result = review("DEV-7")
+        self.assertEqual(result.state, "failed")
+        self.assertIn("prompt queue", result.summary)
+        self.assertIn("queue acknowledgement lost", result.summary)
+        self.assertNotIn("could not be finalized", result.summary)
+        finalize.assert_not_called()
+        transport.assert_effects(1, 1)
+        row = self.registry.get(result.context_id)
+        self.assertEqual((row["state"], row["session_id"], row["resumability"]),
+                         ("uncertain", transport.thread_id, "yes"))
+        with self.assertRaisesRegex(TaskError, "stale, busy, or non-resumable"):
+            review("DEV-7", resume=result.context_id)
 
     def test_recreate_missing_pane_preserves_session_context_and_settings(self):
         first = review("DEV-7")

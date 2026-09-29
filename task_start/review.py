@@ -177,6 +177,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     pass_id, pass_kind = str(uuid4()), "resumed" if resume is not None else "fresh"
     context_id, verdict, invalidated, post = resume, None, False, None
     state, summary, claimed = "failed", "Reviewer did not complete", False
+    fresh_launch_failed = False
 
     def checkpoint():
         # Pass-local and sticky: restoration cannot undo an observed change.
@@ -231,6 +232,12 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
                 try:
                     launch = launch_registered(adapter, execution, registry=registry, herdr=identities,
                                                handoff_factory=handoff)
+                except BaseException:
+                    # launch_registered already retained the allocation and any
+                    # observed identity as uncertain. There may be no runtime to
+                    # finalize; preserve that primary failure and its evidence.
+                    fresh_launch_failed = True
+                    raise
                 finally:
                     checkpoint()
                 context_id = launch.context_id
@@ -284,7 +291,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     except (TaskError, OSError, UnicodeError) as error:
         state, summary = "failed", str(error)
     finally:
-        if context_id and claimed:
+        if context_id and claimed and not fresh_launch_failed:
             try:
                 note = finalize_reviewer(context_id, workspace, adapter, registry, identities)
                 if note:
