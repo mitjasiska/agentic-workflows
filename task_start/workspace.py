@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 import unicodedata
@@ -227,14 +228,39 @@ class Git:
                 if not re.fullmatch(r"[0-9]+", count):
                     raise TaskError("Unexpected Git merge reachability response; inspect it manually")
                 merge_in_base = count == "0"
-            if not merge_in_base:
-                raise TaskError(f"GitHub confirms PR #{pull.number} is merged, but its merge commit is not present "
-                                f"in the expected local base {base!r}. Update {base!r} with `git pull --ff-only` "
-                                f"in the permanent checkout {str(self.repo)!r}, then rerun `task cleanup {identifier}`")
         except TaskError as error:
             raise TaskError(f"Task branch {branch!r} is not fully merged into {base!r} by ancestry, "
                             f"and its PR merge could not be verified: {error}; nothing was removed") from None
+        if not merge_in_base:
+            raise TaskError(f"GitHub confirms PR #{pull.number} is merged, but its merge commit is not present "
+                            f"in the expected local base {base!r} in the permanent repository checkout.\n\n"
+                            f"{self._cleanup_base_recovery(identifier)}\n\nNothing was removed.")
         return CleanupState(head, base_commit, pull)
+
+    def _cleanup_base_recovery(self, identifier: str) -> str:
+        # Location only tailors recovery after merge evidence has established
+        # the stale base. Failed location inspection must not hide that result.
+        checkout = None
+        try:
+            cwd = Path.cwd().resolve()
+            if cwd == self.repo:
+                checkout = self.repo
+            else:
+                paths = [Path(tree["worktree"]).resolve() for tree in self.worktrees()]
+                # A linked worktree may itself be nested in the permanent one.
+                checkout = max((path for path in paths if cwd.is_relative_to(path)),
+                               key=lambda path: len(path.parts), default=None)
+        except (OSError, RuntimeError, TaskError):
+            pass
+        repo = shlex.quote(str(self.repo))
+        location = ""
+        if checkout is not None and checkout != self.repo:
+            location = ("You are currently running this command from a linked worktree.\n"
+                        "Do not update the base branch here.\n\n")
+        navigation = "" if checkout == self.repo else f"  cd {repo}\n"
+        return (f"Permanent checkout:\n  {repo}\n\n{location}"
+                "Update the permanent checkout, then retry:\n\n"
+                f"{navigation}  git pull --ff-only\n  task cleanup {identifier}")
 
     def worktrees(self) -> list[dict]:
         output = self.command("worktree", "list", "--porcelain", "-z")
