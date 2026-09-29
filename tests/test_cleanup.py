@@ -1,9 +1,12 @@
 import copy
+from contextlib import chdir
 from dataclasses import replace
 import io
+from itertools import product
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import unittest
 from unittest.mock import patch
@@ -1001,22 +1004,66 @@ class SquashCleanupTests(unittest.TestCase):
         # Even a partial clone must not fetch implicitly while diagnosing this.
         self.command(self.repo, "config", "remote.origin.promisor", "true")
         trace = self.repo.parent / "git-trace"
-        with patch.dict(os.environ, {"GIT_TRACE": str(trace), "GIT_ALLOW_PROTOCOL": "file"}):
-            message = self.assert_refused("GitHub confirms PR #22 is merged")
+        repo_child, task_child = self.repo / "subdir", self.path / "subdir"
+        repo_child.mkdir()
+        task_child.mkdir()
+        repo_alias, task_alias = self.repo.parent / "repo-link", self.repo.parent / "task-link"
+        repo_alias.symlink_to(self.repo, target_is_directory=True)
+        task_alias.symlink_to(self.path, target_is_directory=True)
+        # Sibling paths sharing a prefix must not be classified as checkouts.
+        outside = self.repo.with_name(self.repo.name + "-other")
+        task_sibling = self.path.with_name(self.path.name + "-other")
+        outside.mkdir()
+        task_sibling.mkdir()
+        self.workspace_id = "w7"
+        locations = [(self.repo, False, False), (repo_child, False, False), (repo_alias, False, False),
+                     (self.path, True, True), (task_child, True, True), (task_alias, True, True),
+                     (outside, True, False), (task_sibling, True, False)]
+        for cwd, needs_cd, in_worktree in locations:
+            with self.subTest(cwd=cwd), chdir(cwd), patch.dict(
+                    os.environ, {"GIT_TRACE": str(trace), "GIT_ALLOW_PROTOCOL": "file"}):
+                message = self.assert_refused("GitHub confirms PR #22 is merged")
+                self.assertIn("expected local base 'main' in the permanent repository checkout", message)
+                self.assertIn(f"Permanent checkout:\n  {shlex.quote(str(self.repo))}", message)
+                self.assertIn("  git pull --ff-only\n  task cleanup DEV-7\n\nNothing was removed.", message)
+                self.assertEqual("  cd " in message, needs_cd)
+                if needs_cd:
+                    self.assertIn(f"  cd {shlex.quote(str(self.repo))}\n  git pull --ff-only", message)
+                self.assertEqual("running this command from a linked worktree" in message, in_worktree)
+                self.assertEqual("Do not update the base branch here" in message, in_worktree)
+                self.assertNotIn("git rev-list failed", message)
+                self.assertEqual(Path.cwd(), cwd.resolve())
+                self.assertTrue(self.workspace_active)
+                self.assertFalse(self.git.retirement_file("DEV-7").exists())
+                self.assertFalse(any(operation in call.args[0][3:] for call in self.runner.call_args_list
+                                     for operation in ("fetch", "pull", "reset", "switch", "merge", "update-ref")))
         self.assertNotIn("fetch", trace.read_text())
-        self.assertIn("expected local base 'main'", message)
-        self.assertIn("Update 'main' with `git pull --ff-only`", message)
-        self.assertIn(f"permanent checkout {str(self.repo)!r}", message)
-        self.assertIn("rerun `task cleanup DEV-7`", message)
-        self.assertNotIn("git rev-list failed", message)
-        self.assertFalse(any(operation in call.args[0][3:] for call in self.runner.call_args_list
-                             for operation in ("fetch", "pull", "reset", "merge", "update-ref")))
+
+    def test_stale_base_guidance_recognizes_worktree_nested_in_permanent_checkout(self):
+        nested = self.repo / "nested-task"
+        (self.repo / ".git" / "info" / "exclude").write_text("nested-task/\n")
+        self.command(self.repo, "worktree", "move", str(self.path), str(nested))
+        self.path = nested
+        self.pull["merge_commit_sha"] = self.head_commit  # Present locally, but not reachable from main.
+        with chdir(nested):
+            message = self.assert_refused("merge commit is not present in the expected local base 'main'")
+        self.assertIn("running this command from a linked worktree", message)
+        self.assertIn("Do not update the base branch here", message)
+        self.assertIn(f"  cd {shlex.quote(str(self.repo))}\n  git pull --ff-only", message)
+
+    def test_unavailable_cwd_does_not_hide_stale_base_evidence(self):
+        self.pull["merge_commit_sha"] = self.head_commit
+        with patch("task_start.workspace.Path.cwd", side_effect=FileNotFoundError("cwd disappeared")):
+            message = self.assert_refused("GitHub confirms PR #22 is merged")
+        self.assertIn(f"  cd {shlex.quote(str(self.repo))}\n  git pull --ff-only", message)
+        self.assertNotIn("running this command from a linked worktree", message)
 
     def test_unrelated_merge_verification_failure_retains_generic_diagnostic(self):
         base_commit = self.command(self.repo, "rev-parse", "main")
         diagnostic = "git rev-list failed (exit 128); inspect it manually"
-        for probe_fails in (False, True):
-            with self.subTest(probe_fails=probe_fails):
+        for cwd, probe_fails in product((self.repo, self.path, self.repo.parent), (False, True)):
+            with self.subTest(cwd=cwd, probe_fails=probe_fails), chdir(cwd), patch(
+                    "task_start.workspace.Path.cwd", side_effect=AssertionError("Not a stale-base diagnostic")):
                 def fail_verification(args, **kwargs):
                     if args[3:] == ["rev-list", "--count", f"{base_commit}..{self.merge_commit}"]:
                         raise TaskError(diagnostic)
@@ -1049,7 +1096,9 @@ class SquashCleanupTests(unittest.TestCase):
         for commit in (None, "", "main", "0" * 40):
             with self.subTest(commit=commit):
                 self.pull["merge_commit_sha"] = commit
-                self.assert_refused("could not be verified")
+                # A valid SHA for a missing object follows the stale-base path.
+                diagnostic = "merge commit is not present" if commit == "0" * 40 else "could not be verified"
+                self.assert_refused(diagnostic)
 
     def test_merge_evidence_is_rechecked_before_removal(self):
         requests = 0
@@ -1189,6 +1238,15 @@ class SquashCleanupTests(unittest.TestCase):
 
 
 class CleanupInputTests(unittest.TestCase):
+    def test_stale_base_recovery_quotes_permanent_path_for_shell(self):
+        repo = Path("/projects/café's checkout; $HOME `pwd`\nnext line")
+        git = Git(repo)
+        with patch.object(git, "worktrees", return_value=[]):
+            message = git._cleanup_base_recovery("DEV-7")
+        command = message.split("  cd ", 1)[1].split("\n  git pull --ff-only", 1)[0]
+        self.assertEqual(shlex.split("cd " + command), ["cd", str(repo)])
+        self.assertIn("  task cleanup DEV-7", message)
+
     def test_cleanup_has_only_issue_argument(self):
         args = cli.parser().parse_args(["cleanup", "dev-7"])
         self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7"))
