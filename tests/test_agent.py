@@ -273,7 +273,7 @@ class AgentTests(unittest.TestCase):
         def response(result):
             return json.dumps(dict(result=result))
 
-        def herdr(args):
+        def herdr(args, *, timeout=120):
             nonlocal shell_input
             if args[:3] == ["herdr", "pane", "list"]:
                 return response(self.results[0])

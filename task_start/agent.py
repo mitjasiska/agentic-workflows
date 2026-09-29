@@ -140,8 +140,8 @@ class HerdrAgentAdapter:
         if not execution.repository.is_absolute() or not execution.workspace.path.is_absolute():
             raise TaskError("Agent execution requires an absolute repository and worktree")
 
-    def command(self, group: str, operation: str, *args: str) -> dict:
-        output = run(["herdr", group, operation, *args])
+    def command(self, group: str, operation: str, *args: str, timeout: float = 120) -> dict:
+        output = run(["herdr", group, operation, *args], timeout=timeout)
         expected = {("pane", "list"): "pane_list", ("agent", "start"): "agent_started",
                     ("pane", "process-info"): "pane_process_info",
                     ("agent", "get"): "agent_info", ("agent", "prompt"): "agent_prompted"}
@@ -163,7 +163,9 @@ class HerdrAgentAdapter:
                 or not isinstance(agent["terminal_id"], str) or not agent["terminal_id"]
                 or Path(agent["cwd"]).resolve() != workspace.path
                 or Path(agent["foreground_cwd"]).resolve() != workspace.path):
-            raise ValueError("agent target mismatch")
+            raise ValueError(f"agent target mismatch: agent={agent.get('agent')!r}, "
+                             f"pane={agent.get('pane_id')!r}, terminal={agent.get('terminal_id')!r}, "
+                             f"cwd={agent.get('cwd')!r}, foreground_cwd={agent.get('foreground_cwd')!r}")
 
     def check_target(self, workspace: Workspace, *, review: bool = False) -> None:
         panes = self.command("pane", "list", "--workspace", workspace.workspace_id)["panes"]
@@ -193,7 +195,8 @@ class HerdrAgentAdapter:
         self.validate_agent(result["agent"], workspace, review=review)
         if (result["agent"]["agent_status"] not in {"idle", "done", "working"}
                 or result["argv"] != [self.kind, *args]):
-            raise ValueError(f"{self.display_name} launch/readiness not confirmed")
+            raise ValueError(f"{self.display_name} launch/readiness not confirmed: "
+                             f"status={result['agent']['agent_status']!r}, argv_match={result['argv'] == [self.kind, *args]}")
         return result["agent"]
 
     def observe_agent(self, execution: AgentExecution, agent: dict,
@@ -301,6 +304,7 @@ class CodexAdapter(HerdrAgentAdapter):
     kind = "codex"
     display_name = "Codex"
     MODES = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+    SHELL_READY_TIMEOUT = 30
 
     def validate_options(self) -> None:
         mode = "none" if self.options.mode == "off" else self.options.mode
@@ -389,21 +393,57 @@ class CodexAdapter(HerdrAgentAdapter):
         # A prior interrupted launch can leave an executable fragment in the
         # reusable shell's input buffer. Cancel it so Herdr's canonical `codex`
         # command cannot be appended to stale text (for example, `pi` + `codex`).
-        process = self.command("pane", "process-info", "--pane", workspace.pane_id)["process_info"]
-        foreground = process["foreground_processes"]
-        shell_pid = process["shell_pid"]
-        if (process["pane_id"] != workspace.pane_id or not isinstance(shell_pid, int)
-                or shell_pid <= 0 or process["foreground_process_group_id"] != shell_pid
-                or not isinstance(foreground, list) or len(foreground) != 1
-                or foreground[0]["pid"] != shell_pid):
-            raise ValueError("Codex target is not at an interactive shell prompt")
+        # Pane creation/labeling can finish while shell startup children (e.g.
+        # lesspipe) still occupy its foreground group. Wait for the same strict
+        # shell-only predicate before sending any input. Never retry input/start.
+        deadline = time.monotonic() + self.SHELL_READY_TIMEOUT
+        established_shell = None
+        last = "no completed process observation"
+
+        def timeout_error():
+            return TaskError(f"Timed out waiting for an interactive shell prompt before launch; last observed {last}")
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise timeout_error()
+            try:
+                process = self.command("pane", "process-info", "--pane", workspace.pane_id,
+                                       timeout=remaining)["process_info"]
+            except TaskError:
+                if time.monotonic() >= deadline:
+                    raise timeout_error() from None
+                raise
+            foreground = process["foreground_processes"]
+            shell_pid = process["shell_pid"]
+            group = process["foreground_process_group_id"]
+            if (process["pane_id"] != workspace.pane_id
+                    or any(value is not None and (type(value) is not int or value <= 0)
+                           for value in (shell_pid, group))
+                    or not isinstance(foreground, list)
+                    or any(not isinstance(p, dict) or type(p.get("pid")) is not int or p["pid"] <= 0
+                           for p in foreground)):
+                raise ValueError("invalid or mismatched shell process observation")
+            last = (f"shell_pid={shell_pid}, foreground_group={group}, "
+                    f"foreground_pids={[p['pid'] for p in foreground]}")
+            # Transport/process scheduling can return even a ready observation
+            # after its timeout. Never accept it or send input beyond our bound.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise timeout_error()
+            if established_shell is not None and shell_pid != established_shell:
+                raise TaskError(f"Shell identity changed during pane readiness: {last}")
+            established_shell = shell_pid
+            if shell_pid is not None and group == shell_pid and [p["pid"] for p in foreground] == [shell_pid]:
+                break
+            time.sleep(min(0.25, remaining))
         run(["herdr", "pane", "send-keys", workspace.pane_id, "ctrl+c"])
 
     def launch(self, execution: AgentExecution) -> LaunchResult:
         self.validate_execution(execution)
         workspace = execution.workspace
         prompt = execution.handoff
-        phase = "startup"
+        phase = "pane readiness (before launch)"
         thread_id = None
         try:
             self.check_target(workspace, review=execution.purpose == "review")
@@ -415,7 +455,9 @@ class CodexAdapter(HerdrAgentAdapter):
                          "Reply READY, then wait for the task prompt.")
             args = self.launch_args(execution, bootstrap)
             # Verify the receipt API can initialize before starting a terminal agent.
+            phase = "receipt API initialization (before launch)"
             with CodexRPC(workspace.path) as rpc:
+                phase = "startup launch/runtime confirmation"
                 observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
                 phase = "readiness confirmation"
                 thread_id = self.find_session(rpc, workspace, bootstrap)
@@ -443,15 +485,15 @@ class CodexAdapter(HerdrAgentAdapter):
             self.confirm_target(execution, observed, expected_session=provider_session)
             summary = f"Codex turn {turn_id} confirmed in {workspace.pane_id} (session {thread_id})"
             return LaunchResult(self.kind, workspace.pane_id, summary, thread_id, turn_id, "id", "yes")
-        except (KeyError, TypeError, ValueError, OSError):
+        except (KeyError, TypeError, ValueError, OSError) as error:
             raise TaskError(f"Codex {phase} was not confirmed in pane {workspace.pane_id}; "
-                            f"inspect it before retrying. Session: {thread_id or 'not created'}. "
+                            f"last check: {error}. Inspect it before retrying. Session: {thread_id or 'not yet observed'}. "
                             "Workspace left intact") from None
         except TaskError as error:
             # A timeout may follow successful delivery. Never auto-resubmit or
             # kill a possibly working agent, and never create a fallback session.
             raise TaskError(f"Codex {phase} failed in pane {workspace.pane_id}: {error}. "
-                            f"Session: {thread_id or 'not created'}. "
+                            f"Session: {thread_id or 'not yet observed'}. "
                             "Workspace left intact; inspect the pane before retrying") from None
 
     def find_session(self, rpc, workspace: Workspace, bootstrap: str) -> str:
@@ -471,7 +513,8 @@ class CodexAdapter(HerdrAgentAdapter):
                     raise ValueError("Codex readiness session mismatch")
                 return thread["id"]
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
-        raise TaskError("Codex readiness turn not found; inspect the pane for trust or startup dialogs")
+        raise TaskError("Codex readiness turn not found (last observed: no session matching the readiness marker); "
+                        "inspect the pane for trust or startup dialogs")
 
     def confirm_prompt(self, rpc, workspace: Workspace, thread_id: str,
                        message_id: str | None, prompt: str) -> str:

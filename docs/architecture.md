@@ -57,6 +57,27 @@ not identify a Pi turn for that prompt. Both remain interactive sessions.
 
 ### Codex receipt confirmation
 
+Fresh implementation and reviewer contexts share the same launch boundary.
+Pane creation and context allocation/labeling do not prove the shell is ready:
+shell startup children can still occupy its foreground process group. Before
+sending input, the Codex adapter polls `pane process-info` for up to 30 seconds
+(`CodexAdapter.SHELL_READY_TIMEOUT`). The exact pane must report a positive shell
+PID, that PID as the foreground group, and only that shell in the group. A changed
+shell identity or malformed/mismatched observation fails immediately. A timeout
+reports the last shell PID, foreground group, and foreground PIDs, without sending
+Ctrl+C or launching Codex.
+Each process observation receives only the remaining readiness budget as its
+subprocess timeout. The adapter rechecks the deadline after the observation and
+rejects even a ready shell reported at or after expiry, before sending input.
+
+Once ready, the adapter clears stale shell input once and initializes the receipt
+API. It issues `agent start` once; Herdr owns the subsequent runtime-readiness wait
+(`--timeout 30000`). The adapter validates the returned runtime target, status and
+exact argv. It never retries `agent start` after a failure or uncertain response.
+Session discovery and recorded-turn confirmation below poll observation only;
+delayed visibility never repeats launch or queues another handoff. Errors identify
+the failed phase; a session that has not been observed is not assumed absent.
+
 Codex starts with a short native prompt containing a random readiness marker. It
 asks only for `READY`, without tools or edits. The local stdio app-server API's
 `thread/list` identifies the session by that exact marker and checkout;
@@ -142,6 +163,10 @@ reporting provenance such as `source` is retained separately and is not identity
 Review passes use `reviewing` while one caller owns that reviewer; an atomic registry
 claim prevents concurrent follow-ups in the same conversation. Clean, findings,
 blocked, and failed verdicts are transient results, not registry lifecycle states.
+A failed fresh review launch retains the `uncertain` allocation and any identity
+already observed by the adapter. It does not run reviewer finalization against a
+possibly unestablished runtime or append a secondary missing-identity error to the
+launch failure. Its ordinal remains consumed, even if no session was observed.
 A launch interrupted before its result can be recorded remains `launching`;
 another concurrent launch cannot claim that pane until the uncertain context is
 inspected and cleaned up.
@@ -194,6 +219,20 @@ checker is provided in the repository.
 ### Recorded live-check limits
 
 These are historical results, not checks rerun by a documentation update.
+
+On 2026-09-29, a disposable Herdr workspace/split-pane probe observed `bash`,
+`lesspipe`, and `basename` in a fresh pane's foreground group, followed 55 ms later
+by only `bash`. Replaying that observed shape through the pre-fix `task start` and
+`task review` paths reproduced the generic startup failure before `agent start`
+or the receipt API was called, including review's secondary finalization error.
+The probe workspace was closed. This establishes the pre-launch shell race; it
+does not claim a live Codex launch or model review. A second disposable probe
+exercised the corrected readiness check on one workspace pane and three split
+panes. All converged to the shell-only predicate and cleared input once, including
+two splits that needed multiple process observations; that workspace was also
+closed. Sequenced offline regressions cover both callers, delayed session/receipt
+visibility, bounded failures, conflicting identity, exactly-once side effects, and
+retained allocation history.
 
 Controlled fresh/resume acceptance tests use real disposable Git task worktrees and
 the context SQLite registry, with deterministic Linear/Herdr/provider boundaries.
