@@ -1,683 +1,205 @@
 # Agentic Workflows
 
-Reusable tooling, skills, and automation for efficient agentic software development workflows.
+Agentic Workflows helps you take a development task from a Linear issue to an
+agent implementation, independent review, and workspace cleanup. It combines a
+task-creation skill with a `task` command that coordinates your repositories,
+Git worktrees, and interactive coding agents in Herdr.
 
-The goal is to reduce repetitive development mechanics and make working with coding agents across multiple projects fast, consistent, and predictable.
+You choose the task and scope, the workflow prepares the checkout and hands over
+the current requirements, and you decide how to address findings and publish the
+result. Codex and Pi are supported execution agents; Codex is the default
+implementation.
 
-## Linear task creation skill
+## Core concepts
 
-[`skills/create-linear-task`](skills/create-linear-task/SKILL.md) turns a rough development idea into a concise Linear issue that can be handed directly to an implementation agent. It keeps the human specification visible, puts execution-only guidance and workflow metadata in a collapsed `Agent instructions` block, and supports implementation, research, and experiment tasks.
+| Concept | What it means for you |
+| --- | --- |
+| Issue | The Linear task holds the requirements. Start and review use its latest contents. |
+| Project repository | A Linear project maps to a permanent local Git checkout and a base branch. Keep that checkout clean and on its configured base. |
+| Task workspace | A separate Git worktree and branch, opened in Herdr. Implementation and review share this checkout. |
+| Slice | An explicitly named part of an issue, with its own branch and workspace. The default is one issue, one branch, one PR. |
+| Context | An implementation or reviewer conversation, labeled in its pane, such as `DEV-7-I1` or `DEV-7-R1`. Several contexts can share a checkout. |
+| Review pass | A review of the current checkout against the local base. A fresh pass starts an independent conversation; an explicit resume keeps a particular reviewer's history. |
 
-This directory is the canonical standalone agent skill. Its standalone installation is currently validated with Codex. It is designed to remain portable to compatible skill-aware agent harnesses, but Pi, OpenCode, and other harnesses have not been verified and are not claimed as supported yet.
+The normal path is: prepare an issue, start implementation, review the result,
+address any findings, then complete your usual commit/PR/merge process and clean
+up. Implementation stops ready for review. Review reports findings without
+applying fixes. You own scope, follow-up fixes, publication, and marking the
+Linear issue complete; there is no automatic fix or merge loop.
 
-Use the skill from this repository or install the entire directory into Codex's skill location. The directory includes a generated [`config.toml`](skills/create-linear-task/config.toml), which the renderer finds relative to the installed skill—not the source checkout. Repository [`config/projects.toml`](config/projects.toml) is the single human-edited source for project mappings; do not edit project mappings in the packaged or installed snapshot.
+## Setup
 
-From the repository root, an initial installation or full refresh is:
+You need Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
+Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
 
-```sh
-skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
-mkdir -p "$skill_dest"
-cp -R skills/create-linear-task/. "$skill_dest/"
-```
-
-After changing canonical project mappings, regenerate and check the packaged snapshot, then refresh that same installed directory:
-
-```sh
-python3.12 skills/create-linear-task/scripts/sync_config.py
-python3.12 skills/create-linear-task/scripts/sync_config.py --check
-skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
-mkdir -p "$skill_dest"
-cp -R skills/create-linear-task/. "$skill_dest/"
-cmp skills/create-linear-task/config.toml "$skill_dest/config.toml"
-```
-
-`cmp` exits successfully only when the installed configuration matches the generated package. The drift check is also covered by the repository test suite. Pass `--config /path/to/generated-config.toml` only to use an intentionally prepared alternative package configuration. Missing exact targets or `linear_team` values fail rather than being guessed.
-Start a new Codex session after installation or refresh so skill discovery uses the updated copy.
-
-### ChatGPT plugin distribution
-
-[`plugins/create-linear-task`](plugins/create-linear-task/README.md) is a separate, thin distribution package for ChatGPT web/mobile. It does not own or redefine the workflow. Its bundled `skills/create-linear-task` directory and compatibility manifest are generated from the canonical standalone skill by `sync_plugin.py`; a check mode and repository tests detect drift. The package is skills-only because the current OpenAI plugin format supports skills without an MCP server.
-
-Refresh and verify the plugin snapshot, then build its deterministic submission archive with:
-
-```sh
-python3.12 plugins/create-linear-task/scripts/sync_plugin.py
-python3.12 plugins/create-linear-task/scripts/sync_plugin.py --check
-python3.12 plugins/create-linear-task/scripts/package_plugin.py \
-  --output /tmp/create-linear-task-plugin.zip
-```
-
-See the plugin README for local validation and the manual fresh-session acceptance procedure. The standalone Codex installation above remains independent of the plugin package.
-
-The deterministic renderer uses that bundled configuration to select an exact Linear project/team and apply a closed workflow taxonomy. A task has at most one primary category (`feature`, `bug`, `chore`, `docs`, or `refactor`) plus an independent Research modifier. Task kind remains separate.
-
-The taxonomy maps those categories to the exact canonical labels `Feature`, `Bug`, `Chore`, `Docs`, and `Refactor`, and to the matching Conventional Commit types. The modifier maps to the exact `Research` label. Before mutation, the skill resolves all six names exactly once against the complete catalog applicable to the selected team—even labels unused by the current task. A missing or ambiguous canonical label stops instead of being guessed or created.
-
-The packaged configuration contains the known `agentic-workflows` team selector. New issues use the configured team/project. Refinements carry their current team/project IDs explicitly, require their names to match the configured target, and never include a target change in the issue mutation; a mismatch stops rather than moving the issue. Post-mutation verification retains those original IDs and compares them with a separate reread target, so unchanged names cannot hide a move. No relationship is inferred between an issue prefix such as `DEV-` and team selection. Existing unrelated labels—including archived labels such as `Improvement` that may be absent from the active catalog—are preserved as opaque IDs. For refinements, the skill re-reads current labels immediately before mutation and applies only canonical workflow-label additions/removals; it never replaces all labels from the earlier drafting snapshot. It then re-reads and verifies the target and workflow labels, reporting concurrent changes without automatically repairing them. Workflow-label replacement is disabled unless a project explicitly enables `replace_workflow_labels`, and the skill never creates, renames, or deletes label objects.
-
-Descriptions use Linear's API Markdown form `+++ Section title … +++` for collapsed sections. The similar `>>>` syntax is an interactive-editor shortcut and is intentionally not emitted by this API-oriented skill.
-
-## Setup and use
-
-Requires Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
-Agent handoff also requires the selected, authenticated Codex or Pi CLI on `PATH`.
-The commands and JSON responses were checked against Herdr 0.9.1 and Codex CLI
-0.157.1. Pi transport was checked against Pi CLI 0.87.1 and Herdr 0.9.1;
-run `pi --help` to verify the installed interface.
-
-1. Clone `agentic-workflows` and your project repositories.
-2. Copy `config/local.example.toml` to `~/.agentic-workflows/config.toml` (create the directory first).
-3. Set `projects_root`, your Linear personal API key, and `[agent]` in that local file. The key needs read access to the issues, projects and team statuses, and permission to update issues. Keep it private; never commit the populated file.
-4. Add the cloned repository directory to your `PATH`, then run:
+1. Clone this repository and the project repositories you want to work on.
+2. Check the mappings in [`config/projects.toml`](config/projects.toml).
+   `linear_project` must match the Linear project name; `repo_name` and
+   `base_branch` identify its local checkout and base. The base must track a
+   same-named remote branch.
+3. Copy [`config/local.example.toml`](config/local.example.toml) to
+   `~/.agentic-workflows/config.toml`, creating the directory first. Set
+   `projects_root`, your Linear personal API key, and your `[agent]` selection.
+   Keep this populated file private. The key needs issue/project/team-status
+   read access and permission to update issues.
+4. Add this repository to `PATH`, then start a task:
 
    ```sh
+   export PATH="/absolute/path/to/agentic-workflows:$PATH"
    task start DEV-7
    ```
 
-The executable `task` lives at the repository root. For example, in a POSIX shell:
+No package installation is required. The command works from any directory or
+through a symlink on `PATH`. On Windows, use
+`py -3.12 C:/path/to/agentic-workflows/task start DEV-7`.
+
+Configure `[reviewer]` separately before using review; fresh reviews require an
+explicit model and mode in that section or as command flags. The
+[configuration guide](docs/configuration.md) includes examples, option precedence,
+agent compatibility, and optional repository-specific Codex permission profiles.
+
+## Using the workflow
+
+### Create or refine a task
+
+Start with a Linear issue, or use the
+[`create-linear-task` skill](skills/create-linear-task/SKILL.md) to turn a rough
+idea into one. It supports implementation, research, and experiment tasks, keeping
+the human specification visible and execution guidance in a collapsed
+`Agent instructions` section. Task creation is separate from the `task` CLI.
+
+The standalone skill is validated with Codex; other skill hosts have not been
+verified. Use it from this repository, or install the whole directory:
 
 ```sh
-export PATH="/absolute/path/to/agentic-workflows:$PATH"
+skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
+mkdir -p "$skill_dest"
+cp -R skills/create-linear-task/. "$skill_dest/"
+```
+
+Start a new Codex session after installation or refresh. When project mappings
+change, follow the skill's [configuration refresh instructions](skills/create-linear-task/SKILL.md#establish-context-and-target).
+Its own instructions also cover [classification](skills/create-linear-task/SKILL.md#write-and-classify-the-issue)
+and [safe issue refinement](skills/create-linear-task/SKILL.md#render-deterministic-fields).
+
+A separate [ChatGPT plugin package](plugins/create-linear-task/README.md) distributes
+this same skill for web/mobile. See its README for distribution options, packaging,
+and acceptance requirements. The standalone installation above remains independent.
+
+### Start, reopen, or prepare a workspace
+
+```sh
 task start DEV-7
-```
-
-It works from any directory; a symlink to `task` on your `PATH` works too. No package installation is required. On Windows, invoke `py -3.12 C:/path/to/agentic-workflows/task start DEV-7`; a global Windows launcher is not included yet.
-
-Portable project metadata is committed in `config/projects.toml`. Match `linear_project` exactly to the Linear project name and set `repo_name` and `base_branch`. Machine-specific paths and credentials live only in `~/.agentic-workflows/config.toml`:
-
-```toml
-projects_root = "~/projects" # Or "C:/development/projects" on Windows
-
-[linear]
-api_key = "" # Fill in your personal API key locally
-
-[agent]
-kind = "codex"
-model = "gpt-6-astra"
-mode = "high"
-```
-
-`kind` may be `codex` (the default implementation) or `pi`. `model` and `mode`
-are optional; when omitted, the selected agent's own local default is used. The
-legacy `reasoning = "high"` field remains accepted as an alias for `mode` so
-existing Codex installations continue to work. Do not set both fields.
-
-Model names are passed unchanged to the selected CLI. Workflow `mode` means
-reasoning/thinking effort, not Pi's unrelated `--mode text|json|rpc` output flag.
-Codex receives it as `--config 'model_reasoning_effort="high"'`; Pi receives it
-as `--thinking high`. `none` and `off` are mapped to the spelling used by each
-agent. Codex supports `none`/`off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
-`max`, and `ultra`; Pi supports `off`/`none` through `max` but not `ultra`.
-Unknown mode names fail before workspace or Linear mutation. When a Pi mode is
-requested, the adapter uses Pi's local RPC mode in the exact worktree before task
-submission to resolve the selected model, supported thinking levels, and effective
-level. It rejects a model/mode pair if Pi would silently clamp it. Model/account
-support is ultimately determined by the selected CLI. Login, repository trust,
-and each agent's own permission settings remain under your control. Although Pi
-itself accepts thinking suffixes such as `model:high`, Agentic Workflows rejects
-that syntax because Pi may silently clamp it. Keep `model` plain and put every
-thinking choice in workflow `mode`/`--mode` so it follows one validated path.
-
-Per-command choices override machine-local configuration without modifying it:
-
-```sh
-task start DEV-7 --agent pi
-task start DEV-7 --agent codex --model gpt-6-astra --mode high
-```
-
-`--agent`, `--model`, and `--mode` resolve independently. For example,
-`--agent pi` retains the configured model and mode; it does not silently choose
-Pi-specific values. Precedence is command override, then `[agent]`, then the
-selected CLI's local default for an omitted model or mode. An unavailable or
-unknown requested agent fails; there is no fallback to Codex.
-
-## Codex permissions for trusted repositories
-
-Agentic Workflows does not relax Codex permissions globally. With no repository
-override, the adapter passes no profile, sandbox, approval, or network option, so
-Codex's active defaults and machine configuration continue to apply. Model and
-reasoning choices are independent of permissions.
-
-A repository that genuinely needs unattended implementation can opt into one
-named Codex configuration profile in the machine-local
-`~/.agentic-workflows/config.toml`. The key is the exact `repo_name` from
-`config/projects.toml`, not a checkout or worktree path. For this repository:
-
-```toml
-[codex.repositories."agentic-workflows"]
-profile = "agentic-workflows-trusted"
-```
-
-Create the selected profile beside Codex's user config. With the usual
-`CODEX_HOME`, the example above names
-`~/.codex/agentic-workflows-trusted.config.toml`:
-
-```toml
-approval_policy = "never"
-sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-network_access = true
-```
-
-This exact combination was verified with Codex CLI 0.157.1. Agentic Workflows
-launches it as `codex --cd WORKTREE --profile agentic-workflows-trusted ...`;
-Codex loads and enforces the profile. `workspace-write` limits writes to the task
-workspace and Codex's temporary roots while keeping protected paths such as
-`.git` and `.codex` read-only. Network access permits commands inside that sandbox
-to use outbound networking. `approval_policy = "never"` suppresses approval
-prompts; an operation outside the sandbox fails and is returned to the agent
-instead of escaping the sandbox. This setup does not use `danger-full-access` or
-the bypass flag. See Codex's focused documentation for
-[configuration profiles](https://developers.openai.com/codex/config-basic) and
-[sandbox/approval behavior](https://developers.openai.com/codex/security).
-
-Treat the override as a trust decision: the selected profile is layered on the
-machine's Codex configuration and can expose repository content to processes and
-network destinations used by the task. Keep the selection and profile file local;
-do not commit populated local configuration, credentials, or approval state. An
-unlisted repository receives no override, even if it uses the same agent or model.
-
-Codex enforces filesystem, network, and approval boundaries. The task handoff's
-rules—no commit, push, merge, pull request, `sudo`, or destructive Git
-operations—are behavioral instructions, not hard sandbox rules. Implementation
-and future review commands may use the same trusted-repository profile; they stay
-separate through fresh sessions, `AgentExecution.purpose`, and purpose-specific
-handoffs, not through separate permission profiles.
-
-This is deliberately a small Codex-only setup. Pi enforcement, cross-agent
-capability mapping, stronger credential isolation, containers or external
-sandboxing, a dedicated review profile, generalized command rules, and a broader
-security framework remain out of scope.
-
-A repository is resolved as `projects_root / repo_name`. Each must be its permanent Git checkout, already on the configured base branch, with a clean working tree (including untracked files) and no unfinished Git operation. The base must track a same-named branch on a remote. `task start` fetches that upstream into `FETCH_HEAD` and updates using `merge --ff-only`; it refuses local-only commits or divergence. It does not switch, stash, reset, or force-update branches.
-
-The command loads the current issue through [Linear's GraphQL API](https://linear.app/developers/graphql), resolves the project, updates the base, and asks Herdr to create or focus a worktree. Herdr chooses its location. New default branches start with the lowercase issue identifier and a title slug (up to 100 characters). The identifier is the stable identity: renaming a Linear title never renames an existing branch or creates a replacement workspace.
-
-After Git and Herdr confirm the exact checkout and focus, the command sets the
-issue to its team's exact `In Progress` status (unless it is already there). It
-then starts the selected adapter in the returned pane and sends the same workflow-
-owned handoff: current identifier, title, exact description, resolved checkout,
-branch, optional slice, and standard implementation instructions. Both agents
-are told to read repository instructions, inspect before editing, implement the
-requested scope, run relevant validation, and stop for independent review without
-committing, pushing, merging, or opening a PR. The Python workflow owns the Linear
-lookup; the execution agent is told not to contact Linear or read its credentials.
-No task description file is written into the worktree.
-
-Codex is launched with `--cd` and uses its local app-server API for a readiness
-exchange, durable queue submission, and exact recorded-turn confirmation. Pi has
-no working-directory flag: Herdr starts it in the already-confirmed task pane and
-the adapter validates both reported working directories before submitting the full
-handoff through `herdr agent prompt`. Herdr confirms prompt submission, but does
-not identify a Pi turn for that prompt. Both remain interactive sessions.
-
-To prepare/focus the workspace without an agent (also works without `[agent]` or
-an agent installation):
-
-```sh
 task start DEV-7 --no-agent
+task start DEV-7 --agent pi --model <provider/model> --mode high
 ```
 
-## Agent execution architecture
+`start` updates the clean permanent base, creates or focuses the task workspace,
+sets Linear to the team's `In Progress` status, and starts an implementation
+agent with the current issue and checkout. Renaming an issue does not change its
+existing workspace's identity. Uncommitted work in a reused task checkout is
+preserved.
 
-Agentic Workflows is multi-agent by design. Codex is the current default and most
-mature adapter, not the architecture; Pi is the second supported implementation
-used to keep the boundary portable. Future agents such as OpenCode should be added
-as adapters without rewriting task lifecycle logic.
+Use `--no-agent` to prepare or focus the workspace without launching an agent.
+It still updates Linear and works without an agent installation or `[agent]`
+configuration. It cannot be combined with agent selection flags. If an agent is
+already running, continue in its pane, use `--no-agent` to focus the workspace,
+or exit that session before requesting a fresh implementation handoff.
 
-The shared contract in `task_start/agent.py` is deliberately small:
+`--agent`, `--model`, and `--mode` override configuration independently for one
+command. Changing only `--agent` retains the configured model and mode, so choose
+values supported by that agent. There is no automatic fallback agent.
 
-- `AgentOptions` is the resolved agent, model, and workflow mode.
-- `AgentExecution` carries the fresh issue snapshot, resolved repository and exact
-  worktree, execution purpose, an already-constructed semantic handoff, and an
-  extensible workflow-policy mapping. It does not invent purpose-specific wording.
-- `LaunchResult` contains the pane/session/turn information deterministic workflow
-  code may report. `AgentAdapter` is the launch boundary.
-
-Responsibility is split as follows:
-
-- Core owns fresh Linear retrieval, project/repository resolution, deterministic
-  Git and Herdr workspace preparation, status transition, option precedence, and
-  construction of the semantic implementation handoff. The task-start-specific
-  builder lives in `task_start/handoff.py`; future review logic must provide its
-  own review handoff rather than inheriting implementation framing.
-- An adapter owns executable availability, supported values and mappings, CLI
-  arguments, working-directory behavior, prompt transport/receipt mechanics, and
-  agent-specific launch validation. Agent-specific capability should stay there
-  instead of being forced into the shared contract.
-- Machine-local configuration owns credentials, paths, the default agent/model/
-  mode, repository-to-Codex-profile selections, and each CLI's authentication,
-  trust, provider, and permission settings.
-- Linear content owns task-specific intent and constraints. It is fetched fresh,
-  transported in memory, and is never copied into tracked repository files.
-
-New workflow commands such as review should reuse `add_agent_options`,
-`resolve_agent_options`, `AgentExecution`, and the adapter registry. They should
-target the shared boundary unless behavior genuinely belongs to one agent.
-
-## Task review
-
-Review the existing task checkout in a new independent reviewer pane:
+For separate implementation slices, select a stable scope name:
 
 ```sh
-task review DEV-20
-task review DEV-20 --agent pi --model <provider/model> --mode high
-task review DEV-20 --resume DEV-20-R2
-task review DEV-20 --resume DEV-20-R2 --json
+task start DEV-7 --slice importer
+task start DEV-7 --slice exporter
 ```
 
-Configure review separately from implementation in the machine-local config:
+Each slice has its own branch and workspace. Without `--slice`, start can reuse
+exactly one candidate and retains its recorded scope. Multiple candidates require
+an explicit slice; ambiguous or historical workspaces are refused. Review and
+cleanup have no slice selector and refuse multiple task worktrees/slices. See
+[workspace reuse and slices](docs/lifecycle.md#workspace-lifecycle-and-slices)
+for legacy workspaces, remote branches, and PR-history restrictions.
 
-```toml
-[reviewer]
-kind = "codex"
-model = "gpt-6-astra"
-mode = "high"
+### Review and re-review
+
+When implementation and validation are ready, leave the task workspace open and
+run an independent review:
+
+```sh
+task review DEV-7
+task review DEV-7 --agent codex --model gpt-6-astra --mode high
+task review DEV-7 --resume DEV-7-R1
 ```
 
-The fresh form always allocates the next DEV-41 review context (`DEV-20-R1`,
-`DEV-20-R2`, etc.). It splits a pane in the existing task tab, preserving focus,
-and labels it with that exact context ID. It never prepares another worktree or
-inherits implementation or previous reviewer conversation. Codex and Pi use the
-shared execution adapters and repository permission profiles. Those permission
-capabilities do not authorize task writes during review.
+Fresh review opens a new reviewer pane in the task tab. It examines committed,
+staged, unstaged, and untracked task changes against the local base, using the
+latest Linear requirements. It needs a verified implementation context in that
+workspace; a workspace prepared only with `--no-agent` is not sufficient. Review
+does not advance the base or change Linear. Keep the checkout stable during a
+pass: observed changes invalidate the result.
 
-Each pass fetches the latest Linear issue and resolves the configured repository,
-local base branch, exact existing task branch/worktree, scope metadata, and
-DEV-41 mappings. No title-derived branch guesses, fetch, base advancement, worktree
-repair, Linear mutation, PR operation, or automatic routing of findings occurs.
-The permanent checkout must pass the existing base safety checks; the task checkout
-may have staged, unstaged, and untracked work. Ambiguous slices/worktrees and
-missing or inconsistent mappings stop before reviewer launch.
+After addressing findings yourself or in the implementation session, choose a
+fresh review for a new independent assessment, or `--resume` with an exact review
+context ID for a follow-up in that reviewer's conversation. Resume retains the
+original agent/model/mode and cannot be combined with selection flags. It stops
+if the recorded conversation cannot be verified.
 
-Review pins the current local base commit. A versioned SHA-256 fingerprint covers
-that commit, task HEAD/branch, semantic index entries/flags, Git status, file names,
-bytes, executable bits, symlink targets, and non-ignored untracked files. Initialized
-submodule state is included recursively. Conflicted/unfinished Git operations and
-unsupported file types (such as non-regular untracked files) fail closed. Index
-stat-cache refreshes and mtimes do not affect the fingerprint. Ignored validation
-artifacts are excluded. Two matching reads establish each snapshot. Checkpoints run
-immediately after launch/resume returns, at result/status polls, and immediately
-before accepting the final result. Any checkpoint that observes drift permanently
-invalidates that pass, even if the original bytes are later restored. Final acceptance
-also requires the ending fingerprint to match the pinned starting fingerprint.
-A mutation perfectly restored between checkpoints is an accepted v1 limitation;
-no worktree lock or filesystem watcher is installed.
+Results are `clean`, `findings`, `blocked`, or `failed`; a blocked result can report
+that the implementation changed during review. Findings and limitations need
+human follow-up. Use `--json` for structured output or `--timeout SECONDS` to
+change the default 1800-second wait after delivery. See the
+[review reference](docs/lifecycle.md#task-review) for guarantees, exit codes, and
+resume requirements.
 
-`--resume` selects only the exact registered review context. It checks role, issue,
-repository, checkout, server, terminal, and persisted provider history. It retains
-the actual conversation and the recorded agent/model/mode. Fresh review requires
-explicit model and mode (config or flags) so provider defaults cannot drift between
-passes. Resume rejects selection flags; use a fresh reviewer for different settings.
-Unknown, retired, uncertain, busy, mismatched, or non-resumable IDs never fall back
-to fresh review. A verified missing pane can be recreated in the task's currently verified tab
-with the same context ID/session. A terminal uniquely relocated to another pane
-within the task workspace retains its context and session; only the verified pane/tab
-location is updated. Conflicting or ambiguous runtime/session evidence fails. Tab
-rearrangement within the task workspace and manual pane renaming do not select a
-different reviewer. Codex uses its exact thread queue and persisted prompt receipt;
-Pi requires an exact persisted session-file reference from Herdr.
-Pi review launches and restarts explicitly load the bundled session-reporting
-extension, so discovery does not depend on a globally installed Herdr integration.
-It reports Pi's native session path; a startup path may precede persisted history.
-Pi resume rechecks the saved model/thinking mode through the same capability check
-as fresh launch; unsupported or clamped settings fail before the follow-up prompt.
-Pi verification retains the immutable conversation ID from the persisted header in
-the existing DEV-41 session reference. Resume checks that ID and actual history
-again after startup, before delivering instructions; recreating an empty session at
-the same path is rejected. Session references first reported during review polling
-are recorded through the same registry observer as launch. Later conflicting
-identities fail; a reported path alone never establishes resumability. Explicit
-empty, blank, or malformed `--resume` selectors fail before allocation.
-
-Herdr may infer `idle` while Pi is still working. Idle/done without a structured
-result, startup gaps, and temporarily absent/unknown observations remain pending;
-elapsed startup time or an earlier working observation does not establish completion.
-Acceptance requires validated output and idle/done, plus final identity/state checks.
-Without conclusive output or a verified failure, the existing workflow timeout bounds
-the wait, including when a stopped process is only reported as absent/unknown.
-
-The handoff separates authoritative read-only review instructions, resolved and
-pinned metadata, and latest Linear requirements. Embedded implementation-agent
-instructions remain task context. Reviewers may inspect and validate, but cannot
-edit task files, fix, stage, commit, push, merge, modify Linear, or change PRs.
-Their only output-file write is a private temporary JSON result outside the task
-checkout. The workflow waits for the same terminal/session to settle, validates a
-pass-specific nonce and strict result shape, then removes the temporary directory.
-No durable semantic report is stored. A blocked pass, timeout, or interruption leaves
-the pane intact. Context health and resumability are determined separately from the
-pass verdict using live pane/terminal/session identity and provider history. A verified
-reviewer remains resumable after a pause or tab move; release the pause before submitting
-its next follow-up. If the agent exits back to its shell, explicit resume restarts it in
-the same mapped pane and verifies the retained conversation before sending the handoff.
-Closing a pane preserves verified session evidence for later exact resume and pane recreation.
-Temporary verification failures retain last-known verified resumability; every resume
-still rechecks provider history. Missing, ambiguous, or replaced identity remains uncertain and cannot
-be resumed implicitly. `--timeout` defaults to 1800 seconds after prompt delivery.
-
-`--json` emits a version-1 `ReviewResult`, independent of human CLI formatting:
-
-- `state`: `clean`, `findings`, `blocked`, or `failed`; `invalidated` distinguishes
-  implementation-state invalidation from other blocking conditions.
-- `findings`: severity (`critical`, `high`, `medium`, `low`), explanation, concrete
-  file/location or other evidence, and optional requirement/test linkage text.
-- `checks`: name, result (`passed`, `failed`, `not_run`), and details.
-- `context_id`, `pass_id`, `pass_kind` (`fresh`/`resumed`), `execution`
-  (`kind`/`model`/`mode`), pinned `review_state`, and `post_fingerprint`.
-- `summary`: a human-readable explanation, never an automation verdict source.
-
-Exit status is 0 for clean, 2 for findings, 3 for blocked/invalidated, and 1 for
-failure. Missing/malformed output cannot be clean; drift overrides any model verdict.
-Preflight errors stop before a pass exists and are reported on stderr. Findings,
-validation limitations, and stopped/blocked agents require human action; no fix loop
-or implementation resume is included.
-
-Controlled fresh/resume acceptance tests use real disposable Git task worktrees and
-the DEV-41 SQLite registry, with deterministic Linear/Herdr/provider boundaries.
-They verify distinct fresh sessions, exact resume, saved settings, stable state,
-and mutation invalidation. The 2026-09-27 live check confirmed Herdr 0.9.1 pane split
-identity and preserved task-tab placement, then closed that disposable pane. A live
-model fresh/resume smoke could not run in the managed sandbox: Pi could not acquire
-its settings/auth locks and Codex's receipt API could not initialize. No live review
-verdict is claimed from that check.
-
-## Workflow context identities
-
-Each new implementation launch receives a visible pane label such as `DEV-20-I1`.
-The identifier is the canonical Linear issue ID, followed by `I` (implementation)
-or `R` (review) and a monotonic ordinal. These identify agent contexts, not Git
-worktrees: contexts can share a checkout. `task review` consumes the same allocation,
-session identity, and pane-labeling primitives for independent reviewers.
-
-Inspect contexts without loading workflow configuration or contacting Linear:
+### Find your conversations
 
 ```sh
 task contexts
-task contexts DEV-20
-task contexts DEV-20 --all
+task contexts DEV-7
+task contexts DEV-7 --all
 ```
 
-The default view includes non-retired contexts, including uncertain launches and
-stale mappings. `--all` adds retired history. Output includes selected agent/model/
-mode, recorded lifecycle status, live Herdr status, resumability, and the socket,
-workspace, tab and pane needed to locate the context. Unspecified model/mode or
-unavailable session evidence is `unknown`. A session reference does not by itself
-establish resumability: Pi references remain `unknown` without persistence evidence,
-while Codex's receipt API confirms a persisted readiness turn before reporting
-`yes`. `task review --resume` rechecks provider history; registry evidence does not
-guarantee that the provider will retain that history indefinitely.
+This read-only view shows context IDs, locations, selected agents, status, and
+whether a conversation can be resumed. `--all` includes retired history. It does
+not contact Linear or load workflow configuration. An `unknown` or stale entry
+needs inspection; listing it does not repair or resume it.
 
-The machine-local registry is `~/.agentic-workflows/contexts.sqlite3`, separate from
-project files and Linear. Python's SQLite support supplies atomic transactions and
-cross-process allocation locking without a service or dependency. The allocation
-commits before labeling or launching; failed and interrupted attempts consume their
-ordinal. Retired rows are small tombstones: they keep identity, allocation time,
-retirement time and former location, but discard provider and terminal handles.
-Cleanup never resets ordinals. Deleting this database is a destructive registry
-reset that discards allocation history; normal operations never do that.
+### Finish and clean up
 
-Context identity, runtime/session references, resumability, and lifecycle status
-are independent fields. The registry records `launching`, `active`, `uncertain`,
-and `retired` observations; it does not implement a state-machine framework or
-semantic run reports. Adapter observers save real session handles as soon as they
-become available in startup, confirmation, or prompt responses, including before
-later handoff failures. Subsequent observations must match the established session;
-reporting provenance such as `source` is retained separately and is not identity.
-Review passes use `reviewing` while one caller owns that reviewer; an atomic registry
-claim prevents concurrent follow-ups in the same conversation. Clean, findings,
-blocked, and failed verdicts are transient results, not registry lifecycle states.
-A launch interrupted
-before its result can be recorded remains `launching`; another concurrent launch
-cannot claim that pane until the uncertain context is inspected and cleaned up.
-
-Herdr owns the live layout. Inspection never renames, focuses, resumes, repairs, or
-rebinds anything. It checks socket, pane and terminal identity, reports manual
-renames, absent/replaced agents, missing panes and session mismatches, and uses the
-live tab when a pane is rearranged. A move to another workspace can change Herdr's
-pane ID; inspection reports a matching terminal at its new location while retaining
-the original binding. Contexts belonging to another Herdr socket remain visible
-with unknown/stale live state; inspect from that server to reconcile them. Focusing,
-typing directly to, or stopping an agent does not change its workflow identity.
-
-Existing `task start` behavior still refuses a duplicate agent and `--no-agent`
-only focuses/prepares the workspace; neither allocates or relabels an existing
-context. A genuinely fresh launch gets the next ordinal. Cleanup retires mappings
-only after confirming removal, scoped to the issue, repository, checkout and Herdr
-workspace/server, including absent older workspace instances for that same cleaned
-checkout. Normal completion and cleanup retries perform the same reconciliation.
-Partial cleanup retains mappings and allocation history for a
-retry. A terminal moved outside the cleaned workspace also retains its mapping
-until its closure can be confirmed. Existing Git/Linear cleanup safety checks
-still apply.
-
-The controlled Herdr 0.9.1 smoke test on 2026-09-27 used a temporary registry and
-disposable Pi workspaces against the existing checkout, with a no-tools prompt.
-It verified visible `DEV-41-I3` and then `DEV-41-I4` after closing the first workspace,
-calling the cleanup retirement hook, and reopening the registry. Earlier failed
-allocations `I1` and `I2` were also retained. The Git-removal part was simulated by
-the retirement hook to preserve the implementation checkout; automated cleanup
-tests exercise real disposable Git worktrees. Codex's local session API did not
-initialize in the sandbox, so the successful live launch used Pi. All disposable
-Herdr workspaces were closed.
-
-## Workspace lifecycle and slices
-
-An existing workspace is reused only when Git and Herdr agree on one usable branch
-and checkout. Dirty task worktrees are preserved; the permanent base checkout
-must remain clean. Branch-only, locked, prunable, inconsistent, or ambiguous state
-stops with an error. `task start` never deletes a branch, worktree, workspace, or
-session. Scope is recorded in `agentic-workflows-scope.json` in the worktree's
-private Git directory (`git rev-parse --absolute-git-dir`), outside tracked files.
-The record contains only its version, issue identifier, branch and slice name
-(or explicit `null` for a default workspace), never the Linear description.
-
-The default remains one issue, one branch, one PR. For multiple implementation
-slices, select a stable name explicitly:
-
-```sh
-task start DEV-13 --slice codex-handoff
-task start DEV-13 --slice workspace-lifecycle
-```
-
-These create/reuse `dev-13-codex-handoff` and `dev-13-workspace-lifecycle`.
-Slice names normalize accents, case, spaces and underscores to an ASCII branch
-suffix; empty names, path/ref syntax, control characters and suffixes over 100
-characters are rejected. The prompt names the slice and instructs the selected
-agent to ask if its scope is unclear. Other slices remain untouched.
-
-Without `--slice`, exactly one candidate can be reused, including one originally
-created as a slice. The resolved workspace's recorded scope is used in the agent
-prompt, so an `importer` slice retains its restriction when reopened without
-`--slice`, even after a Linear title or Herdr label changes.
-
-Legacy workspaces without scope metadata are refused until an explicit `--slice`
-matching their branch suffix establishes their scope. A branch name matching the
-current title is not proof of default scope. Invalid/mismatched records and
-explicit selectors conflicting with recorded scope are refused; existing scope
-is never overwritten. If a metadata write fails, the workspace remains intact
-and neither the Linear transition nor agent startup proceeds.
-
-Multiple candidate branches/worktrees (including live remote
-branches) are listed and refused. Use `--slice` with the desired branch's suffix
-after the issue ID to disambiguate a slice. For a legacy title-derived branch,
-this explicitly adopts that suffix as its scope. Historical candidates are not
-silently filtered out to guess an active one.
-
-Remote branch discovery uses `git ls-remote --heads` on every configured remote.
-Cached `refs/remotes/*` are never evidence of a live branch, so stale tracking refs
-do not require manual pruning. A live remote-only branch stops creation for that
-selection. Remote lookup failure stops safely; no fetch refspecs are added or
-force-applied.
-
-For a `github.com` base upstream, the workflow checks the
-[GitHub pull request API](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
-for all PR states and pages for the selected branch in that repository. Any merged
-or closed PR makes the branch historical, even after a squash merge and remote
-branch deletion. This check also runs before creating a new branch, to avoid
-recycling a historical name. A successful empty result or only open PRs permits
-the selection. Git ancestry and `git branch --merged` are never used as a proxy.
-
-Public repositories need no GitHub credentials within unauthenticated API limits.
-Private repositories/rate limits require an existing `GH_TOKEN` or `GITHUB_TOKEN`
-with pull-request read access; `gh` is not required. API/network errors or malformed
-responses refuse the selection. PR history is checked in the configured base's
-upstream repository; if configured remotes point to different repositories, reuse
-is refused because cross-repository PR history is not supported. Hosts other
-than `github.com` permit fresh workspaces but refuse existing-workspace reuse
-because merge history cannot be established. Inspect PR state and retire old local
-work manually, or choose a new slice; the command never cleans it up for you.
-
-## Failure and retry behavior
-
-Agent selection, option validation, and executable availability are checked before
-Git, Herdr, or Linear mutation. If Git/Herdr preparation fails, Linear is not
-updated and no agent is started. If the Linear update fails, the valid workspace
-remains available and no agent is started. Check Linear and rerun.
-
-Codex starts with a short native prompt containing a random readiness marker. It
-asks only for `READY`, without tools or edits. The local stdio app-server API's
-`thread/list` identifies the session by that exact marker and checkout;
-`thread/read` and `thread/items/list` confirm the readiness turn. The workflow
-never selects the latest session or infers its identity from a title.
-
-`thread/queue/add` then delivers the unmodified task to that terminal-owned session
-with a unique message ID. History polling must find the same session, checkout,
-message ID, exact text, and a turn ID before success. The helper never creates,
-resumes, or executes a model session and exits after confirmation. No shared daemon
-or service is installed. These APIs (including the experimental queue endpoint)
-were validated with Codex CLI 0.157.1; unsupported or malformed responses fail
-clearly.
-
-Herdr's `interactive_ready` and `working` states alone do not prove a Codex turn:
-startup/trust dialogs can consume terminal input, and `agent prompt --wait` does
-not track individual turns. Codex task text is therefore never pasted into the
-terminal. Receipt polling has a 30-second deadline and never resends input. A blocked
-startup, delivery failure, or timeout is an error, with pane and session IDs for
-inspection. First-time repository trust or authentication may require action in
-Codex; the workflow never approves those dialogs. A queued task may start after
-you resolve a blocker, so inspect that session before retrying.
-
-Pi starts with only supported `--model`/`--thinking` flags (or no arguments).
-Although Pi CLI accepts an initial message, Herdr 0.9.1 rejects the multiline
-handoff as an `agent start` argument (`invalid_agent_argument`). After confirming
-the canonical `pi` process, exact argv, pane, and foreground/current directories,
-the adapter submits the unchanged handoff once through `herdr agent prompt` and
-validates the returned terminal, session, pane, and checkout. It deliberately does
-not wait for Herdr's generic `working` state: unrelated Pi activity could satisfy
-that state, and Herdr does not tie it to a particular prompt. Success therefore
-means only that the prompt was submitted, not that a corresponding Pi turn started
-or completed. A rejection, timeout, or target mismatch is not success; inspect the
-pane before retrying because input may already have been sent. Authentication,
-project trust, or model errors remain visible in the pane.
-
-Launch confirmation does not prove eventual implementation success; later model,
-provider, or implementation failures remain visible in the selected agent. The
-workspace and Linear's `In Progress` status remain intact on handoff failure.
-
-The returned pane must be an available shell. An existing instance of the selected
-agent anywhere in the workspace prevents a duplicate launch. Continue that session,
-exit it before requesting a fresh handoff, or use `--no-agent` to focus it. After a
-timeout, inspect the pane before retrying: the process or prompt may already have
-started. There is no automatic resubmission, fallback agent/session, or killing of
-a potentially working agent. Do not run simultaneous starts for the same repository
-or edit its base checkout during a start.
-
-## Task cleanup
-
-After a task is completed and its branch is merged into the configured local base:
+After your normal commit/PR/merge process, mark the Linear issue completed and
+ensure the merge is present in the configured local base. Exit the task's
+agent/shell sessions and run cleanup from outside its workspace:
 
 ```sh
 task cleanup DEV-7
 ```
 
-Cleanup uses the same Linear project/repository mapping and Git/Herdr workspace
-resolver as `task start`. It requires Linear's `completed` state type, regardless
-of the status display name. The issue identifier, registered branch, checkout,
-and recorded task scope must agree; the current title and filesystem naming are
-not used to locate the worktree. Exactly one local task branch and one matching
-registered Herdr worktree are required. Multiple slices are refused.
+Cleanup verifies completion and merge evidence, then removes the local task
+worktree and branch, closes its Herdr workspace, and retires the associated
+contexts. It does not update the base, remove remote branches, or change PRs or
+Linear. Dirty, ambiguous, or unproven state is preserved. GitHub squash/rebase
+merges are supported when their evidence matches the local task and base. See
+[cleanup requirements and retries](docs/lifecycle.md#task-cleanup).
 
-The permanent checkout must be clean and on the configured base. Cleanup checks
-the local base without fetching or updating it; update it separately if needed.
-If the task tip is reachable from that base, Git ancestry proves the merge.
-Otherwise cleanup uses the existing GitHub PR-history lookup for the base's
-upstream repository. It requires exactly one PR for the task branch, confirmed
-merged into the configured base, with a head SHA identical to the local task tip.
-The PR's resulting merge/squash commit must also be reachable from the local base.
-The complete PR listing and individual PR response must agree. Extra local commits,
-missing/ambiguous evidence, another head/base/repository, unavailable API access,
-or a merge commit absent from the local base all cause refusal. Linear completion,
-matching titles/messages, and patch similarity alone never prove a merge.
+### Handle a stopped or failed command
 
-Squash verification supports `github.com` and uses the same optional `GH_TOKEN` or
-`GITHUB_TOKEN` as the existing history checks. It reads PR evidence without changing
-GitHub state. Non-ancestor cleanup on other hosts is refused.
+Read the reported state and inspect the named pane before retrying: an agent or
+prompt may already have started. A handoff failure leaves the workspace and
+Linear's `In Progress` status intact. Authentication or repository trust may need
+action in the agent's pane. Do not run simultaneous starts for the same repository
+or modify a workspace during review or cleanup. The
+[failure and retry reference](docs/lifecycle.md#failure-and-retry-behavior)
+explains which portions may already have completed.
 
-All removal preconditions are checked before deletion and checked again just
-before removal. Cleanup normally refuses dirty task worktrees (including
-untracked and ignored files), index flags that hide modifications, unfinished Git
-operations, submodules, locked/prunable/detached or mismatched worktrees,
-missing/invalid task scope metadata, and any target that could remove the
-permanent checkout, Git metadata, or another registered worktree.
+## Project documentation
 
-The sole dirty-state exception is ignored Python bytecode directly inside
-`__pycache__` directories. Cleanup first inspects the complete tracked,
-untracked, and ignored state. It removes those directories only when every dirty
-entry is a regular `.pyc` or `.pyo` file in such a directory and every directory
-entry was present in that Git snapshot. A source change, symlink, loose bytecode,
-nested/unknown cache content, or any other ignored or untracked file preserves
-everything and refuses cleanup. The complete target validation runs again after
-cache removal.
+- [Configuration](docs/configuration.md): installation, project mapping, agent/reviewer settings, and permissions.
+- [Task lifecycle reference](docs/lifecycle.md): workspace safety, review guarantees, cleanup, and retry cases.
+- [Architecture and validation](docs/architecture.md): execution adapters, prompt delivery, context registry, tests, and recorded live-check limits.
+- [Repository instructions for agents](AGENTS.md): maintenance guidance and documentation ownership.
 
-On success, non-force Git commands remove the exact registered worktree and then
-its local branch; the output names both. Ancestry-proven branches use `branch -d`.
-For a verified squash/rebase PR, cleanup rechecks that no worktree uses the branch
-and deletes its exact local ref with `update-ref --no-deref -d`, supplying the
-verified old SHA so a changed branch cannot be deleted. It does not use `-D` or
-rewrite the task branch to manufacture ancestry. Remote branches, PRs, and Linear
-status are not changed.
-
-After Git cleanup, the command closes the exact open Herdr workspace identified
-by the stable ID returned for the validated worktree. It confirms the ID's
-repository and checkout path before closing it and confirms the ID disappeared
-afterward; labels are never used as retirement identity. The exact association is
-saved in Git-private metadata before removal, so a retry can finish closing a
-stale workspace after the worktree and branch are already gone. Conflicting,
-missing, or ambiguous identity refuses retirement. A close failure reports Git's
-completed portion without claiming Herdr success and retains the retry state.
-Each retry first uses a no-follow filesystem check to prove the saved checkout
-path has no object, confirms no Git worktree has reused it, and revalidates the
-workspace's repository key and task identity. Reuse or inconsistency preserves
-both the workspace and retry record.
-For a legacy cleanup that predates this retry metadata, the command checks Herdr
-before reporting that nothing remains. It accepts exactly one absent linked
-checkout only when Herdr's stable workspace ID, exact repository root/key, exact
-issue label, and issue-prefixed checkout basename all agree. A label or path match
-alone is insufficient; partial or multiple matches are left untouched.
-
-If worktree removal fails, branch deletion and Herdr retirement are not attempted.
-If branch deletion fails afterward, cleanup reports the partial result; a
-branch-only retry refuses and leaves that branch for manual inspection. Run
-cleanup from outside the task workspace after exiting its agent/shell sessions,
-and do not modify the repository, task worktree, or Herdr workspace concurrently
-with cleanup.
-
-## Tests
-
-```sh
-python3.12 -m unittest discover -s tests -v
-```
-
-Tests mock Linear, GitHub, Herdr, Codex RPC, and process boundaries and exercise Git
-safety and authoritative remote lookup in temporary repositories with a local fake
-remote. Controlled acceptance coverage drives the normal task-start semantics and
-exact handoff construction through both Codex and Pi adapters, including Pi's
-separate startup and prompt submission. It also covers pre-existing Pi activity,
-model-specific thinking-level clamping, purpose-specific handoffs, option
-precedence, unsupported combinations, handoff ordering/failures, exact context,
-mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
-Cleanup tests exercise actual worktree/branch removal in disposable repositories,
-narrow Python-cache disposal, exact Herdr workspace retirement, preservation on
-refusal, repeat runs, and partial-failure reporting.
-Tests need no API key, network access, agent installation, or real Herdr workspaces.
+Use `task --help` or `task <command> --help` for the available flags.
