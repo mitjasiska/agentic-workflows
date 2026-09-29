@@ -1,0 +1,72 @@
+# Repository instructions for agents
+
+## Working scope
+
+- Read the task and repository instructions, then inspect the relevant existing
+  implementation before editing. Keep changes within the requested scope.
+- Work in the prepared checkout and branch. Implementation handoffs stop after
+  implementation and validation, ready for independent review; do not commit,
+  push, merge, or open a PR unless the active workflow explicitly authorizes it.
+- Review handoffs are read-only: inspect and validate without fixing or staging
+  task files. Follow the handoff's result-delivery instructions.
+- The Python workflow owns Linear retrieval. When executing a task handoff, use
+  its supplied issue snapshot; do not contact Linear, read its credentials or the
+  machine-local workflow configuration, or save the task description in the repo.
+- Keep credentials, populated local configuration, and approval state out of
+  tracked files. Do not use `sudo` or destructive Git operations.
+
+## Documentation ownership
+
+- The root `README.md` is the human-readable, high-level project entry point.
+  Keep it focused on capabilities, core concepts, supported lifecycle paths,
+  setup, and commands/options a human needs. It must make sense on its own.
+- Root `docs/` owns deeper project-level architecture, lifecycle, configuration,
+  invariants, edge cases, and implementation details. Link from the root README
+  to these guides rather than growing it into an implementation reference.
+- `AGENTS.md` owns repository-level agent behavior and maintenance guidance.
+- Component-specific documentation stays with its owning component. In
+  particular, `plugins/create-linear-task/README.md` owns plugin/package details,
+  distribution, and acceptance procedures, while the canonical skill's
+  `SKILL.md` owns its task-creation instructions. Root docs may briefly explain a
+  component's role and link to its documentation; do not copy component internals
+  into root `docs/` or rewrite component READMEs as part of project-doc cleanup.
+- Preserve these boundaries in future changes. Move or intentionally consolidate
+  useful material, update relative links and heading anchors, and prefer the
+  existing small set of project guides over many narrowly split files. When
+  component documentation already covers a detail, link to that owner.
+- Describe implemented behavior. Keep historical validation evidence dated and
+  separate from checks performed for the current change.
+
+## Maintenance boundaries
+
+- Lifecycle code owns issue/project resolution, Git/Herdr preparation, status
+  transitions, and purpose-specific handoffs. Adapters own CLI arguments,
+  capability validation, working-directory behavior, and transport.
+- Reuse `add_agent_options`, `resolve_agent_options`, `AgentExecution`, and the
+  adapter registry for new execution commands. Keep agent-specific capabilities
+  in adapters and provide a handoff appropriate to each purpose.
+- Preserve exact issue, checkout, context, and session identity checks and safe
+  refusal on ambiguity. See [architecture](docs/architecture.md) and the
+  [lifecycle reference](docs/lifecycle.md) before changing these boundaries.
+- `config/projects.toml` is the human-edited project registry. Follow the
+  [canonical skill's refresh instructions](skills/create-linear-task/SKILL.md#establish-context-and-target)
+  when mappings change; do not edit installed/generated mappings directly.
+- Follow the [plugin's maintenance instructions](plugins/create-linear-task/README.md#synchronize-validate-and-package)
+  for plugin changes. Its bundled skill is generated from the canonical
+  `skills/create-linear-task/` directory; edit the source and synchronize it.
+
+## Validation and handoff
+
+- Run checks appropriate to the change. The offline suite is
+  `python3.12 -m unittest discover -s tests -v`; it needs no credentials, network,
+  installed agents, or real Herdr workspaces. See [validation](docs/architecture.md#validation).
+- For project-mapping changes, check the generated skill snapshot with
+  `python3.12 skills/create-linear-task/scripts/sync_config.py --check`.
+  Component-specific validation remains documented with that component.
+- For documentation changes, verify relative links and heading anchors, compare
+  documented commands with CLI help, and run `git diff --check`. No dedicated
+  Markdown/link checker is currently provided.
+- Review the final diff for scope, information loss, unintended component-doc
+  edits, and duplicated component internals in root docs. Report changes, checks,
+  and limitations without claiming live verification from mocked tests or past
+  evidence.
