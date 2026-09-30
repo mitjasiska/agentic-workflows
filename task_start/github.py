@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import ssl
+from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -162,7 +163,44 @@ def request(path: str, branch: str, *, method: str = "GET", data: dict | None = 
                     f"{authentication}Inspect its PR/merge state before retrying. Workspace left intact.") from None
 
 
-def publication_pull(repo: str, branch: str, base: str, heads: set[str], *, expected_number=None):
+class _StalePullHead(TaskError):
+    """Both PR identities are valid; only the proven previous head is stale."""
+
+
+def publication_pull(repo: str, branch: str, base: str, heads: set[str], *, expected_number=None,
+                     previous_head=None, verify_published=None):
+    if previous_head is None:
+        return _publication_pull(repo, branch, base, heads, expected_number=expected_number)
+    if expected_number is None or len(heads) != 1 or previous_head in heads or not callable(verify_published):
+        raise TaskError("PR propagation checks require the recorded PR, frozen SHA and remote verification")
+    # Retry observations only, never API failures or writes. Five observations
+    # and a five-second window bound propagation retries independently of API
+    # request timeouts. A response arriving after the window cannot authorize use.
+    deadline, stale = None, None
+    for attempt in range(5):
+        if deadline is not None and monotonic() >= deadline:
+            raise stale
+        try:
+            pull = _publication_pull(repo, branch, base, heads | {previous_head},
+                                     expected_number=expected_number, stale_head=previous_head)
+        except _StalePullHead as error:
+            stale = error
+            if deadline is None:
+                deadline = monotonic() + 5
+            # Native refs and local contents must still prove the frozen SHA
+            # before tolerating even this one narrowly classified stale response.
+            verify_published()
+            remaining = deadline - monotonic()
+            if attempt == 4 or remaining <= 0:
+                raise
+            sleep(min(1, remaining))
+        else:
+            if deadline is not None and monotonic() >= deadline:
+                raise stale
+            return pull
+
+
+def _publication_pull(repo, branch, base, heads, *, expected_number, stale_head=None):
     """All history participates: a closed, different-base, or second PR conflicts."""
     pulls = list(pull_requests(repo, branch))
     if len(pulls) > 1:
@@ -189,14 +227,17 @@ def publication_pull(repo: str, branch: str, base: str, heads: set[str], *, expe
                 raise ValueError("conflicting PR")
         except (KeyError, TypeError, ValueError):
             raise TaskError("Conflicting PR repository/head/base/state; inspect it before retrying task pr") from None
+    if stale_head is not None and any(item["head"]["sha"] == stale_head for item in (listed, pull)):
+        raise _StalePullHead("Conflicting PR repository/head/base/state; inspect it before retrying task pr")
     if pull["head"]["sha"] != listed["head"]["sha"]:
         raise TaskError("PR head changed during verification; retry after inspecting remote state")
     return pull
 
 
 def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body: str, *, verify_local, before_write,
-                 expected_number=None, observe_pull=lambda pull: None):
-    pull = publication_pull(repo, branch, base, {head}, expected_number=expected_number)
+                 expected_number=None, observe_pull=lambda pull: None, previous_head=None):
+    pull = publication_pull(repo, branch, base, {head}, expected_number=expected_number,
+                            previous_head=previous_head, verify_published=before_write)
     if pull is not None:
         observe_pull(pull)
         expected_number = pull["number"]
@@ -215,7 +256,8 @@ def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body:
     elif pull.get("title") != title or pull.get("body") != body:
         before_write()
         request(f"{repo}/pulls/{pull['number']}", branch, method="PATCH", data=dict(title=title, body=body))
-    verified = publication_pull(repo, branch, base, {head}, expected_number=expected_number)
+    verified = publication_pull(repo, branch, base, {head}, expected_number=expected_number,
+                                previous_head=previous_head, verify_published=before_write)
     if verified is None or verified.get("title") != title or verified.get("body") != body:
         raise TaskError("GitHub has not confirmed the expected PR metadata; rerun task pr to verify/reuse it")
     verify_local()

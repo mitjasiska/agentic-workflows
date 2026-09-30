@@ -543,6 +543,16 @@ GitHub owner/repository
 casing is equivalent, including in the reported PR URL. URL scheme, host, path,
 PR number, head/base branch names and head SHA remain strictly validated.
 
+After a follow-up push, including recovery of an unfinished publication, PR
+verification permits at most five observations within a five-second retry window
+when either GitHub response still names the previously published parent SHA.
+The recorded PR number, repository, head branch, base and open/unmerged state must
+match throughout. Before retrying, native refs and local state must prove the exact
+frozen publishing SHA. Both PR responses must converge to that SHA before use;
+an unexpected third SHA, changed identity or API error fails immediately. These
+retries repeat reads only, never PR writes, commits or pushes. Normal API request
+timeouts still apply; convergence observed after the retry window is refused.
+
 To reduce repeated authentication, a preflight observation that the remote task
 ref already equals the frozen publishing SHA skips the push stage. After a new
 push, remote confirmation shares the next required check after PR lookup. If

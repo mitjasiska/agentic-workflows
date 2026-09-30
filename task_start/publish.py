@@ -409,12 +409,15 @@ def publish(identifier):
         history = saved["publication_history"]
         lineage = history if isinstance(history, dict) and history["version"] == 2 else None
         followup = False
+        previous_published_head = None
         if lineage is not None:
             last = lineage["cycles"][-1]
             if accepted["pass_id"] == last["acceptance"]["pass_id"]:
                 if accepted != last["acceptance"] or intent != last["intent"]:
                     raise TaskError("Current review/intent differs from durable publication lineage; inspect private Git metadata")
                 verify_commit(git, accepted, intent)
+                if len(lineage["cycles"]) > 1 and last["state"] != "complete":
+                    previous_published_head = lineage["cycles"][-2]["intent"]["publishing_head"]
             else:
                 followup = True
                 if last["state"] != "complete" or lineage["pull_number"] is None:
@@ -422,6 +425,7 @@ def publish(identifier):
                 if accepted["review_state"]["head"] != lineage["head"]:
                     raise TaskError("Published history changed: follow-up HEAD must equal the latest published SHA; "
                                     "inspect history and keep follow-up edits uncommitted before review")
+                previous_published_head = lineage["head"]
             if reviewed_base != lineage["base_commit"] or base != lineage["base_commit"]:
                 raise TaskError("Published task base advanced or changed; automatic rebase is forbidden. "
                                 "Follow-up review requires the pinned published base; advanced-base integration needs manual review")
@@ -508,6 +512,12 @@ def publish(identifier):
         if remote_head not in allowed | {None}:
             raise TaskError("Remote task branch conflicts with the reviewed/publishing commit; inspect it manually; no force-push is allowed")
 
+        def verify_published():
+            verify_commit(git, accepted, intent, expected_head=head)
+            verify_remote(workspace.path, identity, project.base_branch, workspace.branch, reviewed_base, {head},
+                          observe_head=record_published)
+            verify_commit(git, accepted, intent, expected_head=head)
+
         def expected_pull_number():
             history = saved["publication_history"]
             return (history["pull_number"] if isinstance(history, dict) and history["version"] == 2
@@ -527,8 +537,12 @@ def publish(identifier):
                     saved["intent"] = intent
                 store.write(saved)
 
-        pull = publication_pull(identity["repository"], workspace.branch, project.base_branch, allowed,
-                                expected_number=expected_pull_number())
+        # A retry may already have pushed this frozen follow-up. In that case,
+        # the preflight PR lookup needs the same bounded propagation check too.
+        propagating = previous_published_head if head is not None and remote_head == head else None
+        pull = publication_pull(identity["repository"], workspace.branch, project.base_branch,
+                                {head} if propagating else allowed, expected_number=expected_pull_number(),
+                                previous_head=propagating, verify_published=verify_published)
         if pull is not None:
             record_published(pull["head"]["sha"])
             record_pull(pull)
@@ -572,19 +586,17 @@ def publish(identifier):
             # A failed confirmation already stops this invocation. Do not repeat
             # authentication while unwinding that same failure.
             confirmation_pending = False
-            verify_local()
             # GitHub lookups are observations, not a lock on branch/base refs.
             # This fresh lookup also confirms any just-completed push and saves
             # positive evidence before GitHub writes. Never reuse it across an
             # API call when authorizing another write or reporting the URL.
-            verify_remote(workspace.path, identity, project.base_branch, workspace.branch, base, {head},
-                          observe_head=record_published)
-            verify_local()
+            verify_published()
         verify_local()
         try:
             result = publish_pull(identity["repository"], workspace.branch, project.base_branch, head,
                                   intent["title"], intent["body"], verify_local=verify_local, before_write=before_write,
-                                  expected_number=expected_pull_number(), observe_pull=record_pull)
+                                  expected_number=expected_pull_number(), observe_pull=record_pull,
+                                  previous_head=previous_published_head)
         except TaskError as error:
             if confirmation_pending:
                 # A GitHub lookup failure must not discard evidence of a push

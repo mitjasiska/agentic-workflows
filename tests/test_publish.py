@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
@@ -1419,6 +1419,83 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(review("DEV-7").state, "clean")
         return self.store.read()["acceptance"]
 
+    def propagation_api(self, previous, pairs):
+        """Override only observed PR heads after the follow-up push, not Git refs."""
+        observation = 0
+        def api(path, branch, **kwargs):
+            nonlocal observation
+            result = self.api(path, branch, **kwargs)
+            if kwargs.get("method", "GET") == "GET" and len(self.operations("push")) == 2:
+                listed = "?" in path
+                if listed:
+                    observation += 1
+                if observation <= len(pairs) and pairs[observation - 1][0 if listed else 1] == "old":
+                    (result[0] if listed else result)["head"]["sha"] = previous
+            return result
+        return api
+
+    def test_followup_pr_propagation_converges_before_update_and_reporting(self):
+        self.prepare()
+        url = publish("DEV-7")
+        previous = self.command(self.path, "rev-parse", "HEAD")
+        self.followup_review()
+        pairs = [("old", "new"), ("new", "old"), ("old", "old"), ("new", "new"),
+                 ("old", "new"), ("new", "new")]
+        with patch("task_start.github.request", side_effect=self.propagation_api(previous, pairs)), \
+                patch("task_start.github.sleep") as sleep:
+            self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(sleep.call_count, 4)
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD^"), previous)
+        self.assertEqual(self.store.read()["publication_history"]["cycles"][-1]["state"], "complete")
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 1)
+
+    def test_followup_pr_propagation_stops_then_retry_rereads_without_duplicate_transport(self):
+        self.prepare()
+        url = publish("DEV-7")
+        previous = self.command(self.path, "rev-parse", "HEAD")
+        self.followup_review()
+        with patch("task_start.github.request", side_effect=self.propagation_api(previous, [("old", "old")] * 5)), \
+                patch("task_start.github.sleep") as sleep:
+            with self.assertRaisesRegex(TaskError, "Conflicting PR repository/head/base/state"):
+                publish("DEV-7")
+        self.assertEqual(sleep.call_count, 4)
+        head = self.command(self.path, "rev-parse", "HEAD")
+        self.assertEqual(self.command(self.remote, "rev-parse", self.branch), head)
+        self.assertEqual(self.store.read()["intent"]["publishing_head"], head)
+        self.assertEqual(self.store.read()["publication_history"]["head"], head)
+        self.assertEqual(self.store.read()["publication_history"]["cycles"][-1]["state"], "published")
+        self.assertFalse(any(c[0] == "PATCH" for c in self.calls))
+        with patch("task_start.github.request", side_effect=self.propagation_api(previous, [("old", "new")])), \
+                patch("task_start.github.sleep") as sleep:
+            self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(sleep.call_count, 1)  # Recovery preflight also waits for the same PR.
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 1)
+
+    def test_followup_pr_propagation_requires_remote_still_at_frozen_sha(self):
+        self.prepare()
+        publish("DEV-7")
+        previous = self.command(self.path, "rev-parse", "HEAD")
+        self.followup_review()
+        stale = self.propagation_api(previous, [("old", "new")])
+        def moved_remote(path, branch, **kwargs):
+            result = stale(path, branch, **kwargs)
+            if len(self.operations("push")) == 2 and kwargs.get("method", "GET") == "GET" and "?" not in path:
+                self.command(self.remote, "update-ref", f"refs/heads/{self.branch}", previous)
+            return result
+        with patch("task_start.github.request", side_effect=moved_remote), \
+                patch("task_start.github.sleep") as sleep:
+            with self.assertRaisesRegex(TaskError, "Remote task branch conflicts"):
+                publish("DEV-7")
+        sleep.assert_not_called()
+        self.assertFalse(any(c[0] == "PATCH" for c in self.calls))
+        self.assertEqual(len(self.operations("push")), 2)
+
     def test_multiple_followups_preserve_every_review_commit_and_pr(self):
         self.prepare()
         url = publish("DEV-7")
@@ -1917,6 +1994,75 @@ class PullIdentityTests(unittest.TestCase):
         with patch("task_start.github.pull_requests", return_value=[listed]), \
                 patch("task_start.github.request", return_value=detail):
             return publication_pull(repository, "dev-7-task", "main", {"a" * 40})
+
+    def read_propagating(self, *, verify=None):
+        return publication_pull("owner/project", "dev-7-task", "main", {"a" * 40},
+                                expected_number=17, previous_head="b" * 40, verify_published=verify or Mock())
+
+    def test_pr_propagation_does_not_retry_other_conflicts_even_with_one_stale_head(self):
+        old = copy.deepcopy(self.pull)
+        old["head"]["sha"] = "b" * 40
+        for field in ("number", "head_repo", "base_repo", "head_branch", "base", "closed", "merged", "url", "sha"):
+            changed = copy.deepcopy(self.pull)
+            if field == "number":
+                changed["number"] = 18
+            elif field in {"head_repo", "base_repo"}:
+                changed[field.split("_")[0]]["repo"]["full_name"] = "another/repo"
+            elif field == "head_branch":
+                changed["head"]["ref"] = "another-branch"
+            elif field == "base":
+                changed["base"]["ref"] = "other"
+            elif field == "closed":
+                changed["state"] = "closed"
+            elif field == "merged":
+                changed["merged_at"] = "2026-10-01"
+            elif field == "url":
+                changed["html_url"] = "https://github.com/owner/project/pull/18"
+            else:
+                changed["head"]["sha"] = "c" * 40
+            for listed, detail in ((old, changed), (changed, old)):
+                verify = Mock()
+                with self.subTest(field=field, listed=listed is changed), \
+                        patch("task_start.github.pull_requests", return_value=[listed]) as listing, \
+                        patch("task_start.github.request", return_value=detail), \
+                        patch("task_start.github.sleep") as sleep:
+                    with self.assertRaises(TaskError):
+                        self.read_propagating(verify=verify)
+                    self.assertEqual(listing.call_count, 1)
+                    verify.assert_not_called()
+                    sleep.assert_not_called()
+
+    def test_pr_propagation_does_not_retry_missing_duplicate_or_unavailable_pr(self):
+        for history in ([], [self.pull, self.pull], [self.pull]):
+            verify = Mock()
+            with self.subTest(count=len(history)), \
+                    patch("task_start.github.pull_requests", return_value=history) as listing, \
+                    patch("task_start.github.request", side_effect=TaskError("API unavailable")), \
+                    patch("task_start.github.sleep") as sleep:
+                with self.assertRaises(TaskError):
+                    self.read_propagating(verify=verify)
+                self.assertEqual(listing.call_count, 1)
+                verify.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_pr_propagation_deadline_rejects_late_convergence(self):
+        old = copy.deepcopy(self.pull)
+        old["head"]["sha"] = "b" * 40
+        with patch("task_start.github.pull_requests", side_effect=[[old], [self.pull]]) as listing, \
+                patch("task_start.github.request", side_effect=[self.pull, self.pull]), \
+                patch("task_start.github.sleep"), \
+                patch("task_start.github.monotonic", side_effect=[0, 0, 1, 6]):
+            with self.assertRaisesRegex(TaskError, "Conflicting PR repository/head/base/state"):
+                self.read_propagating()
+        self.assertEqual(listing.call_count, 2)
+
+    def test_pr_propagation_requires_recorded_identity_and_remote_verifier(self):
+        for kwargs in ({}, dict(expected_number=17), dict(verify_published=Mock())):
+            with self.subTest(kwargs=kwargs), patch("task_start.github.pull_requests") as listing:
+                with self.assertRaisesRegex(TaskError, "require the recorded PR"):
+                    publication_pull("owner/project", "dev-7-task", "main", {"a" * 40},
+                                     previous_head="b" * 40, **kwargs)
+                listing.assert_not_called()
 
     def test_only_owner_repository_casing_is_equivalent(self):
         for repository in ("owner/project", "Owner/Project", "OWNER/PROJECT"):
