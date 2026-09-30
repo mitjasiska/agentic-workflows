@@ -495,6 +495,17 @@ Neither a fresh review nor deletion of a remote ref clears publication history.
 
 The REST API uses `GH_TOKEN` or `GITHUB_TOKEN`; see
 [GitHub publishing configuration](configuration.md#github-publishing).
+API failures name the selected credential variable (never its value), HTTP
+status when available, and a safe category such as authentication, token
+permissions, SSO, rate limiting, request validation, DNS/TLS, timeout, or invalid
+JSON. Diagnostics use fixed guidance and allowlisted validation field/code names;
+raw response bodies, arbitrary headers, exception text, and request payloads are
+not echoed. Publishing refuses missing/malformed credentials before transport.
+A failed write is never automatically replayed: a connection failure, service
+error, or unreadable response may follow a successful write. Rerun `task pr`
+after addressing the cause; it discovers and verifies any matching PR before
+deciding whether another create/update request is necessary.
+
 Commit/push/fetch inherit stdin, stdout and stderr. Ref lookup and rebased commit
 creation read only protocol stdout (refs or an object ID) and inherit stdin/stderr.
 Git's SSH/GPG/credential tools retain the caller's console and controlling

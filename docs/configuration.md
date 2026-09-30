@@ -172,6 +172,23 @@ read); Git transport separately needs push access through the user's configured
 SSH key or HTTPS credential helper. The workflow does not require `gh` or copy
 API tokens into Git command arguments. Keep tokens out of tracked configuration.
 
+The REST client reads `GH_TOKEN` first, falling back to `GITHUB_TOKEN` only when
+`GH_TOKEN` is unset or empty. It uses Python's HTTPS transport to `api.github.com`,
+including the invoking environment's proxy and system certificate settings.
+It does not obtain API credentials from `gh auth login`, SSH, Git credential
+helpers, or the machine-local workflow configuration. Successful Git push or
+public PR lookup does not establish that the selected API token can create a PR.
+Whitespace/control characters in a selected token are refused without displaying
+the value or silently selecting a different credential.
+
+An HTTP 403 diagnostic identifying insufficient token permissions means the
+selected token needs repository access and **Pull requests: write**. For a
+fine-grained token, check its selected repositories and permission settings;
+for a classic token, check the appropriate `repo`/`public_repo` scope. Check
+organization approval, SSO, or Actions restrictions when the diagnostic calls
+for them. Tokens and raw API error bodies are never printed by the workflow.
+See [GitHub's API troubleshooting guide](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api).
+
 The configured base must track a same-named remote branch on `github.com`. Fetch
 and push URLs must each identify a single destination in the same repository.
 The task worktree's effective Git configuration must resolve to the permanent

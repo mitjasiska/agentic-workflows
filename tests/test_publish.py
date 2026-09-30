@@ -11,9 +11,11 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
 from task_start import TaskError, cli
-from task_start.github import publication_pull, publish_pull
+from task_start.github import publication_pull, publish_pull, request as github_request
 from task_start.publish import (change_type, native_git, publish, remote_identity, tracking_url)
 from task_start.publication_state import PublicationStore
 from task_start.review import review
@@ -178,6 +180,72 @@ class PublishingTests(unittest.TestCase):
         self.github_failure = None
         publish("DEV-7")
         self.assert_published()
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+
+    def api_transport(self, request, **kwargs):
+        url = urlsplit(request.full_url)
+        self.assertEqual(url.netloc, "api.github.com")
+        path = url.path.removeprefix("/repos/") + ("?" + url.query if url.query else "")
+        result = self.api(path, self.branch, method=request.get_method(),
+                          data=json.loads(request.data) if request.data is not None else None)
+        return io.BytesIO(json.dumps(result).encode())
+
+    def test_invalid_api_credentials_refuse_before_publication_side_effects(self):
+        self.prepare()
+        for value in ("", "invalid\ncredential"):
+            with patch.dict(os.environ, {"GH_TOKEN": value, "GITHUB_TOKEN": ""}), \
+                    self.assertRaisesRegex(TaskError, "authentication is missing|credential GH_TOKEN"):
+                publish("DEV-7")
+            self.assertEqual(self.operations("commit"), [])
+            self.assertEqual(self.operations("push"), [])
+            self.assertEqual(self.calls, [])
+            self.assertIsNone(self.store.read()["intent"])
+
+    def test_api_permission_failure_reuses_published_commit_after_credential_repair(self):
+        self.prepare()
+        def denied(request, **kwargs):
+            if request.get_method() == "POST":
+                raise HTTPError(request.full_url, 403, "private diagnostic", {
+                    "X-Accepted-GitHub-Permissions": "pull_requests=write"}, io.BytesIO(json.dumps({
+                        "message": "Resource not accessible by personal access token"}).encode()))
+            return self.api_transport(request, **kwargs)
+        with patch("task_start.github.request", new=github_request), \
+                patch("task_start.github.urlopen", side_effect=denied) as transport:
+            for _ in range(2):
+                with self.assertRaisesRegex(TaskError, "HTTP 403.*insufficient token permissions.*Pull requests: write"):
+                    publish("DEV-7")
+                self.assertEqual(len(self.operations("commit")), 1)
+                self.assertEqual(len(self.operations("push")), 1)
+                self.assertEqual(self.pulls, [])
+                self.assertEqual(self.store.read()["publication_history"]["state"], "published")
+            head = self.command(self.path, "rev-parse", "HEAD")
+            self.assertEqual(self.command(self.remote, "rev-parse", self.branch), head)
+            transport.side_effect = self.api_transport
+            publish("DEV-7")
+        self.assertEqual(self.assert_published(), head)
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+
+    def test_api_service_error_after_creation_discovers_existing_pr_without_another_write(self):
+        self.prepare()
+        writes = []
+        def lost_response(request, **kwargs):
+            response = self.api_transport(request, **kwargs)
+            if request.get_method() == "POST":
+                writes.append(request)
+                response.close()
+                raise HTTPError(request.full_url, 503, "private diagnostic", {}, io.BytesIO(b"private proxy response"))
+            return response
+        with patch("task_start.github.request", new=github_request), \
+                patch("task_start.github.urlopen", side_effect=lost_response):
+            with self.assertRaisesRegex(TaskError, "HTTP 503.*service failure.*discover and reuse"):
+                publish("DEV-7")
+            head = self.assert_published()
+            self.assertEqual(publish("DEV-7"), self.pulls[0]["html_url"])
+        self.assertEqual(self.assert_published(), head)
+        self.assertEqual(len(writes), 1)
         self.assertEqual(len(self.operations("commit")), 1)
         self.assertEqual(len(self.operations("push")), 1)
         self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)

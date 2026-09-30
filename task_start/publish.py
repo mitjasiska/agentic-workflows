@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from . import TaskError
 from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, context_reference
-from .github import publication_pull, publish_pull, pull_requests, repository_name
+from .github import api_credential, publication_pull, publish_pull, pull_requests, repository_name
 from .linear import Linear
 from .publication_state import PublicationStore
 from .publication_rebase import continue_rebase, integration_plan, validate_commits, validate_record
@@ -344,8 +344,7 @@ def publish(identifier):
         permanent = Git(repo)
         identity = remote_identity(permanent, project.base_branch, workspace.branch)
         verify_remote_identity(git, project.base_branch, workspace.branch, identity)
-        if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
-            raise TaskError("task pr requires GH_TOKEN or GITHUB_TOKEN with repository contents and pull-request access")
+        api_credential(required=True)
         binding = dict(issue=issue.identifier, repository=str(repo), worktree=str(workspace.path),
                        branch=workspace.branch, base_branch=project.base_branch, endpoint=endpoint,
                        workspace_id=workspace.workspace_id)
