@@ -187,7 +187,9 @@ Already published branches are never automatically rebased.
 
 The commit subject and PR title use `<type>: <summary> (DEV-7)`. The type comes
 from one canonical Linear category label; the reviewer supplies a public-safe
-summary of the actual implemented result and observed validation. Configure
+summary of the actual implemented result and observed validation. Titles use a
+concise lower-case action summary, preserving names and acronyms, for example
+`feat: add reviewed task PR publishing (DEV-18)`. Configure
 `GH_TOKEN` or `GITHUB_TOKEN` with pull-request access, and keep your normal Git
 push authentication/signing setup. Native passphrase prompts stay in your terminal.
 

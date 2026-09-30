@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 
 from task_start import TaskError, cli
 from task_start.github import publication_pull, publish_pull, request as github_request
-from task_start.publish import (change_type, native_git, publish, remote_identity, tracking_url)
+from task_start.publish import (change_type, native_git, prepare_metadata, publish, remote_identity, tracking_url)
 from task_start.publication_state import PublicationStore
 from task_start.review import review
-from task_start.review_result import publication_fingerprint, publication_metadata
+from task_start.review_result import publication_fingerprint, publication_metadata, publication_summary_limit
 from task_start.review_state import snapshot
 from task_start.workspace import Git
 import test_review as reviews
@@ -107,11 +107,13 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(accepted["execution"], self.accepted_result.execution)
         self.assertTrue(accepted["completed_at"])
         url = publish("DEV-7")
+        self.assertEqual(len(self.operations("ls-remote")), 4)
         head = self.assert_published()
         self.assertEqual(self.store.read()["intent"]["publishing_head"], head)
         history = self.store.read()["publication_history"]
         self.assertEqual((history["state"], history["head"]), ("published", head))
         self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(len(self.operations("ls-remote")), 6)  # Two fresh checks for a completed retry.
         self.assertEqual(self.assert_published(), head)
         self.assertEqual(self.store.read()["publication_history"], history)
         self.assertEqual(len(self.operations("commit")), 1)
@@ -253,11 +255,126 @@ class PublishingTests(unittest.TestCase):
     def test_matching_pr_metadata_is_updated_not_duplicated(self):
         self.prepare()
         publish("DEV-7")
+        before = len(self.operations("ls-remote"))
         self.pulls[0].update(title="Old title", body="Old body")
         publish("DEV-7")
+        self.assertEqual(len(self.operations("ls-remote")) - before, 3)
         self.assert_published()
         self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
         self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 1)
+
+    def test_verified_push_confirmation_survives_pr_lookup_failure_without_duplicate_transport(self):
+        self.prepare()
+        def failed_lookup(path, branch, **kwargs):
+            if self.operations("push"):
+                raise TaskError("GitHub HTTP 503: service failure")
+            return self.api(path, branch, **kwargs)
+        with patch("task_start.github.request", side_effect=failed_lookup):
+            with self.assertRaisesRegex(TaskError, "GitHub HTTP 503: service failure"):
+                publish("DEV-7")
+        head = self.command(self.path, "rev-parse", "HEAD")
+        self.assertEqual(self.store.read()["publication_history"]["state"], "published")
+        self.assertEqual(self.store.read()["publication_history"]["head"], head)
+        self.assertEqual(len(self.operations("ls-remote")), 3)
+        self.assertFalse(self.pulls)
+        publish("DEV-7")
+        self.assertEqual(self.assert_published(), head)
+        self.assertEqual(len(self.operations("ls-remote")), 6)
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+
+    def test_pr_lookup_failure_and_remote_drift_report_both_without_repeating_authentication(self):
+        self.prepare()
+        def failed_lookup(path, branch, **kwargs):
+            if self.operations("push"):
+                self.advance_remote()
+                raise TaskError("GitHub HTTP 503: service failure")
+            return self.api(path, branch, **kwargs)
+        with patch("task_start.github.request", side_effect=failed_lookup):
+            with self.assertRaisesRegex(TaskError, "HTTP 503.*confirmation also failed.*Remote base differs"):
+                publish("DEV-7")
+        self.assertEqual(len(self.operations("ls-remote")), 3)
+        self.assertEqual(self.store.read()["publication_history"]["state"], "published")
+        self.assertFalse(self.pulls)
+
+    def test_published_retry_detects_remote_deletion_after_preflight_without_repairing_or_writing_pr(self):
+        self.prepare()
+        with patch("task_start.publish.publish_pull", side_effect=TaskError("stop before PR")):
+            with self.assertRaisesRegex(TaskError, "stop before PR"):
+                publish("DEV-7")
+        head = self.command(self.path, "rev-parse", "HEAD")
+        lookups = 0
+        def deleted_ref(path, branch, **kwargs):
+            nonlocal lookups
+            result = self.api(path, branch, **kwargs)
+            lookups += 1
+            if lookups == 1:  # After preflight observed the exact published SHA.
+                self.command(self.remote, "update-ref", "-d", f"refs/heads/{self.branch}")
+            return result
+        before = len(self.operations("ls-remote"))
+        with patch("task_start.github.request", side_effect=deleted_ref):
+            with self.assertRaisesRegex(TaskError, "Remote task branch conflicts"):
+                publish("DEV-7")
+        self.assertEqual(len(self.operations("ls-remote")) - before, 2)
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD"), head)
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+        self.assertFalse(self.pulls)
+
+    def test_remote_drift_from_commit_hook_still_refuses_before_push(self):
+        self.prepare()
+        def advance_on_commit(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "commit":
+                self.advance_remote()
+            return result
+        self.native.side_effect = advance_on_commit
+        with self.assertRaisesRegex(TaskError, "Remote base differs"):
+            publish("DEV-7")
+        self.assertEqual(len(self.operations("ls-remote")), 2)
+        self.assertFalse(self.operations("push"))
+        self.assertFalse(self.pulls)
+
+    def test_concise_title_uses_reviewed_result_and_preserves_pr_acronym(self):
+        self.prepare()
+        public = dict(PUBLIC, summary="add reviewed task PR publishing")
+        self.verdict_overrides = dict(publication=public)
+        self.assertEqual(review("DEV-7").state, "clean")
+        publish("DEV-7")
+        title = "feat: add reviewed task PR publishing (DEV-7)"
+        self.assertEqual(self.command(self.path, "show", "-s", "--format=%s"), title)
+        self.assertEqual(self.pulls[0]["title"], title)
+        self.assertNotIn(self.linear.get_issue.return_value.title, title)
+
+    def test_nonconforming_review_summary_cannot_authorize_publication(self):
+        self.prepare()
+        self.verdict_overrides = dict(publication=dict(PUBLIC, summary="Publish The Reviewed Task"))
+        result = review("DEV-7")
+        self.assertEqual(result.state, "failed")
+        self.assertIn("lower-case action phrase", result.summary)
+        self.assertIsNone(self.store.read()["acceptance"])
+        self.assertFalse(self.operations("commit"))
+
+    def test_new_title_policy_never_rewrites_frozen_legacy_rebase_metadata(self):
+        self.prepare()
+        legacy = "feat: Publish reviewed task changes with recoverable Git and GitHub stages (DEV-7)"
+        _, body = prepare_metadata(self.linear.get_issue.return_value, self.store.read()["acceptance"])
+        base = self.advance_remote()
+        with patch("task_start.publish.prepare_metadata", return_value=(legacy, body)):
+            head = self.assert_rebased(base)
+        frozen = self.store.read()["rebase"]["publication"]
+        self.verdict_overrides = dict(summary="The rebased implementation is correct.",
+                                     publication=dict(PUBLIC, summary="A Different Free-form Summary"))
+        self.assertEqual(review("DEV-7").state, "clean")
+        with patch("task_start.publish.prepare_metadata", side_effect=AssertionError("Never regenerate frozen metadata")):
+            publish("DEV-7")
+            publish("DEV-7")
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.command(self.path, "show", "-s", "--format=%s"), legacy)
+        self.assertEqual(self.pulls[0]["title"], legacy)
+        self.assertEqual(self.store.read()["rebase"]["publication"], frozen)
+        self.assertFalse(self.operations("commit"))
+        self.assertEqual(len(self.operations("push")), 1)
 
     def test_pr_create_rechecks_task_branch_after_lookup(self):
         self.assert_remote_drift_before_pr_write("head", update=False)
@@ -1398,6 +1515,31 @@ if protocol:
                       dict(PUBLIC, description="## Tracking\nevil")):
             with self.assertRaises(TaskError):
                 publication_metadata(value)
+
+    def test_new_subjects_are_bounded_action_summaries_with_case_preserved(self):
+        issue = replace(baseline.ISSUE, identifier="DEV-18", labels=("Feature",),
+                        url="https://linear.app/team/issue/DEV-18")
+        for summary in ("add reviewed task PR publishing", "reduce SSH passphrase prompts", "fix GitHub API diagnostics"):
+            with self.subTest(summary=summary):
+                title, _ = prepare_metadata(issue, {"publication": dict(PUBLIC, summary=summary)})
+                self.assertEqual(title, f"feat: {summary} (DEV-18)")
+                self.assertLessEqual(len(title), 72)
+        for identifier in ("DEV-18", "DEV-12345678"):
+            limit = publication_summary_limit(identifier)
+            summary = "add " + "x" * (limit - 4)
+            issue = replace(issue, identifier=identifier, labels=("Refactor",),
+                            url=f"https://linear.app/team/issue/{identifier}")
+            title, _ = prepare_metadata(issue, {"publication": dict(PUBLIC, summary=summary)})
+            self.assertEqual(len(title), 72)
+            with self.assertRaisesRegex(TaskError, "at most"):
+                prepare_metadata(issue, {"publication": dict(PUBLIC, summary=summary + "x")})
+
+    def test_new_subjects_refuse_capitalized_verbs_prefixes_suffixes_and_sentence_prose(self):
+        for summary in ("Publish reviewed task changes", "Add Reviewed Task PR Publishing", "feat: add task publishing",
+                        "add task publishing (DEV-18)", "add task publishing.", "add task publishing!",
+                        "add task publishing?", "add  task publishing", "Publish reviewed task changes with recoverable Git and GitHub stages"):
+            with self.subTest(summary=summary), self.assertRaises(TaskError):
+                publication_metadata(dict(PUBLIC, summary=summary), identifier="DEV-18")
 
     def test_cli_has_one_simple_authorizing_command(self):
         with patch("task_start.cli.publish", return_value="https://github.com/o/r/pull/1") as publisher:

@@ -319,6 +319,16 @@ title use `<type>: <concise actual change> (DEV-20)`. The body contains `Summary
 findings and task instructions are not used as a fallback. Public-safety judgment
 is supplied by the reviewer, not a deterministic secret-content classifier.
 
+New summaries start with a lower-case imperative verb, usually use 3–8 words,
+and preserve proper names and acronyms such as Codex, GitHub, SSH and PR. For
+example: `feat: add reviewed task PR publishing (DEV-18)`. Supporting mechanics
+belong in the description. The review handoff reserves room for the longest
+supported type and the issue suffix so the complete subject fits within 72
+characters. New metadata with an uppercase first word, excess length, a repeated
+type/issue suffix or sentence-ending punctuation is refused; the workflow does
+not silently rewrite accepted prose. Previously frozen titles and bodies remain
+unchanged, including through rebase review and retries.
+
 ### Mapping the reviewed state to a commit
 
 Before any commit, the full current fingerprint must equal the acceptance. This
@@ -448,8 +458,8 @@ authoritative; cached tracking refs and task branch push defaults are not used.
 
 Before the first push attempt, a pending marker is saved and fsynced. Observing
 the remote task ref records positive publication evidence; a verified successful
-push must save that evidence before continuing to GitHub. The first positive
-record is retained permanently for that branch's workflow state, including
+push must save that evidence before any GitHub write or success reporting. The
+first positive record is retained permanently for that branch's workflow state, including
 across fresh/failed reviews. Later commits or pushes do not downgrade it. If the
 push acknowledgement or confirmation write fails, the pending marker survives:
 retry can verify or push the same commit, but cannot automatically rebase after
@@ -473,6 +483,18 @@ against unrelated changes between the final observation and the API write.
 GitHub owner/repository
 casing is equivalent, including in the reported PR URL. URL scheme, host, path,
 PR number, head/base branch names and head SHA remain strictly validated.
+
+To reduce repeated authentication, a preflight observation that the remote task
+ref already equals the frozen publishing SHA skips the push stage. After a new
+push, remote confirmation shares the next required check after PR lookup. If
+that lookup fails, the workflow still checks the refs and saves positive push
+evidence before stopping; a confirmation failure is reported alongside the API
+failure. A fresh publish normally needs four `ls-remote` calls and one push. A
+retry with the branch already published needs three ref lookups if it creates or
+updates a PR, or two if the PR already matches. Checks immediately before writes
+and after the final GitHub lookup remain fresh, and local state is checked after
+native transport. These reductions do not cache credentials or change Git/SSH
+configuration; native prompts remain in the invoking terminal.
 
 | Interruption | Next `task pr` invocation |
 | --- | --- |

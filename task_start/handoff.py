@@ -2,7 +2,7 @@
 
 from . import TaskError
 from .linear import Issue
-from .review_result import publication_fingerprint
+from .review_result import publication_fingerprint, publication_summary_limit
 from .workspace import Workspace
 import json
 
@@ -44,7 +44,7 @@ def review_handoff(issue, repository, workspace, base, state, context_id, pass_k
                     slice=workspace.slice)
     example = dict(pass_id=pass_id, state="clean", summary="Concise review conclusion",
                    findings=[], checks=[dict(name="check name", result="passed", details="Observed result")],
-                   publication=dict(summary="Concise actual change", description="Implemented behavior and purpose",
+                   publication=dict(summary="add reviewed task PR publishing", description="Implemented behavior and purpose",
                                     validation="Checks actually observed and relevant limitations"))
     instructions = """AUTHORITATIVE REVIEW INSTRUCTIONS
 Independently review the implementation against the latest Linear requirements below.
@@ -70,9 +70,13 @@ invalidates this pass, even if later restored; do not try to repair it.
              "current checkout and latest requirements, and inspect new changes for regressions. Preserve earlier context.")
     fields = "pass_id, state, summary, findings, checks, publication"
     publication_instructions = (
-        "publication contains exactly summary (one line, at most 100 characters), description, and validation "
+        f"publication contains exactly summary (one line, at most {publication_summary_limit(issue.identifier)} characters), description, and validation "
         "(each at most 2000 characters, no headings). These are PUBLIC GitHub metadata: describe the actual "
         "reviewed result, including human steering evident in the implementation, rather than copying the task title. "
+        "Write a concise action summary, usually 3-8 words, starting with a lower-case imperative verb such as add, "
+        "fix, clarify, or reduce. Preserve proper names and acronyms such as Codex, GitHub, SSH, and PR; do not use "
+        "Title Case or sentence-ending punctuation. Put supporting mechanics in the description, not the title. "
+        "The workflow reserves space for the type and issue suffix so the full subject fits within 72 characters. "
         "Use only public-safe implementation facts and observed checks/limitations. Never copy private task text, "
         "agent instructions, credentials, local paths, or conversation content. Do not choose a commit type, branch, "
         "base, repository, URL, or Git/GitHub action. Workflow code owns those. If public-safe metadata cannot be "

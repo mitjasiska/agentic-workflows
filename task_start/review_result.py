@@ -3,11 +3,18 @@
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import re
 
 from . import TaskError
 
 
-def publication_metadata(value):
+def publication_summary_limit(identifier):
+    # Reserve the longest supported type and the workflow-owned issue suffix.
+    # The reviewer supplies prose only and never needs to choose that type.
+    return 72 - len(f"refactor:  ({identifier})")
+
+
+def publication_metadata(value, *, identifier=None):
     """Only public prose crosses the semantic boundary; never Git instructions."""
     if not isinstance(value, dict) or set(value) != {"summary", "description", "validation"}:
         raise TaskError("Review publication metadata requires summary, description, and validation")
@@ -19,6 +26,14 @@ def publication_metadata(value):
             raise TaskError("Invalid public review publication metadata")
     if "\n" in value["summary"]:
         raise TaskError("Publication summary must be a single line")
+    if identifier is not None:
+        summary = value["summary"]
+        limit = publication_summary_limit(identifier)
+        if (len(summary) > limit or re.fullmatch(r"[a-z]+(?:-[a-z]+)* .+", summary) is None
+                or " ".join(summary.split()) != summary or summary.endswith((".", "!", "?"))
+                or re.search(r"\([A-Z][A-Z0-9]*-[0-9]+\)$", summary)):
+            raise TaskError(f"Publication summary must be a concise lower-case action phrase of at most {limit} characters, "
+                            "without a type prefix, issue suffix, or sentence punctuation; run task review again")
     return value
 
 
@@ -41,7 +56,7 @@ def unique_object(pairs):
     return result
 
 
-def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = None) -> dict:
+def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = None, identifier=None) -> dict:
     try:
         value = json.loads(raw, object_pairs_hook=unique_object)
         # Initial publishing requires public prose; a rebased continuation needs
@@ -73,7 +88,10 @@ def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = No
                 or (value["state"] == "findings" and not value["findings"])):
             raise ValueError("inconsistent verdict")
         if "publication" in value:
-            publication_metadata(value["publication"])
+            # Frozen continuation validates existing metadata, never regenerates
+            # it. Optional replacement prose must not apply a new title policy
+            # retroactively to a previously accepted publishing contract.
+            publication_metadata(value["publication"], identifier=identifier if frozen_fingerprint is None else None)
         if "publication_approval" in value and (frozen_fingerprint is None
                 or value["publication_approval"] != frozen_fingerprint):
             raise TaskError("Review approval does not match the frozen publication metadata; a new review is required")

@@ -310,7 +310,7 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                     if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                         raise TaskError("Invalid reviewer result file")
                     verdict = parse_verdict(output.read_text(encoding="utf-8"), pass_id,
-                                            frozen_fingerprint=frozen_fingerprint)
+                                            frozen_fingerprint=frozen_fingerprint, identifier=issue.identifier)
                     state, summary = verdict["state"], verdict["summary"]
                     break
                 # Herdr may infer idle from process/title detection even while Pi

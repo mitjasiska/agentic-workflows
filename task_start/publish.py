@@ -171,7 +171,7 @@ def verify_acceptance(accepted, issue, project, repo, workspace, endpoint, regis
 def prepare_metadata(issue, accepted):
     if accepted.get("publication") is None:
         raise TaskError("Clean review lacks public publishing metadata; run task review again")
-    public = publication_metadata(accepted.get("publication"))
+    public = publication_metadata(accepted.get("publication"), identifier=issue.identifier)
     title = f"{change_type(issue)}: {public['summary']} ({issue.identifier})"
     body = (f"## Summary\n\n{public['description']}\n\n## Tracking\n\n"
             f"Linear: [{issue.identifier}]({tracking_url(issue)})\n\n## Validation\n\n"
@@ -238,7 +238,13 @@ def commit(git, accepted, intent, *, freeze):
     return head
 
 
-def push(git, accepted, intent, identity, head, *, record_publication):
+def push(git, accepted, intent, identity, head, *, record_publication, defer_confirmation=False):
+    """Push once; optionally share confirmation with the next PR-stage check.
+
+    Standalone callers confirm here. The publishing coordinator can defer the
+    remote confirmation until after PR lookup, but must confirm on lookup failure
+    too. Pending evidence already prevents rebasing if that caller is interrupted.
+    """
     base = accepted["base_branch"]
     def observed(head):
         record_publication("published", head)
@@ -260,8 +266,11 @@ def push(git, accepted, intent, identity, head, *, record_publication):
             # A pre-push hook can amend HEAD while the explicit refspec still
             # sends the frozen commit, even when Git reports success or fails.
             verify_commit(git, accepted, intent, expected_head=head)
-    verify_remote(git.repo, identity, base, accepted["branch"], accepted["review_state"]["base_commit"], {head}, observe_head=observed)
+        if defer_confirmation:
+            return True
+        verify_remote(git.repo, identity, base, accepted["branch"], accepted["review_state"]["base_commit"], {head}, observe_head=observed)
     verify_commit(git, accepted, intent, expected_head=head)
+    return False
 
 
 def verify_publication_history(history, binding, identity):
@@ -467,19 +476,40 @@ def publish(identifier):
             saved["intent"] = intent
             store.write(saved)  # Durable BEFORE commit; no guessed completion flags.
         head = commit(git, accepted, intent, freeze=freeze)
-        push(git, accepted, intent, identity, head, record_publication=record_publication)
+        # A ref already observed at this exact SHA needs no push. This observation
+        # only skips transport; it never authorizes a PR write or URL reporting.
+        confirmation_pending = False
+        if remote_head != head:
+            confirmation_pending = push(git, accepted, intent, identity, head,
+                                        record_publication=record_publication, defer_confirmation=True)
         def verify_local():
             verify_commit(git, accepted, intent, expected_head=head)
         def before_write():
+            nonlocal confirmation_pending
+            # A failed confirmation already stops this invocation. Do not repeat
+            # authentication while unwinding that same failure.
+            confirmation_pending = False
+            verify_local()
             # GitHub lookups are observations, not a lock on branch/base refs.
-            # Check the effective destination and live refs after those lookups,
-            # then recheck local state after any native authentication helper.
-            verify_remote(workspace.path, identity, project.base_branch, workspace.branch, base, {head})
+            # This fresh lookup also confirms any just-completed push and saves
+            # positive evidence before GitHub writes. Never reuse it across an
+            # API call when authorizing another write or reporting the URL.
+            verify_remote(workspace.path, identity, project.base_branch, workspace.branch, base, {head},
+                          observe_head=record_published)
             verify_local()
         verify_local()
-        result = publish_pull(identity["repository"], workspace.branch, project.base_branch, head,
-                              intent["title"], intent["body"], verify_local=verify_local, before_write=before_write)
-        verify_local()
-        verify_remote(workspace.path, identity, project.base_branch, workspace.branch, base, {head})
-        verify_local()
+        try:
+            result = publish_pull(identity["repository"], workspace.branch, project.base_branch, head,
+                                  intent["title"], intent["body"], verify_local=verify_local, before_write=before_write)
+        except TaskError as error:
+            if confirmation_pending:
+                # A GitHub lookup failure must not discard evidence of a push
+                # that succeeded. Preserve the original API diagnostic if Git
+                # confirms the expected state; conflicting Git state still stops.
+                try:
+                    before_write()
+                except TaskError as confirmation_error:
+                    raise TaskError(f"{error}. Publishing confirmation also failed: {confirmation_error}") from None
+            raise
+        before_write()  # Fresh remote + local proof after the last API lookup.
         return result
