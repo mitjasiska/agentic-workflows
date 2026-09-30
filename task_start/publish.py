@@ -1,6 +1,7 @@
 """Reviewed publication: preflight -> metadata -> commit -> push -> PR -> report."""
 
 from contextlib import contextmanager
+from copy import deepcopy
 import os
 from pathlib import Path
 import re
@@ -14,7 +15,7 @@ from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, context_reference
 from .github import api_credential, publication_pull, publish_pull, pull_requests, repository_name
 from .linear import Linear
-from .publication_state import PublicationStore
+from .publication_state import PublicationStore, verify_publication_history
 from .publication_rebase import continue_rebase, integration_plan, validate_commits, validate_record
 from .review import resolve_review_workspace
 from .review_result import publication_fingerprint, publication_metadata
@@ -238,7 +239,7 @@ def commit(git, accepted, intent, *, freeze):
     return head
 
 
-def push(git, accepted, intent, identity, head, *, record_publication, defer_confirmation=False):
+def push(git, accepted, intent, identity, head, *, record_publication, defer_confirmation=False, require_existing=False):
     """Push once; optionally share confirmation with the next PR-stage check.
 
     Standalone callers confirm here. The publishing coordinator can defer the
@@ -250,7 +251,8 @@ def push(git, accepted, intent, identity, head, *, record_publication, defer_con
         record_publication("published", head)
     verify_commit(git, accepted, intent, expected_head=head)
     remote_head = verify_remote(git.repo, identity, base, accepted["branch"], accepted["review_state"]["base_commit"],
-                                {None, accepted["review_state"]["head"], head}, observe_head=observed)
+                                {accepted["review_state"]["head"], head} | (set() if require_existing else {None}),
+                                observe_head=observed)
     if remote_head != head:
         verify_remote_identity(git, base, accepted["branch"], identity)
         verify_commit(git, accepted, intent, expected_head=head)
@@ -273,26 +275,13 @@ def push(git, accepted, intent, identity, head, *, record_publication, defer_con
     return False
 
 
-def verify_publication_history(history, binding, identity):
-    if history in (None, "unknown"):
-        return
-    try:
-        if (set(history) != {"version", "binding", "identity", "state", "head"}
-                or history["version"] != 1 or history["binding"] != binding
-                or not same_remote_identity(history["identity"], identity)
-                or history["state"] not in {"pending", "published"}
-                or not isinstance(history["head"], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", history["head"])):
-            raise ValueError("invalid publication history")
-    except (KeyError, TypeError, ValueError):
-        raise TaskError("Publication history conflicts with task/repository identity; inspect private Git metadata") from None
-
-
 def require_never_published(history):
     if history is None:
         return
     if isinstance(history, dict) and history["state"] == "published":
         raise TaskError("Task branch was already published; automatic rebase is forbidden even if the remote ref was deleted. "
-                        "Inspect history manually; no force-push is allowed")
+                        "Follow-up publication requires the pinned published base; inspect advanced-base integration manually. "
+                        "No force-push is allowed")
     raise TaskError("A prior push may have published this task branch; automatic rebase is forbidden. "
                     "Inspect the uncertain push/legacy publication history before retrying")
 
@@ -364,10 +353,39 @@ def publish(identifier):
 
         def record_publication(state, head):
             previous = saved["publication_history"]
-            if isinstance(previous, dict) and (previous["state"] == "published" or state == "pending"):
-                return
             if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
                 raise TaskError("Cannot establish a published branch SHA; inspect authoritative remote/PR history")
+            lineage = isinstance(previous, dict) and previous["version"] == 2
+            if lineage and previous["state"] == "published" and head == previous["head"]:
+                return
+            if intent is not None and head == intent.get("publishing_head"):
+                if not lineage:
+                    if (isinstance(previous, dict) and previous["head"] not in {head, accepted["review_state"]["head"]}):
+                        raise TaskError("Recorded publication conflicts with the frozen commit; inspect published history manually")
+                    previous = dict(version=2, binding=history_binding, identity=identity,
+                                    state=previous["state"] if isinstance(previous, dict) else "pending",
+                                    head=previous["head"] if isinstance(previous, dict) else head,
+                                    prior=deepcopy(previous), base_commit=accepted["review_state"]["base_commit"],
+                                    pull_number=intent.get("pull_number"), cycles=[])
+                history = deepcopy(previous)
+                cycles = history["cycles"]
+                if not cycles or cycles[-1]["intent"]["publishing_head"] != head:
+                    cycles.append(dict(acceptance=deepcopy(accepted), intent=deepcopy(intent), state=state))
+                elif state == "published" and cycles[-1]["state"] == "pending":
+                    cycles[-1]["state"] = state
+                if state == "published" or history["state"] != "published":
+                    history.update(state=state, head=head)
+                verify_publication_history(history, history_binding, identity)
+                if history != saved["publication_history"]:
+                    saved["publication_history"] = history
+                    store.write(saved)
+                return
+            if lineage:
+                raise TaskError("Remote task branch conflicts with durable published history; inspect it manually; no force-push is allowed")
+            if isinstance(previous, dict) and (previous["state"] == "published" or state == "pending"):
+                return
+            # External/legacy publication evidence still forbids any rebase, but
+            # is not promoted into reviewed lineage without a proven frozen SHA.
             saved["publication_history"] = dict(version=1, binding=history_binding, identity=identity, state=state, head=head)
             store.write(saved)
 
@@ -388,6 +406,40 @@ def publish(identifier):
                 continue_rebase(git, saved, store, native_git, lambda: verify_unpublished(rebase["base"]))
         verify_acceptance(accepted, issue, project, repo, workspace, endpoint, registry)
         reviewed_base = accepted["review_state"]["base_commit"]
+        history = saved["publication_history"]
+        lineage = history if isinstance(history, dict) and history["version"] == 2 else None
+        followup = False
+        if lineage is not None:
+            last = lineage["cycles"][-1]
+            if accepted["pass_id"] == last["acceptance"]["pass_id"]:
+                if accepted != last["acceptance"] or intent != last["intent"]:
+                    raise TaskError("Current review/intent differs from durable publication lineage; inspect private Git metadata")
+                verify_commit(git, accepted, intent)
+            else:
+                followup = True
+                if last["state"] != "complete" or lineage["pull_number"] is None:
+                    raise TaskError("Prior publication is unfinished; reconcile its original frozen commit and PR before follow-up publication")
+                if accepted["review_state"]["head"] != lineage["head"]:
+                    raise TaskError("Published history changed: follow-up HEAD must equal the latest published SHA; "
+                                    "inspect history and keep follow-up edits uncommitted before review")
+            if reviewed_base != lineage["base_commit"] or base != lineage["base_commit"]:
+                raise TaskError("Published task base advanced or changed; automatic rebase is forbidden. "
+                                "Follow-up review requires the pinned published base; advanced-base integration needs manual review")
+            # Immutable object identity and every sole-parent link are checked,
+            # including completed cycles no longer held by current acceptance.
+            for cycle in lineage["cycles"]:
+                original, frozen_intent = cycle["acceptance"], cycle["intent"]
+                published_head = frozen_intent["publishing_head"]
+                parents = git.command("rev-list", "--parents", "-n", "1", published_head).split()
+                if ((frozen_intent.get("reuse_head") != published_head
+                        and parents != [published_head, original["review_state"]["head"]])
+                        or git.command("rev-parse", f"{published_head}^{{tree}}").strip() != frozen_intent["tree"]
+                        or git.command("show", "-s", "--format=%B", published_head).rstrip("\n") != frozen_intent["message"]
+                        or git.command("rev-list", "--count", f"HEAD..{published_head}").strip() != "0"):
+                    raise TaskError("Published history was rewritten or no longer belongs to local HEAD; inspect ancestry manually")
+        elif history is not None and intent is None:
+            raise TaskError("Prior publication lacks its original review/intent lineage; inspect legacy history manually "
+                            "before publishing follow-up changes")
         if git.command("rev-list", "--count", f"{accepted['review_state']['head']}..{reviewed_base}").strip() != "0":
             raise TaskError("Task does not contain the reviewed base; reconcile its history and review again")
         frozen = None
@@ -406,8 +458,10 @@ def publish(identifier):
             with prepared_index(git) as (_, tree, index):
                 if tree_content(git.repo, tree) != before.content:
                     raise TaskError("Prepared tree cannot represent all reviewed bytes/modes; inspect Git ignore/filter/mode rules and review again")
-                if tree == git.command("rev-parse", f"{reviewed_base}^{{tree}}").strip():
+                if not followup and tree == git.command("rev-parse", f"{reviewed_base}^{{tree}}").strip():
                     raise TaskError("No reviewed change against the base to publish")
+                if followup and tree == git.command("rev-parse", f"{lineage['head']}^{{tree}}").strip():
+                    raise TaskError("No new reviewed changes since the latest publication; no follow-up commit is needed")
                 intent = dict(version=1, pass_id=accepted["pass_id"], **identity, tree=tree, index=index,
                               title=title, body=body, message=(rebase["steps"][-1]["message"] if frozen is not None
                                   else f"{title}\n\nTask-Review: {accepted['pass_id']}"))
@@ -446,11 +500,38 @@ def publish(identifier):
         remote_base, remote_head = remote_heads(workspace.path, identity, project.base_branch, workspace.branch)
         if remote_head is not None:
             record_published(remote_head)
+        if remote_base != reviewed_base:
+            require_never_published(saved["publication_history"])
+        if (remote_head is None and isinstance(saved["publication_history"], dict)
+                and saved["publication_history"]["state"] == "published"):
+            raise TaskError("Previously published remote task branch is missing; inspect remote history manually before retrying")
         if remote_head not in allowed | {None}:
             raise TaskError("Remote task branch conflicts with the reviewed/publishing commit; inspect it manually; no force-push is allowed")
-        pull = publication_pull(identity["repository"], workspace.branch, project.base_branch, allowed)
+
+        def expected_pull_number():
+            history = saved["publication_history"]
+            return (history["pull_number"] if isinstance(history, dict) and history["version"] == 2
+                    else intent.get("pull_number"))
+
+        def record_pull(pull):
+            number = pull["number"]
+            expected = expected_pull_number()
+            if expected is not None and number != expected:
+                raise TaskError("Task PR identity changed; inspect the recorded PR before retrying")
+            if expected is None:
+                history = saved["publication_history"]
+                if isinstance(history, dict) and history["version"] == 2:
+                    history["pull_number"] = number
+                else:
+                    intent["pull_number"] = number
+                    saved["intent"] = intent
+                store.write(saved)
+
+        pull = publication_pull(identity["repository"], workspace.branch, project.base_branch, allowed,
+                                expected_number=expected_pull_number())
         if pull is not None:
             record_published(pull["head"]["sha"])
+            record_pull(pull)
         if remote_base != reviewed_base:
             require_never_published(saved["publication_history"])
             if remote_head is not None or pull is not None:
@@ -481,7 +562,9 @@ def publish(identifier):
         confirmation_pending = False
         if remote_head != head:
             confirmation_pending = push(git, accepted, intent, identity, head,
-                                        record_publication=record_publication, defer_confirmation=True)
+                                        record_publication=record_publication, defer_confirmation=True,
+                                        require_existing=isinstance(saved["publication_history"], dict)
+                                            and saved["publication_history"]["state"] == "published")
         def verify_local():
             verify_commit(git, accepted, intent, expected_head=head)
         def before_write():
@@ -500,7 +583,8 @@ def publish(identifier):
         verify_local()
         try:
             result = publish_pull(identity["repository"], workspace.branch, project.base_branch, head,
-                                  intent["title"], intent["body"], verify_local=verify_local, before_write=before_write)
+                                  intent["title"], intent["body"], verify_local=verify_local, before_write=before_write,
+                                  expected_number=expected_pull_number(), observe_pull=record_pull)
         except TaskError as error:
             if confirmation_pending:
                 # A GitHub lookup failure must not discard evidence of a push
@@ -512,4 +596,8 @@ def publish(identifier):
                     raise TaskError(f"{error}. Publishing confirmation also failed: {confirmation_error}") from None
             raise
         before_write()  # Fresh remote + local proof after the last API lookup.
+        cycle = saved["publication_history"]["cycles"][-1]
+        if cycle["state"] != "complete":
+            cycle["state"] = "complete"
+            store.write(saved)
         return result

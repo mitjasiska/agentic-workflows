@@ -162,14 +162,18 @@ def request(path: str, branch: str, *, method: str = "GET", data: dict | None = 
                     f"{authentication}Inspect its PR/merge state before retrying. Workspace left intact.") from None
 
 
-def publication_pull(repo: str, branch: str, base: str, heads: set[str]):
+def publication_pull(repo: str, branch: str, base: str, heads: set[str], *, expected_number=None):
     """All history participates: a closed, different-base, or second PR conflicts."""
     pulls = list(pull_requests(repo, branch))
     if len(pulls) > 1:
         raise TaskError("Ambiguous PR history: multiple PRs use the task head; inspect them before retrying")
     if not pulls:
+        if expected_number is not None:
+            raise TaskError("Previously identified task PR is missing; inspect GitHub history before retrying; no replacement PR will be created")
         return None
     listed = pulls[0]
+    if expected_number is not None and listed["number"] != expected_number:
+        raise TaskError("Task PR identity changed; inspect the recorded PR number and GitHub history before retrying")
     pull = request(f"{repo}/pulls/{listed['number']}", branch)
     for item in (listed, pull):
         validate_pull(item, repo, branch)
@@ -190,8 +194,12 @@ def publication_pull(repo: str, branch: str, base: str, heads: set[str]):
     return pull
 
 
-def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body: str, *, verify_local, before_write):
-    pull = publication_pull(repo, branch, base, {head})
+def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body: str, *, verify_local, before_write,
+                 expected_number=None, observe_pull=lambda pull: None):
+    pull = publication_pull(repo, branch, base, {head}, expected_number=expected_number)
+    if pull is not None:
+        observe_pull(pull)
+        expected_number = pull["number"]
     # Lifecycle owns the frozen local SHA and reviewed-state checks. Recheck
     # after network lookups, immediately before any PR write and URL reporting.
     verify_local()
@@ -199,15 +207,19 @@ def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body:
         # An uncertain POST is never replayed here. The next invocation enumerates
         # authoritative history first and reuses the unique matching result.
         before_write()
-        request(f"{repo}/pulls", branch, method="POST",
-                data=dict(head=branch, base=base, title=title, body=body, draft=False))
+        created = request(f"{repo}/pulls", branch, method="POST",
+                          data=dict(head=branch, base=base, title=title, body=body, draft=False))
+        validate_pull(created, repo, branch)
+        observe_pull(created)
+        expected_number = created["number"]
     elif pull.get("title") != title or pull.get("body") != body:
         before_write()
         request(f"{repo}/pulls/{pull['number']}", branch, method="PATCH", data=dict(title=title, body=body))
-    verified = publication_pull(repo, branch, base, {head})
+    verified = publication_pull(repo, branch, base, {head}, expected_number=expected_number)
     if verified is None or verified.get("title") != title or verified.get("body") != body:
         raise TaskError("GitHub has not confirmed the expected PR metadata; rerun task pr to verify/reuse it")
     verify_local()
+    observe_pull(verified)
     return verified["html_url"]
 
 

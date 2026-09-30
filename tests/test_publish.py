@@ -458,11 +458,10 @@ class PublishingTests(unittest.TestCase):
 
     def test_publication_evidence_survives_failed_and_fresh_reviews(self):
         self.prepare()
-        with patch("task_start.publish.publish_pull", side_effect=TaskError("PR offline")):
-            with self.assertRaisesRegex(TaskError, "PR offline"):
-                publish("DEV-7")
+        publish("DEV-7")
         history = self.store.read()["publication_history"]
         self.assertEqual(history["state"], "published")
+        (self.path / "new.txt").write_text("follow-up implementation\n")
         for verdict in ("blocked", "clean"):
             self.verdict_overrides = dict(state=verdict, publication=PUBLIC)
             self.assertEqual(review("DEV-7").state, verdict)
@@ -1413,6 +1412,314 @@ class PublishingTests(unittest.TestCase):
         publish("DEV-7")
         self.assertEqual(self.command(self.path, "rev-parse", "HEAD^"), first)
         self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+
+    def followup_review(self, number=2):
+        (self.path / "new.txt").write_text(f"reviewed follow-up {number}\n")
+        self.verdict_overrides = dict(publication=dict(PUBLIC, summary=f"add follow-up {number}"))
+        self.assertEqual(review("DEV-7").state, "clean")
+        return self.store.read()["acceptance"]
+
+    def test_multiple_followups_preserve_every_review_commit_and_pr(self):
+        self.prepare()
+        url = publish("DEV-7")
+        for number in (2, 3, 4):
+            previous = self.store.read()["publication_history"]
+            accepted = self.followup_review(number)
+            self.assertEqual(publish("DEV-7"), url)
+            history = self.store.read()["publication_history"]
+            head = self.command(self.path, "rev-parse", "HEAD")
+            self.assertEqual(self.command(self.path, "rev-parse", "HEAD^"), previous["head"])
+            self.assertEqual(self.command(self.remote, "rev-parse", self.branch), head)
+            self.assertEqual(history["head"], head)
+            self.assertEqual(history["cycles"][:-1], previous["cycles"])
+            self.assertEqual(history["cycles"][-1]["acceptance"], accepted)
+            self.assertEqual(history["cycles"][-1]["intent"], self.store.read()["intent"])
+            self.assertEqual(history["cycles"][-1]["state"], "complete")
+            self.assertEqual(snapshot(self.path, self.base, self.branch).content, accepted["review_state"]["content"])
+            self.assertIn(accepted["pass_id"], self.command(self.path, "show", "-s", "--format=%B"))
+            self.assertEqual(self.pulls[0]["title"], f"feat: add follow-up {number} (DEV-7)")
+            self.assertEqual(publish("DEV-7"), url)
+            self.assertEqual(self.store.read()["publication_history"], history)
+        self.assertEqual(self.command(self.path, "rev-list", "--count", f"{self.base}..HEAD"), "4")
+        self.assertEqual(len(self.operations("commit")), 4)
+        self.assertEqual(len(self.operations("push")), 4)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 3)
+        for call in self.operations("push"):
+            self.assertFalse(any(str(arg).startswith(("+", "--force")) for arg in call.args))
+        self.assertFalse(self.operations("fetch"))
+        self.assertFalse(self.operations("commit-tree"))
+
+    def assert_followup_retry(self, failure):
+        self.prepare()
+        url = publish("DEV-7")
+        previous = self.store.read()["publication_history"]
+        self.followup_review()
+        def interrupted_native(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == failure:
+                raise TaskError("lost acknowledgement")
+            return result
+        def interrupted_api(path, branch, **kwargs):
+            result = self.api(path, branch, **kwargs)
+            if kwargs.get("method") == failure:
+                raise TaskError("lost acknowledgement")
+            return result
+        self.native.side_effect = interrupted_native
+        with patch("task_start.github.request", side_effect=interrupted_api):
+            with self.assertRaisesRegex(TaskError, "lost acknowledgement"):
+                publish("DEV-7")
+        self.native.side_effect = None
+        frozen = self.command(self.path, "rev-parse", "HEAD")
+        saved = self.store.read()
+        with self.assertRaisesRegex(TaskError, "unfinished.*rerun task pr"):
+            review("DEV-7")
+        self.assertEqual(self.store.read(), saved)
+        if failure == "push":
+            self.assertEqual(saved["publication_history"]["head"], previous["head"])
+            self.assertEqual(saved["publication_history"]["cycles"][-1]["state"], "pending")
+        self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD"), frozen)
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD^"), previous["head"])
+        self.assertEqual(self.store.read()["publication_history"]["cycles"][:-1], previous["cycles"])
+        self.assertEqual(self.store.read()["publication_history"]["head"], frozen)
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 1)
+
+    def test_followup_recovers_commit_with_lost_acknowledgement(self):
+        self.assert_followup_retry("commit")
+
+    def test_followup_recovers_push_with_lost_acknowledgement(self):
+        self.assert_followup_retry("push")
+
+    def test_followup_recovers_pr_update_with_lost_acknowledgement(self):
+        self.assert_followup_retry("PATCH")
+
+    def test_followup_confirmation_write_failure_preserves_previous_publication(self):
+        self.prepare()
+        publish("DEV-7")
+        previous = self.store.read()["publication_history"]
+        self.followup_review()
+        write = PublicationStore.write
+        def fail_confirmation(store, value):
+            history = value["publication_history"]
+            if len(history["cycles"]) == 2 and history["cycles"][-1]["state"] == "published":
+                raise TaskError("confirmation storage failed")
+            return write(store, value)
+        with patch.object(PublicationStore, "write", new=fail_confirmation):
+            with self.assertRaisesRegex(TaskError, "confirmation storage failed"):
+                publish("DEV-7")
+        saved = self.store.read()["publication_history"]
+        self.assertEqual(saved["head"], previous["head"])
+        self.assertEqual(saved["cycles"][:-1], previous["cycles"])
+        self.assertEqual(saved["cycles"][-1]["state"], "pending")
+        publish("DEV-7")
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+
+    def test_followup_freeze_failure_recovers_one_commit(self):
+        self.prepare()
+        publish("DEV-7")
+        previous = self.store.read()["publication_history"]
+        self.followup_review()
+        write = PublicationStore.write
+        def fail_freeze(store, value):
+            if value["intent"].get("publishing_head"):
+                raise TaskError("freeze storage failed")
+            return write(store, value)
+        with patch.object(PublicationStore, "write", new=fail_freeze):
+            with self.assertRaisesRegex(TaskError, "freeze storage failed"):
+                publish("DEV-7")
+        head = self.command(self.path, "rev-parse", "HEAD")
+        self.assertEqual(self.store.read()["publication_history"], previous)
+        self.assertEqual(len(self.operations("push")), 1)
+        publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["head"], head)
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+
+    def test_followup_completion_write_failure_reuses_commit_push_and_pr_update(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        write = PublicationStore.write
+        def fail_completion(store, value):
+            cycles = value["publication_history"]["cycles"]
+            if len(cycles) == 2 and cycles[-1]["state"] == "complete":
+                raise TaskError("completion storage failed")
+            return write(store, value)
+        with patch.object(PublicationStore, "write", new=fail_completion):
+            with self.assertRaisesRegex(TaskError, "completion storage failed"):
+                publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["cycles"][-1]["state"], "published")
+        publish("DEV-7")
+        self.assertEqual(len(self.operations("commit")), 2)
+        self.assertEqual(len(self.operations("push")), 2)
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 1)
+
+    def test_legacy_published_intent_can_recover_lineage_before_followup(self):
+        self.prepare()
+        publish("DEV-7")
+        saved = self.store.read()
+        legacy = {k: v for k, v in saved["publication_history"].items()
+                  if k in {"binding", "identity", "state", "head"}}
+        saved["publication_history"] = dict(version=1, **legacy)
+        self.store.write(saved)
+        with self.assertRaisesRegex(TaskError, "unfinished.*rerun task pr"):
+            review("DEV-7")
+        publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["version"], 2)
+        self.assertEqual(self.store.read()["publication_history"]["head"], legacy["head"])
+        self.followup_review()
+        publish("DEV-7")
+        self.assertEqual(self.command(self.path, "rev-parse", "HEAD^"), legacy["head"])
+        self.assertEqual(len(self.operations("commit")), 2)
+
+    def test_legacy_publication_without_original_intent_cannot_authorize_followup(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        saved = self.store.read()
+        saved["publication_history"] = dict(version=1, **{k: v for k, v in saved["publication_history"].items()
+            if k in {"binding", "identity", "state", "head"}})
+        self.store.write(saved)
+        with self.assertRaisesRegex(TaskError, "original review/intent lineage"):
+            publish("DEV-7")
+        self.assertEqual(self.store.read(), saved)
+        self.assertEqual(len(self.operations("commit")), 1)
+
+    def test_observed_prepublication_head_survives_uncertain_initial_push(self):
+        self.prepare()
+        self.command(self.remote, "branch", self.branch, self.base)
+        def lost_ack(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "push":
+                raise TaskError("lost push acknowledgement")
+            return result
+        self.native.side_effect = lost_ack
+        with self.assertRaisesRegex(TaskError, "lost push acknowledgement"):
+            publish("DEV-7")
+        history = self.store.read()["publication_history"]
+        self.assertEqual((history["state"], history["head"]), ("published", self.base))
+        self.assertEqual(history["prior"]["head"], self.base)
+        self.assertEqual(history["cycles"][-1]["state"], "pending")
+        self.native.side_effect = None
+        publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["prior"], history["prior"])
+        self.assertEqual(self.store.read()["publication_history"]["head"], self.command(self.path, "rev-parse", "HEAD"))
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+
+    def test_followup_remote_drift_or_deletion_never_changes_lineage(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        saved = self.store.read()
+        first = saved["publication_history"]["head"]
+        other = self.command(self.remote, "commit-tree", f"{first}^{{tree}}", "-p", first, "-m", "outside update")
+        for remote_head in (other, self.base, None):
+            if remote_head is None:
+                self.command(self.remote, "update-ref", "-d", f"refs/heads/{self.branch}")
+            else:
+                self.command(self.remote, "update-ref", f"refs/heads/{self.branch}", remote_head)
+            with self.subTest(remote_head=remote_head), self.assertRaisesRegex(TaskError, "conflicts|missing"):
+                publish("DEV-7")
+            self.assertEqual(self.store.read(), saved)
+            self.assertEqual(len(self.operations("commit")), 1)
+            self.assertEqual(len(self.operations("push")), 1)
+
+    def test_followup_requires_the_recorded_pr_number_even_if_all_other_fields_match(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        original = copy.deepcopy(self.pulls)
+        for missing in (False, True):
+            self.pulls = copy.deepcopy(original)
+            if missing:
+                self.pulls.clear()
+            else:
+                self.pulls[0].update(number=2, html_url="https://github.com/owner/project/pull/2")
+            with self.subTest(missing=missing), self.assertRaisesRegex(TaskError, "PR identity changed|PR is missing"):
+                publish("DEV-7")
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+        self.assertEqual(sum(c[0] == "POST" for c in self.calls), 1)
+
+    def test_followup_detects_pr_replacement_after_push_before_metadata_update(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        def replace_after_push(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "push":
+                self.pulls[0].update(number=2, html_url="https://github.com/owner/project/pull/2")
+            return result
+        self.native.side_effect = replace_after_push
+        with self.assertRaisesRegex(TaskError, "PR identity changed"):
+            publish("DEV-7")
+        self.assertEqual(sum(c[0] == "PATCH" for c in self.calls), 0)
+        self.assertEqual(self.store.read()["publication_history"]["pull_number"], 1)
+
+    def test_published_history_rewrite_refuses_review_and_publication(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        first = self.command(self.path, "rev-parse", "HEAD")
+        replacement = self.command(self.path, "commit-tree", f"{first}^{{tree}}", "-p", self.base, "-m", "replacement")
+        self.command(self.path, "update-ref", f"refs/heads/{self.branch}", replacement, first)
+        saved = self.store.read()
+        with self.assertRaisesRegex(TaskError, "Published history changed"):
+            review("DEV-7")
+        with self.assertRaisesRegex(TaskError, "Published history was rewritten"):
+            publish("DEV-7")
+        self.assertEqual(self.store.read(), saved)
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
+
+    def test_committed_followup_requires_manual_inspection_instead_of_extra_publishing_parent(self):
+        self.prepare()
+        publish("DEV-7")
+        (self.path / "new.txt").write_text("local commit\n")
+        self.command(self.path, "add", ".")
+        self.command(self.path, "commit", "-m", "local follow-up")
+        with self.assertRaisesRegex(TaskError, "keep follow-up edits uncommitted"):
+            review("DEV-7")
+
+    def test_followup_requires_new_review_and_nonempty_changes(self):
+        self.prepare()
+        publish("DEV-7")
+        self.assertEqual(review("DEV-7").state, "clean")
+        with self.assertRaisesRegex(TaskError, "No new reviewed changes"):
+            publish("DEV-7")
+        (self.path / "new.txt").write_text("unreviewed\n")
+        with self.assertRaisesRegex(TaskError, "drifted"):
+            publish("DEV-7")
+        self.assertEqual(len(self.operations("commit")), 1)
+
+    def test_followup_base_advance_fails_closed_without_rewriting_or_fetching(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        saved = self.store.read()
+        before = snapshot(self.path, self.base, self.branch)
+        advanced = self.advance_remote()
+        with self.assertRaisesRegex(TaskError, "already published.*automatic rebase is forbidden"):
+            publish("DEV-7")
+        self.assertEqual(snapshot(self.path, self.base, self.branch), before)
+        self.assertEqual(self.store.read(), saved)
+        self.command(self.repo, "fetch", "origin", "main")
+        self.command(self.repo, "merge", "--ff-only", advanced)
+        with self.assertRaisesRegex(TaskError, "base advanced.*pinned published base"):
+            review("DEV-7")
+        with self.assertRaisesRegex(TaskError, "base advanced.*automatic rebase is forbidden"):
+            publish("DEV-7")
+        self.assertEqual(snapshot(self.path, self.base, self.branch), before)
+        self.assertFalse(self.operations("fetch"))
+        self.assertFalse(self.operations("commit-tree"))
+        self.assertEqual(len(self.operations("commit")), 1)
+        self.assertEqual(len(self.operations("push")), 1)
 
     def test_stale_or_missing_public_metadata_does_not_fall_back_to_task_title(self):
         self.prepare()
