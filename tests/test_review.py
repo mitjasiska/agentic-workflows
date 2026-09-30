@@ -1191,7 +1191,13 @@ class FakeReviewer:
         self.output = re.search(r"output-file write is (.*?)\. This temporary", execution.handoff).group(1)
         pass_id = re.search(r"Pass ID: ([^\n]+)", execution.handoff).group(1)
         if test.raw != "missing":
-            Path(self.output).write_text(test.raw if test.raw is not None else json.dumps(dict(verdict(pass_id), **test.verdict_overrides)))
+            result = dict(verdict(pass_id), **test.verdict_overrides)
+            metadata = json.loads(execution.handoff.split("RESOLVED REVIEW METADATA\n", 1)[1]
+                                  .split("\n\nLATEST LINEAR REQUIREMENTS", 1)[0])
+            frozen = metadata.get("frozen_publication")
+            if frozen is not None and result["state"] == "clean" and getattr(test, "approve_frozen_publication", True):
+                result.setdefault("publication_approval", frozen["fingerprint"])
+            Path(self.output).write_text(test.raw if test.raw is not None else json.dumps(result))
         if test.mutation:
             test.mutation()
         if execution.runtime_observer:

@@ -8,7 +8,8 @@ from . import TaskError
 ISSUE_QUERY = """
 query TaskIssue($id: String!) {
   issue(id: $id) {
-    id identifier title description
+    id identifier title description url
+    labels(first: 250) { nodes { name } pageInfo { hasNextPage } }
     project { id name }
     state { id name type }
     team { id states(first: 250) {
@@ -38,6 +39,8 @@ class Issue:
     in_progress_id: str
     description: str = ""
     state_type: str = ""
+    url: str = ""
+    labels: tuple[str, ...] = ()
 
 
 def text_field(value: dict, key: str) -> str:
@@ -103,9 +106,16 @@ class Linear:
                 description = ""
             if not isinstance(description, str):
                 raise ValueError("invalid description")
+            labels = issue.get("labels", {"nodes": [], "pageInfo": {"hasNextPage": False}})
+            if labels["pageInfo"]["hasNextPage"] is not False or not isinstance(labels["nodes"], list):
+                raise ValueError("incomplete labels")
+            names = tuple(text_field(label, "name") for label in labels["nodes"])
+            url = issue.get("url", "")
+            if not isinstance(url, str):
+                raise ValueError("invalid issue URL")
             return Issue(text_field(issue, "id"), identifier, text_field(issue, "title"),
                          text_field(issue["project"], "name"), state_id, state_name, progress[0], description,
-                         text_field(issue["state"], "type"))
+                         text_field(issue["state"], "type"), url, names)
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TaskError("Unexpected Linear issue response") from None
 

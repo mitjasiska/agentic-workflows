@@ -12,6 +12,7 @@ from .contexts import ContextRegistry, HerdrContexts, inspect_contexts, launch_r
 from .handoff import implementation_handoff
 from .linear import Linear
 from .review import review
+from .publish import publish
 from .workspace import Git, Herdr, branch_name, slice_slug
 
 
@@ -40,6 +41,8 @@ def parser() -> argparse.ArgumentParser:
     add_agent_options(review_command)
     review_command.add_argument("--json", action="store_true", help="Print the structured review result")
     review_command.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
+    pr_command = commands.add_parser("pr", help="Commit and publish the exact clean-reviewed task as a GitHub PR")
+    pr_command.add_argument("issue", type=issue_identifier)
     return result
 
 
@@ -223,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
                             model=args.model, mode=args.mode, timeout=args.timeout)
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
             return {"clean": 0, "findings": 2, "blocked": 3, "failed": 1}[result.state]
+        elif args.command == "pr":
+            print(publish(args.issue))
         else:
             print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
                         agent_kind=args.agent_kind, model=args.model, mode=args.mode))

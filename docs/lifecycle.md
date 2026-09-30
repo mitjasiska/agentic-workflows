@@ -9,6 +9,7 @@ Command behavior, invariants, and refusal/retry cases. Start with the
 - [Workspace reuse and slices](#workspace-lifecycle-and-slices)
 - [Failure and retry behavior](#failure-and-retry-behavior)
 - [Fresh review and exact resume](#task-review)
+- [Reviewed PR publishing](#task-pr)
 - [Cleanup and partial failures](#task-cleanup)
 
 ## Task start
@@ -225,7 +226,9 @@ edit task files, fix, stage, commit, push, merge, modify Linear, or change PRs.
 Their only output-file write is a private temporary JSON result outside the task
 checkout. The workflow waits for the same terminal/session to settle, validates a
 pass-specific nonce and strict result shape, then removes the temporary directory.
-No durable semantic report is stored. A blocked pass, timeout, or interruption leaves
+No general durable semantic report is stored; only the clean acceptance and
+bounded public publishing metadata described under [task pr](#task-pr) are retained.
+A blocked pass, timeout, or interruption leaves
 the pane intact. Context health and resumability are determined separately from the
 pass verdict using live pane/terminal/session identity and provider history. A verified
 reviewer remains resumable after a pause or tab move; release the pause before submitting
@@ -254,6 +257,254 @@ failure. Missing/malformed output cannot be clean; drift overrides any model ver
 Preflight errors stop before a pass exists and are reported on stderr. Findings,
 validation limitations, and stopped/blocked agents require human action; no fix loop
 or implementation resume is included.
+
+## Task pr
+
+```sh
+task pr DEV-20
+```
+
+Running this command authorizes commit, push, and PR creation/update without a
+confirmation prompt. It prints the verified PR URL and stops. Human inspection,
+approval, merge, and Linear completion remain separate. There are no commit-only
+or push-only commands. A failed stage leaves its completed predecessors available
+for verification and continuation on the next invocation.
+
+### Review acceptance and public metadata
+
+Publishing uses the same exact repository/worktree/branch/scope and open Herdr
+workspace/context resolver as review. It requires the active implementation
+mapping and the accepted reviewer's unchanged registry identity. The task must
+contain the pinned reviewed base. Publication requires the local and live remote
+base to match that review; an unpublished task can first take the rebase path
+below when the remote base has advanced.
+
+Review stores one current clean acceptance in
+`agentic-workflows-publication.json` in the task worktree's private Git directory,
+outside tracked files. It contains issue/repository/worktree/branch/base and
+Herdr identities, review context/pass, verdict, timestamp, reviewer settings and
+available session identity, the reviewed fingerprint, and bounded public
+publication prose (or explicit approval of the frozen publication metadata after
+rebase). It contains no full issue description, review findings, chat,
+credentials, or general run archive. Failed/blocked/findings results never create
+acceptance. Beginning another review explicitly revokes prior acceptance and
+publishing intent, including if that new pass is interrupted. Completed rebase
+provenance survives a new review only while its exact resulting Git state is
+unchanged. It authorizes commit reuse, never publication without fresh clean
+acceptance. Review and publish hold the same process lock, released automatically
+on process exit.
+
+The same private record keeps one branch publication fact, independently of
+review acceptance and intent. It binds the issue, checkout/branch, configured
+base and remote repository to an observed published SHA. A new review does not
+erase this evidence; it prevents automatic rebasing even if the remote branch
+and PR are later absent. This is a bounded safety record, not a run archive.
+
+The reviewer supplies public-safe summary, description, and validation prose from
+the actual reviewed implementation. This is metadata generation within the
+existing read-only review handoff; it cannot select Git/GitHub identities or
+perform publishing actions. After automatic rebase, the handoff instead asks the
+reviewer to validate the already-frozen title/body, as described below.
+`task pr` has no second model invocation and never
+falls back to copying a possibly stale task title or private review checks.
+Initial clean verdicts without publishing metadata require a new review.
+
+Exactly one canonical primary Linear category label resolves the type:
+`Feature` → `feat`, `Bug` → `fix`, `Chore` → `chore`, `Docs` → `docs`,
+`Refactor` → `refactor`. Other labels, including `Research`, do not select a type.
+Missing or conflicting categories refuse publication. Both commit subject and PR
+title use `<type>: <concise actual change> (DEV-20)`. The body contains `Summary`,
+`Tracking`, and `Validation`, with a stable linked Linear issue reference in
+`Tracking`. Only approved public prose is copied into it; private reviewer
+findings and task instructions are not used as a fallback. Public-safety judgment
+is supplied by the reviewer, not a deterministic secret-content classifier.
+
+### Mapping the reviewed state to a commit
+
+Before any commit, the full current fingerprint must equal the acceptance. This
+includes the exact original HEAD, index, flags, file contents/modes and untracked
+inventory. Publication includes final materialized tracked files and non-ignored
+new files, with deletions, executable modes and symlinks. For partially staged
+files, final working-copy content wins; staged-only intermediate versions are not
+separate changes to publish. All intended files must be present during review.
+Ignored untracked files remain excluded. Submodules and skip-worktree or
+assume-unchanged entries are refused in v1.
+
+A temporary index prepares Git's resulting tree. The tree's actual blob bytes,
+paths and modes must exactly represent the reviewed materialized files. Content-
+transforming clean filters (including LFS and line-ending conversion), ignored
+remnants of staged deletions, and modes that Git ignores are refused in v1. The
+real index stays untouched during preparation. The workflow atomically saves
+and fsyncs an intent containing the accepted pass, repository/remote identity,
+expected tree/index, title/body and exact commit message before invoking commit.
+The message includes a `Task-Review` pass-ID trailer. A separate materialized
+content digest, excluding absent deleted paths, connects pre-commit bytes/modes to
+post-commit bytes/modes. The resulting commit must have exactly the reviewed HEAD
+as its sole parent, the intended tree, and the intended message. The real index
+is then advanced only from its accepted entries to that proven tree. As soon as
+the workflow creates or selects a proven publication commit, it durably freezes
+that exact SHA in the intent before any further transport. All later checks,
+including retries, require local HEAD to equal this SHA; equivalent parent,
+tree and message are insufficient.
+
+An already committed reviewed change receives one publication commit (possibly
+an empty tree delta) to establish the generated subject and pass provenance. The exception is
+a proven rebased publishing commit: fresh review authorizes reuse of that exact
+commit. Its original trailer remains provenance; the new durable acceptance
+authorizes publication. A tree identical to the base is refused.
+
+The workflow rechecks content, exact commit SHA, and index before push,
+immediately after push (including failures), before PR writes, and before
+reporting the URL. Hooks retain their normal behavior, but a hook that changes
+the message/tree/content causes refusal before push. A pre-push hook that amends
+HEAD also causes refusal, even if only author or committer metadata changes:
+the remote may already contain the original frozen SHA while local HEAD differs.
+The command reports both SHAs and stops before creating or reporting a PR; retries
+continue to refuse the changed HEAD. Inspect local/remote history and the hook
+before deciding how to recover; the workflow never resets or force-pushes it.
+The lock serializes workflow commands, not editors or unrelated Git processes.
+Keep the checkout stable throughout publication; changes perfectly restored
+between observations cannot be detected.
+
+### Base advancement before first publication
+
+If the live base differs from the accepted base, any remote task branch or PR
+history prevents automatic rebasing, even if its SHA otherwise matches. Durable
+publication evidence also forbids rebasing after the remote ref is deleted;
+an uncertain prior push cannot be treated as proof of no publication. For an
+unpublished task, `pr` fetches only the configured base into `FETCH_HEAD`, using
+the verified task-worktree remote and native terminal authentication. Both the
+reviewed base and permanent checkout must be ancestors of the fetched base.
+The clean permanent checkout advances with a guarded fast-forward; divergent or
+local-only base history refuses the operation.
+
+Integration runs in a disposable repository sharing only Git objects, with its
+own refs, index and files. It replays linear implementation commits followed by
+the intended publication commit onto the new base. Probe hooks, signing and
+rerere are disabled; the probe never touches the real task branch/index/files.
+Checkout preparation also uses a private index: it loads the reviewed source
+tree, refreshes file metadata, and dry-runs the two-tree checkout against the
+actual files. Refreshing is necessary when upstream changes an existing tracked
+file; loading a tree alone does not establish that file's current stat data.
+Setup errors, checkout preflight failures, or rebase conflicts stop with the
+exact reviewed task index, files and HEAD unchanged. The permanent
+base may already have advanced. Task histories containing merge commits require
+manual rebasing in v1. Ignored files that would obstruct upstream paths also
+cause refusal; move them aside before retrying.
+
+After a clean probe, the workflow saves a bounded rebase journal and revokes the
+old acceptance before installing anything. The journal records source state,
+target base, expected commit trees/messages/authors, created commit IDs, the
+completed fingerprint, and the frozen publication title/body with their metadata
+fingerprint. This is one current continuation record, not a run
+archive. Real replacement commits preserve implementation authors and honor the
+task worktree's normal signing settings. No hooks can modify this precomputed
+chain. Before installation, remote refs/PR history and permanent/task identities
+are checked again. Checkout preparation is repeated in a private index, then the
+real Git index is locked and task state rechecked. Checkout updates files and the
+private index; only a successful checkout allows atomic replacement of the real
+index. The reviewed source tree is never staged into the real index as a setup
+step. A compare-and-swap branch update completes installation without running a
+rebase sequencer in the real task worktree.
+
+The command then stops with an explicit requirement for a new independent
+`task review`. It cannot push or create a PR in that invocation. A pending
+installation must finish through `task pr` before review; retries verify saved
+commit IDs and the allowed source/target checkout states. If files reached the
+planned target but index replacement was interrupted, the original index and
+HEAD must still match the source; retry installs the proven target index and
+reuses the same commits. Partial file updates or other drift that do not match a
+proven state require manual inspection.
+
+The fresh review explicitly receives that exact title/body and their fingerprint.
+It must validate their accuracy against the rebased result, including the linked
+issue, validation claims and public safety. A clean verdict must include a
+`publication_approval` matching that metadata fingerprint. Missing or mismatched
+approval cannot create clean acceptance; inaccurate or unsafe metadata calls for
+findings or a blocked review. Metadata drift observed during the pass invalidates
+it just as Git-visible drift does.
+
+The durable acceptance binds this approval to the new pass and reviewed Git
+fingerprint. `pr` checks it alongside the rebased commit provenance and reuses the
+frozen title/body on every continuation, including after commit/push/PR failures.
+It never regenerates them from the fresh reviewer's summary. The reviewer's own
+conclusion or optional replacement publication prose may use different wording;
+neither changes the frozen metadata. Older rebase records that did not retain the
+title/body cannot be reconstructed safely and require manual inspection.
+
+### Remote, PR and retry checks
+
+The configured base must track a same-named branch on one GitHub remote. Fetch
+and push destinations must each resolve to a single URL for the same repository;
+conflicting repositories or multiple destinations are refused. The effective
+remote is resolved with the task worktree's Git configuration, including worktree
+settings and conditional includes, and must match the permanent checkout's
+approved remote/repository identity. It is rechecked before each ref lookup,
+fetch and push. Transport uses that remote's name so Git expands URL rewrites
+once; an already-expanded URL is never passed back through Git's rewrite rules. Mirror
+remotes and remote groups are refused. Push uses an explicit commit SHA and task
+branch refspec, without force, tags or submodule pushes. Live `ls-remote` refs are
+authoritative; cached tracking refs and task branch push defaults are not used.
+
+Before the first push attempt, a pending marker is saved and fsynced. Observing
+the remote task ref records positive publication evidence; a verified successful
+push must save that evidence before continuing to GitHub. The first positive
+record is retained permanently for that branch's workflow state, including
+across fresh/failed reviews. Later commits or pushes do not downgrade it. If the
+push acknowledgement or confirmation write fails, the pending marker survives:
+retry can verify or push the same commit, but cannot automatically rebase after
+the remote ref disappears. Failed evidence writes stop publication. Legacy
+records with an existing intent but no push history are treated as uncertain,
+rather than assumed never published.
+
+Before pushing, the task branch may be absent, at the accepted pre-publication
+HEAD, or already at the proven publication commit. Anything else conflicts.
+After push it must equal the publication commit. All PR history for this exact
+repository/head participates: there must be no PR, or exactly one open, unmerged
+PR with the configured base and expected head SHA. A fork, another base, closed
+or merged history, multiple PRs, or changing responses refuse publication. The
+matching PR is reused and its title/body updated if necessary. The confirmed PR
+and remote SHA are checked before reporting its URL. Immediately before every
+PR POST/PATCH, after the preceding GitHub lookups, the workflow rechecks the
+effective destination and authoritative remote base/head SHAs against the frozen
+publishing state. Drift refuses the write. Local HEAD and reviewed contents are
+checked again after that native ref lookup. These checks cannot lock GitHub
+against unrelated changes between the final observation and the API write.
+GitHub owner/repository
+casing is equivalent, including in the reported PR URL. URL scheme, host, path,
+PR number, head/base branch names and head SHA remain strictly validated.
+
+| Interruption | Next `task pr` invocation |
+| --- | --- |
+| Before commit | Recheck acceptance and saved intent, then commit once. |
+| Commit completed, including a lost command acknowledgement | Require the frozen SHA if present; otherwise prove parent/tree/message/content and freeze the recovered SHA. Finish the index update if needed and reuse that commit. |
+| Push failed or its acknowledgement was lost | Inspect live refs; push only if the exact commit is absent. |
+| Published ref was deleted, or an uncertain push can no longer be observed | Retain publication evidence and forbid automatic rebase; inspect history manually. |
+| PR creation failed or its acknowledgement was lost | Enumerate all matching history first; reuse the unique matching PR or create if absent. |
+| Metadata update/reporting failed | Revalidate and reconcile the same PR, then report its URL. |
+| Unpublished base advanced | Probe integration, install only a conflict-free rebase, invalidate review and stop for a fresh independent pass. |
+| Rebase installation interrupted | Verify and reuse the saved replacement commits, finish only a provable checkout/ref transition, then require review. |
+| Fresh review after rebase | Require explicit approval of the frozen title/body for the reviewed state; reuse the exact rebased commit and metadata through push/PR. |
+| Files/index/history/identity conflicts, or base change after publication | Stop without force or repair; inspect the reported state. An explicit new review establishes a new contract after intentional changes. |
+
+Do not delete or edit acceptance/intent records to bypass refusal. Rerunning `pr`
+continues a frozen contract, while explicitly running `review` starts a new one.
+Neither a fresh review nor deletion of a remote ref clears publication history.
+
+### Authentication and signing
+
+The REST API uses `GH_TOKEN` or `GITHUB_TOKEN`; see
+[GitHub publishing configuration](configuration.md#github-publishing).
+Commit/push/fetch inherit stdin, stdout and stderr. Ref lookup and rebased commit
+creation read only protocol stdout (refs or an object ID) and inherit stdin/stderr.
+Git's SSH/GPG/credential tools retain the caller's console and controlling
+terminal; the workflow never reads passphrase
+input, captures prompts, or writes secrets into artifacts.
+Native failures and a five-minute operation timeout produce an actionable error
+without echoing captured command output. Normal Git signing and authentication
+configuration stays in effect. Non-interactive callers must provide already
+usable credentials/signing access or handle a native failure; the workflow never
+supplies credentials to a prompt or weakens authentication.
 
 ## Task cleanup
 

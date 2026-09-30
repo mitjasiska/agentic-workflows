@@ -162,3 +162,28 @@ This is deliberately a small Codex-only setup. Pi enforcement, cross-agent
 capability mapping, stronger credential isolation, containers or external
 sandboxing, a dedicated review profile, generalized command rules, and a broader
 security framework remain out of scope.
+
+## GitHub publishing
+
+`task pr` requires `GH_TOKEN` or `GITHUB_TOKEN` in the invoking environment, with
+access to the repository and permission to read/create/update pull requests.
+Fine-grained tokens need repository **Pull requests: write** (which includes
+read); Git transport separately needs push access through the user's configured
+SSH key or HTTPS credential helper. The workflow does not require `gh` or copy
+API tokens into Git command arguments. Keep tokens out of tracked configuration.
+
+The configured base must track a same-named remote branch on `github.com`. Fetch
+and push URLs must each identify a single destination in the same repository.
+The task worktree's effective Git configuration must resolve to the permanent
+checkout's approved remote/repository. Worktree-specific URL rewrites or
+conditional includes that redirect it are refused, as are mirror remotes and
+remote groups. Cross-repository/fork publication is not supported. Existing Git
+hooks, commit signing, credential helpers, SSH configuration, and terminal
+environment (including
+`GPG_TTY` when required by the user's signing setup) remain under user control.
+Run from your normal terminal for interactive passphrases. `task pr` does not
+choose an execution agent or need agent CLI authentication; its public prose was
+already generated during the accepted independent review.
+
+See [publishing lifecycle and retries](lifecycle.md#task-pr) for the frozen review
+contract and conservative refusal rules.

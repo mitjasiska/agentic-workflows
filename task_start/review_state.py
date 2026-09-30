@@ -15,6 +15,33 @@ def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def content_digest(files):
+    return digest(json.dumps(files, ensure_ascii=True, separators=(",", ":")).encode())
+
+
+def tree_content(path: Path, tree: str) -> str:
+    """Hash actual Git blob bytes/modes, bypassing clean/smudge/textconv filters.
+
+    Comparing this with reviewed materialized content refuses transformations or
+    omitted ignored remnants that would publish bytes/modes the reviewer did not
+    inspect. This v1 deliberately requires a lossless worktree-to-tree mapping.
+    """
+    git, files = Git(path), []
+    for entry in git.command("ls-tree", "-r", "-z", tree).split("\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        if kind != "blob" or mode not in {"120000", "100644", "100755"}:
+            raise TaskError("Reviewed file type cannot be represented by the publishing tree")
+        blob = os.fsencode(git.command("cat-file", "blob", oid))
+        if mode == "120000":
+            files.append([name, "symlink", os.fsdecode(blob)])
+        else:
+            files.append([name, "executable" if mode == "100755" else "file", digest(blob)])
+    return content_digest(sorted(files))
+
+
 @dataclass(frozen=True)
 class ReviewState:
     base_commit: str
@@ -22,7 +49,8 @@ class ReviewState:
     branch: str
     index: str
     fingerprint: str
-    version: int = 1
+    content: str
+    version: int = 2
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -114,7 +142,11 @@ def _snapshot(path: Path, base_commit: str, branch: str) -> ReviewState:
         else:
             raise TaskError(f"Unsupported Git-visible file type during review: {name!r}")
     status = command("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
-    value = dict(version=1, base_commit=base_commit, head=head, branch=actual_branch,
+    value = dict(version=2, base_commit=base_commit, head=head, branch=actual_branch,
                  index=index, flags=flags, status=status, files=files)
     fingerprint = digest(json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode())
-    return ReviewState(base_commit, head, branch, digest(os.fsencode(index)), fingerprint)
+    # Unlike the full fingerprint, this identity survives staging and committing.
+    # Deleted paths/directories have no materialized content in the resulting tree.
+    materialized = [f for f in files if f[1] not in {"missing", "directory replacing deleted file"}]
+    content = content_digest(materialized)
+    return ReviewState(base_commit, head, branch, digest(os.fsencode(index)), fingerprint, content)
