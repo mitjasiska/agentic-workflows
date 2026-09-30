@@ -43,7 +43,13 @@ The repository entry point is [`task`](../task), with command orchestration in
 [`contexts.py`](../task_start/contexts.py) for context allocation and inspection,
 and [`review.py`](../task_start/review.py) for review passes. Review snapshots and
 result validation live in [`review_state.py`](../task_start/review_state.py) and
-[`review_result.py`](../task_start/review_result.py). External API boundaries are
+[`review_result.py`](../task_start/review_result.py). Reviewed publishing stages
+live in [`publish.py`](../task_start/publish.py),
+with disposable integration and unpublished commit installation in
+[`publication_rebase.py`](../task_start/publication_rebase.py),
+and private acceptance/intent persistence in
+[`publication_state.py`](../task_start/publication_state.py). See the
+[publishing contract](lifecycle.md#task-pr). External API boundaries are
 [`linear.py`](../task_start/linear.py) and [`github.py`](../task_start/github.py).
 
 ## Handoff transport
@@ -162,7 +168,8 @@ later handoff failures. Subsequent observations must match the established sessi
 reporting provenance such as `source` is retained separately and is not identity.
 Review passes use `reviewing` while one caller owns that reviewer; an atomic registry
 claim prevents concurrent follow-ups in the same conversation. Clean, findings,
-blocked, and failed verdicts are transient results, not registry lifecycle states.
+blocked, and failed verdicts are not registry lifecycle states. Clean acceptance
+is retained separately in private worktree Git metadata for publication.
 A failed fresh review launch retains the `uncertain` allocation and any identity
 already observed by the adapter. It does not run reviewer finalization against a
 possibly unestablished runtime or append a secondary missing-identity error to the

@@ -2,8 +2,11 @@
 
 import json
 from dataclasses import dataclass
+from http.client import HTTPException, InvalidURL
 import os
 import re
+import socket
+import ssl
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -34,20 +37,178 @@ def repository_name(remote: str) -> str | None:
     return path if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path) else None
 
 
-def request(path: str, branch: str):
+def api_credential(*, required=False):
+    """Use the caller's selected API credential, independently of Git/gh auth."""
+    for source in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(source)
+        if token:
+            if any(not 33 <= ord(char) <= 126 for char in token):
+                raise TaskError(f"GitHub API credential {source} contains whitespace, control, or non-ASCII characters; "
+                                "correct that environment variable without printing its value")
+            return source, token
+    if required:
+        raise TaskError("GitHub API authentication is missing: task pr requires GH_TOKEN or GITHUB_TOKEN "
+                        "with repository Pull requests: write access; Git SSH credentials and gh login are separate")
+    return "unauthenticated", None
+
+
+def http_failure(error, *, writing):
+    """Classify bounded evidence; never echo response text, headers, or URLs."""
+    permission = "Pull requests: write" if writing else "Pull requests: read"
+    headers = error.headers or {}
+    try:
+        payload = json.loads(error.read(16384))
+    except (OSError, HTTPException, ValueError):
+        payload = None
+    finally:
+        error.close()
+    message = payload.get("message") if isinstance(payload, dict) else None
+    message = message if isinstance(message, str) else ""
+    code = error.code if type(error.code) is int and 100 <= error.code <= 599 else "unknown"
+    if code == 429 or (code in (403, 422) and (
+            headers.get("X-RateLimit-Remaining") == "0" or headers.get("Retry-After")
+            or message.startswith(("API rate limit exceeded", "You have exceeded a secondary rate limit",
+                                   "You have triggered an abuse detection mechanism")))):
+        detail = "rate limit exceeded; wait for the API limit to recover before retrying"
+    elif code == 401:
+        detail = "authentication rejected; check the selected token's validity, expiration, and revocation"
+    elif code == 403:
+        if str(headers.get("X-GitHub-SSO", "")).startswith("required"):
+            detail = "SSO authorization required; authorize the selected token for the repository's organization"
+        elif message in ("Resource not accessible by personal access token", "Resource not accessible by integration"):
+            detail = f"insufficient token permissions; grant the selected token access to this repository and {permission}"
+        else:
+            detail = (f"forbidden; check the selected token's repository access, {permission}, "
+                      "and organization or GitHub Actions restrictions")
+    elif code == 404:
+        detail = "repository or endpoint unavailable; verify repository identity and the selected token's repository access"
+    elif code == 422:
+        detail = "request validation failed; inspect the PR head/base, title/body, and commits between the branches"
+        # GitHub validation messages may repeat private input. Only known field
+        # names and error codes can cross the diagnostic boundary.
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        fields = set()
+        for item in errors[:20] if isinstance(errors, list) else []:
+            if not isinstance(item, dict):
+                continue
+            field, reason = item.get("field"), item.get("code")
+            if (field in ("head", "base", "title", "body", "draft", "maintainer_can_modify")
+                    and reason in ("missing", "missing_field", "invalid", "already_exists", "unprocessable")):
+                fields.add(f"{field}: {reason}")
+            text = item.get("message")
+            if isinstance(text, str) and text.startswith("A pull request already exists"):
+                detail = "a PR already exists for this head; discover and verify the matching PR on retry"
+            elif isinstance(text, str) and text.startswith("No commits between"):
+                detail = "no commits between the PR base and head; inspect the branch comparison"
+        if fields:
+            detail += " (" + ", ".join(sorted(fields)) + ")"
+    elif code in (400, 405, 415):
+        detail = "malformed or unsupported API request; inspect the request fields, method, content type, and API version"
+    elif code == 409:
+        detail = "repository state conflict; inspect the current head/base and PR state before retrying"
+    elif isinstance(code, int) and code >= 500:
+        detail = "GitHub service failure; check API availability before retrying"
+    else:
+        detail = "unexpected API response; inspect API availability, repository access, and request configuration"
+    return f"HTTP {code}: {detail}"
+
+
+def transport_failure(error):
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "TLS certificate verification failed; check the system CA trust and proxy configuration"
+    if isinstance(reason, ssl.SSLError):
+        return "TLS connection failed; check the network, proxy, and TLS configuration"
+    if isinstance(reason, socket.gaierror):
+        return "DNS lookup failed; check network/DNS access to api.github.com"
+    if isinstance(reason, TimeoutError):
+        return "API request timed out; check network/proxy access to api.github.com"
+    if isinstance(reason, InvalidURL):
+        return "invalid API request configuration; inspect the repository/endpoint parameters"
+    return "API connection or response transport failed; check network/proxy access to api.github.com"
+
+
+def request(path: str, branch: str, *, method: str = "GET", data: dict | None = None):
+    source, token = api_credential(required=method != "GET")
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "agentic-workflows",
                "X-GitHub-Api-Version": "2022-11-28"}
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = Request(f"https://api.github.com/repos/{path}", headers=headers)
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        request = Request(f"https://api.github.com/repos/{path}", headers=headers, method=method,
+                          data=json.dumps(data).encode() if data is not None else None)
+    except (ValueError, TypeError):
+        raise TaskError("Cannot prepare GitHub API request; inspect the repository/endpoint and JSON request fields") from None
+    received = False
     try:
         with urlopen(request, timeout=30) as response:
+            received = True
             return json.load(response)
-    except (HTTPError, URLError, OSError, ValueError):
-        raise TaskError(f"Cannot establish GitHub PR history for {branch}; check network/API access "
-                        "(GH_TOKEN or GITHUB_TOKEN for private repositories or rate limits) "
-                        "and inspect its PR/merge state before retrying. Workspace left intact.") from None
+    except HTTPError as error:
+        cause = http_failure(error, writing=method != "GET")
+    except (URLError, OSError, HTTPException) as error:
+        cause = transport_failure(error)
+    except ValueError:
+        cause = ("malformed JSON API response; check GitHub/proxy response handling" if received else
+                 "invalid API request encoding; inspect request and credential configuration")
+    if method != "GET":
+        raise TaskError(f"GitHub PR write was not confirmed ({source}): {cause}. "
+                        "A write may already have reached GitHub; rerun task pr to discover and reuse "
+                        "any matching PR before another write") from None
+    authentication = ("Set GH_TOKEN or GITHUB_TOKEN for authenticated API access. " if token is None else "")
+    raise TaskError(f"Cannot establish GitHub PR history for {branch} ({source}): {cause}. "
+                    f"{authentication}Inspect its PR/merge state before retrying. Workspace left intact.") from None
+
+
+def publication_pull(repo: str, branch: str, base: str, heads: set[str]):
+    """All history participates: a closed, different-base, or second PR conflicts."""
+    pulls = list(pull_requests(repo, branch))
+    if len(pulls) > 1:
+        raise TaskError("Ambiguous PR history: multiple PRs use the task head; inspect them before retrying")
+    if not pulls:
+        return None
+    listed = pulls[0]
+    pull = request(f"{repo}/pulls/{listed['number']}", branch)
+    for item in (listed, pull):
+        validate_pull(item, repo, branch)
+        try:
+            url = re.fullmatch(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)",
+                               item["html_url"])
+            if (item["base"]["ref"] != base or item["head"]["sha"] not in heads
+                    or item["state"] != "open" or item["merged_at"] is not None
+                    or item.get("merged", False) is not False
+                    or item["number"] != listed["number"]
+                    or url is None or url[1].casefold() != repo.casefold()
+                    or url[2] != str(item["number"])):
+                raise ValueError("conflicting PR")
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Conflicting PR repository/head/base/state; inspect it before retrying task pr") from None
+    if pull["head"]["sha"] != listed["head"]["sha"]:
+        raise TaskError("PR head changed during verification; retry after inspecting remote state")
+    return pull
+
+
+def publish_pull(repo: str, branch: str, base: str, head: str, title: str, body: str, *, verify_local, before_write):
+    pull = publication_pull(repo, branch, base, {head})
+    # Lifecycle owns the frozen local SHA and reviewed-state checks. Recheck
+    # after network lookups, immediately before any PR write and URL reporting.
+    verify_local()
+    if pull is None:
+        # An uncertain POST is never replayed here. The next invocation enumerates
+        # authoritative history first and reuses the unique matching result.
+        before_write()
+        request(f"{repo}/pulls", branch, method="POST",
+                data=dict(head=branch, base=base, title=title, body=body, draft=False))
+    elif pull.get("title") != title or pull.get("body") != body:
+        before_write()
+        request(f"{repo}/pulls/{pull['number']}", branch, method="PATCH", data=dict(title=title, body=body))
+    verified = publication_pull(repo, branch, base, {head})
+    if verified is None or verified.get("title") != title or verified.get("body") != body:
+        raise TaskError("GitHub has not confirmed the expected PR metadata; rerun task pr to verify/reuse it")
+    verify_local()
+    return verified["html_url"]
 
 
 def validate_pull(pull: dict, repo: str, branch: str) -> None:

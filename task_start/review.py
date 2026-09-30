@@ -11,12 +11,14 @@ from uuid import uuid4
 from . import TaskError
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
-from .contexts import ContextRegistry, HerdrContexts, context_observer, context_reference, launch_registered, reconcile
+from .contexts import now, ContextRegistry, HerdrContexts, context_observer, context_reference, launch_registered, reconcile
 from .handoff import review_handoff
 from .linear import Linear
-from .review_result import ReviewResult, parse_verdict
+from .review_result import ReviewResult, parse_verdict, publication_fingerprint
+from .publication_rebase import validate_commits, validate_record
+from .publication_state import PublicationStore
 from .review_state import snapshot
-from .sessions import SessionInvalid, has_immutable_identity, same_session
+from .sessions import SessionInvalid, has_immutable_identity, merge_session, same_session
 from .workspace import Git, Herdr, Workspace
 
 
@@ -161,6 +163,13 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     repo = repository_path(local, project)
     registry, identities = ContextRegistry(), HerdrContexts()
     workspace, anchor, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities)
+    with PublicationStore(workspace.path).locked() as store:
+        return review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
+                           local, resume, agent_kind, model, mode, timeout, store)
+
+
+def review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
+                local, resume, agent_kind, model, mode, timeout, store):
     context, pane = (resolve_reviewer(resume, issue, workspace, repo, endpoint, registry, identities)
                      if resume is not None else (None, None))
     options = (AgentOptions(context["agent"], context["model"], context["mode"]) if context else
@@ -173,7 +182,27 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     reference = context_reference(context) if context else None
     if context:
         reference = adapter.verify_review_session(workspace, reference)
+    saved = store.read()
+    if saved["rebase"] is not None and saved["rebase"].get("result") is None:
+        raise TaskError("Unpublished rebase is pending; rerun task pr to finish it before starting independent review")
+    # Starting another pass revokes earlier acceptance, including if interrupted.
+    saved["acceptance"] = None
+    saved["intent"] = None
+    store.write(saved)
     before = snapshot(workspace.path, base, workspace.branch)
+    frozen, frozen_fingerprint = None, None
+    if saved["rebase"] is not None:
+        # Exact completed integration provenance survives a fresh/failed review,
+        # but intentional implementation edits establish a new contract.
+        if saved["rebase"]["result"] != before.as_dict():
+            saved["rebase"] = None
+            store.write(saved)
+        else:
+            validate_record(saved["rebase"])
+            if validate_commits(Git(workspace.path), saved["rebase"]) != before.head:
+                raise TaskError("Rebased commit provenance differs from the current review state; inspect it before review")
+            frozen = dict(saved["rebase"]["publication"])
+            frozen_fingerprint = publication_fingerprint(frozen)
     pass_id, pass_kind = str(uuid4()), "resumed" if resume is not None else "fresh"
     context_id, verdict, invalidated, post = resume, None, False, None
     state, summary, claimed = "failed", "Reviewer did not complete", False
@@ -185,6 +214,8 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
         try:
             post = snapshot(workspace.path, base, workspace.branch)
             invalidated |= post != before
+            if frozen is not None:
+                invalidated |= store.read()["rebase"] != saved["rebase"]
         except TaskError:
             post = None
             invalidated = True
@@ -202,7 +233,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
                 context_id = allocated
                 claimed = True
                 return review_handoff(issue, repo, workspace, project.base_branch, before,
-                                      context_id, pass_kind, options, pass_id, output)
+                                      context_id, pass_kind, options, pass_id, output, frozen_publication=frozen)
 
             if context:
                 registry.claim_review(context)
@@ -278,7 +309,8 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
                 if status in {"idle", "done"} and output.exists():
                     if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                         raise TaskError("Invalid reviewer result file")
-                    verdict = parse_verdict(output.read_text(encoding="utf-8"), pass_id)
+                    verdict = parse_verdict(output.read_text(encoding="utf-8"), pass_id,
+                                            frozen_fingerprint=frozen_fingerprint, identifier=issue.identifier)
                     state, summary = verdict["state"], verdict["summary"]
                     break
                 # Herdr may infer idle from process/title detection even while Pi
@@ -309,9 +341,20 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
             invalidated = True
         checkpoint()  # Last observation immediately before accepting the result.
     if invalidated:
-        state, summary = "blocked", ("Implementation changed during review or its state could not be verified. "
+        state, summary = "blocked", ("Implementation changed during review, its state could not be verified, or frozen publication metadata changed. "
                                      "This pass is invalidated; a new pass is required. "
                                      "Reviewer-caused task changes also violate read-only review policy.")
+    if state == "clean":
+        saved["acceptance"] = dict(version=1, issue=issue.identifier, repository=str(repo),
+            worktree=str(workspace.path), branch=workspace.branch, workspace_id=workspace.workspace_id,
+            endpoint=endpoint, base_branch=project.base_branch, context_id=context_id,
+            pass_id=pass_id, pass_kind=pass_kind, verdict="clean", completed_at=now(),
+            review_state=before.as_dict(), execution=asdict(options),
+            session=merge_session(None, context_reference(registry.get(context_id)), options.kind),
+            publication=verdict.get("publication") if frozen is None else None)
+        if frozen is not None:
+            saved["acceptance"]["publication_approval"] = verdict["publication_approval"]
+        store.write(saved)
     return ReviewResult(state, summary, context_id, pass_kind, asdict(options), before.as_dict(), pass_id,
                         verdict["findings"] if verdict else [], verdict["checks"] if verdict else [],
                         invalidated, post.fingerprint if post else None)

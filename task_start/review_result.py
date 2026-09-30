@@ -1,9 +1,50 @@
 """Validated model verdict plus workflow-owned provenance; no durable reports."""
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
+import re
 
 from . import TaskError
+
+
+def publication_summary_limit(identifier):
+    # Reserve the longest supported type and the workflow-owned issue suffix.
+    # The reviewer supplies prose only and never needs to choose that type.
+    return 72 - len(f"refactor:  ({identifier})")
+
+
+def publication_metadata(value, *, identifier=None):
+    """Only public prose crosses the semantic boundary; never Git instructions."""
+    if not isinstance(value, dict) or set(value) != {"summary", "description", "validation"}:
+        raise TaskError("Review publication metadata requires summary, description, and validation")
+    for key, limit in (("summary", 100), ("description", 2000), ("validation", 2000)):
+        item = value[key]
+        if (not isinstance(item, str) or not item.strip() or item != item.strip() or len(item) > limit
+                or any(not c.isprintable() and c != "\n" for c in item)
+                or any(line.lstrip().startswith("#") for line in item.splitlines())):
+            raise TaskError("Invalid public review publication metadata")
+    if "\n" in value["summary"]:
+        raise TaskError("Publication summary must be a single line")
+    if identifier is not None:
+        summary = value["summary"]
+        limit = publication_summary_limit(identifier)
+        if (len(summary) > limit or re.fullmatch(r"[a-z]+(?:-[a-z]+)* .+", summary) is None
+                or " ".join(summary.split()) != summary or summary.endswith((".", "!", "?"))
+                or re.search(r"\([A-Z][A-Z0-9]*-[0-9]+\)$", summary)):
+            raise TaskError(f"Publication summary must be a concise lower-case action phrase of at most {limit} characters, "
+                            "without a type prefix, issue suffix, or sentence punctuation; run task review again")
+    return value
+
+
+def publication_fingerprint(value):
+    """Identity of workflow-generated title/body, separately approved on rebase."""
+    if (not isinstance(value, dict) or set(value) != {"title", "body"}
+            or any(not isinstance(value[k], str) or not value[k].strip()
+                   or any(not c.isprintable() and c != "\n" for c in value[k]) for k in value)
+            or "\n" in value["title"]):
+        raise TaskError("Missing or invalid frozen publication metadata; inspect rebase provenance before retrying")
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def unique_object(pairs):
@@ -15,11 +56,14 @@ def unique_object(pairs):
     return result
 
 
-def parse_verdict(raw: str, pass_id: str) -> dict:
+def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = None, identifier=None) -> dict:
     try:
         value = json.loads(raw, object_pairs_hook=unique_object)
-        if (not isinstance(value, dict)
-                or set(value) != {"pass_id", "state", "summary", "findings", "checks"}
+        # Initial publishing requires public prose; a rebased continuation needs
+        # explicit approval of frozen metadata instead. Review-only stays valid.
+        required = {"pass_id", "state", "summary", "findings", "checks"}
+        if (not isinstance(value, dict) or not required <= set(value)
+                or set(value) - required - {"publication", "publication_approval"}
                 or value["pass_id"] != pass_id
                 or value["state"] not in {"clean", "findings", "blocked", "failed"}
                 or not isinstance(value["summary"], str) or not value["summary"].strip()):
@@ -43,6 +87,16 @@ def parse_verdict(raw: str, pass_id: str) -> dict:
                 any(c["result"] == "failed" for c in value["checks"])))
                 or (value["state"] == "findings" and not value["findings"])):
             raise ValueError("inconsistent verdict")
+        if "publication" in value:
+            # Frozen continuation validates existing metadata, never regenerates
+            # it. Optional replacement prose must not apply a new title policy
+            # retroactively to a previously accepted publishing contract.
+            publication_metadata(value["publication"], identifier=identifier if frozen_fingerprint is None else None)
+        if "publication_approval" in value and (frozen_fingerprint is None
+                or value["publication_approval"] != frozen_fingerprint):
+            raise TaskError("Review approval does not match the frozen publication metadata; a new review is required")
+        if frozen_fingerprint is not None and value["state"] == "clean" and value.get("publication_approval") != frozen_fingerprint:
+            raise TaskError("Clean review must explicitly approve the frozen publication metadata; a new review is required")
         return value
     except (ValueError, TypeError, KeyError, RecursionError):
         raise TaskError("Malformed, missing, or ambiguous reviewer output; review cannot be accepted as clean") from None

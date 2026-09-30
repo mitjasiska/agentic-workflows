@@ -1,8 +1,8 @@
 # Agentic Workflows
 
 Agentic Workflows helps you take a development task from a Linear issue to an
-agent implementation, independent review, and workspace cleanup. It combines a
-task-creation skill with a `task` command that coordinates your repositories,
+agent implementation, independent review, PR publication, and workspace cleanup.
+It combines a task-creation skill with a `task` command that coordinates your repositories,
 Git worktrees, and interactive coding agents in Herdr.
 
 You choose the task and scope, the workflow prepares the checkout and hands over
@@ -22,7 +22,7 @@ implementation.
 | Review pass | A review of the current checkout against the local base. A fresh pass starts an independent conversation; an explicit resume keeps a particular reviewer's history. |
 
 The normal path is: prepare an issue, start implementation, review the result,
-address any findings, then complete your usual commit/PR/merge process and clean
+address any findings, publish with `task pr`, inspect and merge the PR, then clean
 up. Implementation stops ready for review. Review reports findings without
 applying fixes. You own scope, follow-up fixes, publication, and marking the
 Linear issue complete; there is no automatic fix or merge loop.
@@ -168,9 +168,39 @@ whether a conversation can be resumed. `--all` includes retired history. It does
 not contact Linear or load workflow configuration. An `unknown` or stale entry
 needs inspection; listing it does not repair or resume it.
 
+### Publish the reviewed result
+
+```sh
+task pr DEV-7
+```
+
+This command authorizes committing the exact clean-reviewed task state, pushing
+its branch, and creating or updating the matching GitHub PR. It prints the PR URL
+and stops for your inspection. It never merges, approves, or completes the issue.
+Keep the task workspace open and unchanged after review. Run review again if the
+files, index, or task history have changed. If the remote base advances before
+first publication, `pr` checks the rebase in disposable Git state. A conflict
+leaves your task unchanged; a clean rebase updates it and stops for a fresh
+independent review of the rebased result and preserved PR title/body. After that
+review, rerun `pr` to publish the same rebased commit with that metadata.
+Already published branches are never automatically rebased.
+
+The commit subject and PR title use `<type>: <summary> (DEV-7)`. The type comes
+from one canonical Linear category label; the reviewer supplies a public-safe
+summary of the actual implemented result and observed validation. Titles use a
+concise lower-case action summary, preserving names and acronyms, for example
+`feat: add reviewed task PR publishing (DEV-18)`. Configure
+`GH_TOKEN` or `GITHUB_TOKEN` with pull-request access, and keep your normal Git
+push authentication/signing setup. Native passphrase prompts stay in your terminal.
+
+Rerun the same command after a failure: it verifies and reuses completed commits,
+pushes, and PRs. Conflicting state stops for inspection. See the
+[publishing reference](docs/lifecycle.md#task-pr) for the exact review contract,
+credentials, supported states, and recovery guidance.
+
 ### Finish and clean up
 
-After your normal commit/PR/merge process, mark the Linear issue completed and
+After inspecting and merging the PR, mark the Linear issue completed and
 ensure the merge is present in the configured local base. Exit the task's
 agent/shell sessions and run cleanup from outside its workspace:
 
@@ -191,7 +221,7 @@ Read the reported state and inspect the named pane before retrying: an agent or
 prompt may already have started. A handoff failure leaves the workspace and
 Linear's `In Progress` status intact. Authentication or repository trust may need
 action in the agent's pane. Do not run simultaneous starts for the same repository
-or modify a workspace during review or cleanup. The
+or modify a workspace during review, publication, or cleanup. The
 [failure and retry reference](docs/lifecycle.md#failure-and-retry-behavior)
 explains which portions may already have completed.
 
