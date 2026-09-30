@@ -386,9 +386,11 @@ between observations cannot be detected.
 
 ### Follow-up publication
 
-After publication completes, implement feedback in the same task checkout,
-leaving HEAD at the latest published SHA. Staged, unstaged and new files can all
-participate. Run a new independent `task review`, then `task pr`. Each cycle
+After a task PR is published, keep additional task edits uncommitted in the same
+checkout until they pass a fresh independent `task review`. Then run `task pr`
+to append one new publishing commit to the existing branch and reuse the same PR.
+Already-published commits are never rewritten. Staged, unstaged and new files can
+all participate. Each cycle
 creates exactly one commit with the previous published commit as its sole parent,
 the exact newly reviewed tree, and its own `Task-Review` pass trailer. A review
 without new materialized changes cannot create an empty follow-up commit.
