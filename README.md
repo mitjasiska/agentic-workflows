@@ -42,7 +42,14 @@ Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
    `projects_root`, your Linear personal API key, and your `[agent]` selection.
    Keep this populated file private. The key needs issue/project/team-status
    read access and permission to update issues.
-4. Add this repository to `PATH`, then start a task:
+4. For GitHub API access (`task pr` and PR-history checks), follow the
+   [persistent token setup](docs/configuration.md#persistent-github-token-on-posix).
+   Use [`config/secrets.example.env`](config/secrets.example.env) as the placeholder
+   template.
+   Store `GH_TOKEN` in `~/.agentic-workflows/secrets.env` with mode `600`, and
+   source that file from `~/.bashrc`. Reload it in existing shells after token
+   changes. Git push still uses your separate SSH/HTTPS authentication.
+5. Add this repository to `PATH`, then start a task:
 
    ```sh
    export PATH="/absolute/path/to/agentic-workflows:$PATH"
@@ -189,9 +196,10 @@ The commit subject and PR title use `<type>: <summary> (DEV-7)`. The type comes
 from one canonical Linear category label; the reviewer supplies a public-safe
 summary of the actual implemented result and observed validation. Titles use a
 concise lower-case action summary, preserving names and acronyms, for example
-`feat: add reviewed task PR publishing (DEV-18)`. Configure
-`GH_TOKEN` or `GITHUB_TOKEN` with pull-request access, and keep your normal Git
-push authentication/signing setup. Native passphrase prompts stay in your terminal.
+`feat: add reviewed task PR publishing (DEV-18)`. The
+[GitHub API setup](docs/configuration.md#github-publishing) covers token permissions
+and safe verification. Keep your normal Git push authentication/signing setup;
+native passphrase prompts stay in your terminal.
 
 Rerun the same command after a failure: it verifies and reuses completed commits,
 pushes, and PRs. Conflicting state stops for inspection. See the

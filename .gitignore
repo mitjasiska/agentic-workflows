@@ -1,2 +1,5 @@
 __pycache__/
 *.py[cod]
+
+# Defensive guard for accidental repository-local shell secrets.
+secrets.env

@@ -2,8 +2,8 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md)
 
-Installation, project mapping, agent selection, and repository permission profiles
-for the `task` CLI.
+Installation, project mapping, agent selection, repository permission profiles,
+and GitHub API credentials for the `task` CLI.
 
 ## Installation and project mapping
 
@@ -39,8 +39,10 @@ is not included yet.
 
 Portable project metadata is committed in
 [`config/projects.toml`](../config/projects.toml). Match `linear_project` exactly to the
-Linear project name and set `repo_name` and `base_branch`. Machine-specific paths and
-credentials live only in `~/.agentic-workflows/config.toml`:
+Linear project name and set `repo_name` and `base_branch`. Machine-specific paths
+and the Linear API key live in `~/.agentic-workflows/config.toml`; shell-exported
+GitHub credentials use the [private secrets file](#persistent-github-token-on-posix)
+described below:
 
 ```toml
 projects_root = "~/projects" # Or "C:/development/projects" on Windows
@@ -167,19 +169,140 @@ security framework remain out of scope.
 
 `task pr` requires `GH_TOKEN` or `GITHUB_TOKEN` in the invoking environment, with
 access to the repository and permission to read/create/update pull requests.
-Fine-grained tokens need repository **Pull requests: write** (which includes
-read); Git transport separately needs push access through the user's configured
-SSH key or HTTPS credential helper. The workflow does not require `gh` or copy
-API tokens into Git command arguments. Keep tokens out of tracked configuration.
+For a fine-grained personal access token, select the resource owner and only the
+repositories you use, then grant repository **Pull requests: Read and write**
+(`Pull requests: write` in API diagnostics). PR-history checks during workspace
+reuse and cleanup need **Pull requests: read**, included in that write access.
+These permissions match GitHub's [pull request endpoints](https://docs.github.com/en/rest/pulls/pulls).
+Leave other optional permissions unselected; keep GitHub's automatic Metadata
+read access. The current workflow does not need repository **Contents: write**
+on this API token: it pushes through Git and does not merge PRs through the API.
+
+Git transport separately needs push access through the user's configured SSH key
+or HTTPS credential helper. The workflow does not require `gh` or copy API tokens
+into Git command arguments.
+
+### Persistent GitHub token on POSIX
+
+For Aquila-style Bash environments, keep shell-exported workflow secrets in
+`~/.agentic-workflows/secrets.env`, outside every repository. The existing
+`~/.agentic-workflows/config.toml` remains the home for the Linear key and workflow
+settings; no credential migration is needed there. The CLI reads environment
+variables and does not load `secrets.env` itself.
+
+Create the private directory and file without truncating an existing file. The
+subshell keeps the restrictive creation mask local to these commands:
+
+```sh
+(
+    umask 077
+    mkdir -p "$HOME/.agentic-workflows"
+    chmod 700 "$HOME/.agentic-workflows"
+    touch "$HOME/.agentic-workflows/secrets.env"
+    chmod 600 "$HOME/.agentic-workflows/secrets.env"
+)
+```
+
+In a trusted local editor, add or replace the `GH_TOKEN` export in that file,
+using [`config/secrets.example.env`](../config/secrets.example.env) as the template.
+This is placeholder-only file content; replace the placeholder privately in the
+editor, never by entering a real token in a shell command or chat:
+
+```sh
+export GH_TOKEN='REPLACE_WITH_YOUR_FINE_GRAINED_TOKEN'
+```
+
+Remove old hard-coded `GH_TOKEN`/`GITHUB_TOKEN` assignments from `~/.bashrc` and
+any other startup files that could overwrite this value. Keep a single
+`GH_TOKEN` export in the secrets file. Add this stanza to `~/.bashrc`; it uses
+POSIX shell syntax and tolerates a missing file:
+
+```sh
+set +vx  # Disable verbose input and command tracing before loading secrets.
+if [ -r "$HOME/.agentic-workflows/secrets.env" ]; then
+    . "$HOME/.agentic-workflows/secrets.env"
+fi
+```
+
+Only source a file you own and trust: sourcing executes shell code. Mode `600`
+allows only your account to read/write the file; retain it after editor saves or
+replacement. Keep the populated file and editor backups out of version control,
+synced dotfiles, logs, examples, and tests. Do not print it or dump the environment
+for diagnosis, and keep shell tracing off while loading or using credentials.
+
+Editing or replacing the file does **not** change an already-running shell's
+environment. Reload it in each terminal that will invoke workflow commands:
+
+```sh
+set +vx
+. "$HOME/.agentic-workflows/secrets.env"
+```
+
+Alternatively, source `~/.bashrc` again or open a fresh interactive Bash shell
+that reads it. Login Bash shells must have their login startup file source
+`~/.bashrc`; other POSIX shells need the stanza in their own startup file.
+Child processes inherit the launching shell's environment. Existing agent,
+terminal, or Herdr processes retain their earlier copy, so restart them from an
+updated shell if they launch commands without reloading the file. Removing an
+export or deleting the file also does not unset an inherited value; explicitly
+unset the affected variable in existing shells when retiring a credential.
+
+### Credential selection and safe verification
 
 The REST client reads `GH_TOKEN` first, falling back to `GITHUB_TOKEN` only when
-`GH_TOKEN` is unset or empty. It uses Python's HTTPS transport to `api.github.com`,
+`GH_TOKEN` is unset or empty. A nonempty revoked or expired `GH_TOKEN` still wins
+over a valid `GITHUB_TOKEN`; authentication failure does not trigger fallback.
+It uses Python's HTTPS transport to `api.github.com`,
 including the invoking environment's proxy and system certificate settings.
 It does not obtain API credentials from `gh auth login`, SSH, Git credential
 helpers, or the machine-local workflow configuration. Successful Git push or
 public PR lookup does not establish that the selected API token can create a PR.
 Whitespace/control characters in a selected token are refused without displaying
 the value or silently selecting a different credential.
+
+After loading the file, run this read-only check from the same shell as `task`.
+It follows the same variable precedence, keeps the token out of command arguments,
+and prints only the variable name and HTTP status, or a fixed error message:
+
+```sh
+python3.12 - <<'PY'
+import os
+from http.client import HTTPException
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+source = "GH_TOKEN" if os.environ.get("GH_TOKEN") else "GITHUB_TOKEN"
+token = os.environ.get(source)
+if not token:
+    raise SystemExit("No GitHub API token is set.")
+if any(not 33 <= ord(char) <= 126 for char in token):
+    raise SystemExit("Selected token contains invalid characters; edit it privately.")
+try:
+    request = Request("https://api.github.com/user", headers={
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "agentic-workflows-auth-check",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    with urlopen(request, timeout=30) as response:
+        status = response.status
+except HTTPError as error:
+    status = error.code
+    error.close()
+except (OSError, HTTPException, ValueError):
+    raise SystemExit("GitHub API connection failed; check network/proxy/TLS settings.") from None
+print(f"{source}: HTTP {status}")
+raise SystemExit(0 if status == 200 else 1)
+PY
+```
+
+Expect `GH_TOKEN: HTTP 200` with the recommended setup. GitHub's
+[authenticated-user endpoint](https://docs.github.com/en/rest/users/users#get-the-authenticated-user)
+requires authentication but no additional fine-grained permissions. This confirms
+the selected token is accepted, not repository access or PR write permission.
+HTTP 401 means authentication was rejected: check validity/expiration/revocation
+and reload the replacement token in the invoking shell. Do not debug by printing
+the token, request headers, response body, or raw exception details.
 
 An HTTP 403 diagnostic identifying insufficient token permissions means the
 selected token needs repository access and **Pull requests: write**. For a
@@ -188,6 +311,8 @@ for a classic token, check the appropriate `repo`/`public_repo` scope. Check
 organization approval, SSO, or Actions restrictions when the diagnostic calls
 for them. Tokens and raw API error bodies are never printed by the workflow.
 See [GitHub's API troubleshooting guide](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api).
+
+### Publishing prerequisites
 
 The configured base must track a same-named remote branch on `github.com`. Fetch
 and push URLs must each identify a single destination in the same repository.
