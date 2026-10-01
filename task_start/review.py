@@ -16,7 +16,7 @@ from .handoff import review_handoff
 from .linear import Linear
 from .review_result import ReviewResult, parse_verdict, publication_fingerprint
 from .publication_rebase import validate_commits, validate_record
-from .publication_state import PublicationStore
+from .publication_state import PublicationStore, prepare_review_continuation
 from .review_state import snapshot
 from .sessions import SessionInvalid, has_immutable_identity, merge_session, same_session
 from .workspace import Git, Herdr, Workspace
@@ -185,6 +185,9 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
     saved = store.read()
     if saved["rebase"] is not None and saved["rebase"].get("result") is None:
         raise TaskError("Unpublished rebase is pending; rerun task pr to finish it before starting independent review")
+    prepare_review_continuation(saved, Git(workspace.path),
+        dict(issue=issue.identifier, repository=str(repo), worktree=str(workspace.path),
+             branch=workspace.branch, base_branch=project.base_branch), base)
     # Starting another pass revokes earlier acceptance, including if interrupted.
     saved["acceptance"] = None
     saved["intent"] = None

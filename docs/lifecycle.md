@@ -287,18 +287,24 @@ available session identity, the reviewed fingerprint, and bounded public
 publication prose (or explicit approval of the frozen publication metadata after
 rebase). It contains no full issue description, review findings, chat,
 credentials, or general run archive. Failed/blocked/findings results never create
-acceptance. Beginning another review explicitly revokes prior acceptance and
-publishing intent, including if that new pass is interrupted. Completed rebase
-provenance survives a new review only while its exact resulting Git state is
-unchanged. It authorizes commit reuse, never publication without fresh clean
+acceptance. Beginning another review explicitly revokes the current acceptance and
+publishing intent, including if that new pass is interrupted. Outside the
+unpublished rebase path, once a publication commit exists, publication must finish
+through `task pr` before another review can replace that contract. Completed cycles
+retain their own acceptance and intent. Completed rebase provenance survives a new
+review only while its exact resulting Git state is unchanged. It authorizes commit
+reuse, never publication without fresh clean
 acceptance. Review and publish hold the same process lock, released automatically
 on process exit.
 
-The same private record keeps one branch publication fact, independently of
-review acceptance and intent. It binds the issue, checkout/branch, configured
-base and remote repository to an observed published SHA. A new review does not
-erase this evidence; it prevents automatic rebasing even if the remote branch
-and PR are later absent. This is a bounded safety record, not a run archive.
+The same private record keeps append-only publication lineage, independently of
+the current review acceptance and intent. It binds the issue, checkout/branch,
+configured base and remote repository to every published cycle, retaining each
+accepted review, frozen intent/SHA, and completion state. It also pins the base
+commit and PR number and retains the latest positively published SHA. A new
+review does not erase this evidence; it prevents automatic rebasing even if the
+remote branch and PR are later absent. Only publication contracts accumulate;
+review findings and conversations are not archived.
 
 The reviewer supplies public-safe summary, description, and validation prose from
 the actual reviewed implementation. This is metadata generation within the
@@ -357,11 +363,13 @@ that exact SHA in the intent before any further transport. All later checks,
 including retries, require local HEAD to equal this SHA; equivalent parent,
 tree and message are insufficient.
 
-An already committed reviewed change receives one publication commit (possibly
-an empty tree delta) to establish the generated subject and pass provenance. The exception is
-a proven rebased publishing commit: fresh review authorizes reuse of that exact
+Before first publication, an already committed reviewed change receives one
+publication commit (possibly an empty tree delta) to establish the generated
+subject and pass provenance. The exception is a proven rebased publishing commit:
+fresh review authorizes reuse of that exact
 commit. Its original trailer remains provenance; the new durable acceptance
-authorizes publication. A tree identical to the base is refused.
+authorizes publication. Before first publication, a tree identical to the base
+is refused.
 
 The workflow rechecks content, exact commit SHA, and index before push,
 immediately after push (including failures), before PR writes, and before
@@ -375,6 +383,55 @@ before deciding how to recover; the workflow never resets or force-pushes it.
 The lock serializes workflow commands, not editors or unrelated Git processes.
 Keep the checkout stable throughout publication; changes perfectly restored
 between observations cannot be detected.
+
+### Follow-up publication
+
+After a task PR is published, keep additional task edits uncommitted in the same
+checkout until they pass a fresh independent `task review`. Then run `task pr`
+to append one new publishing commit to the existing branch and reuse the same PR.
+Already-published commits are never rewritten. Staged, unstaged and new files can
+all participate. Each cycle
+creates exactly one commit with the previous published commit as its sole parent,
+the exact newly reviewed tree, and its own `Task-Review` pass trailer. A review
+without new materialized changes cannot create an empty follow-up commit.
+Locally committed follow-ups require manual inspection; the workflow does not
+rewrite them to manufacture the required parent.
+
+The previous completed cycles remain unchanged. Before transport, the new SHA is
+frozen in the current intent; before push, its acceptance and frozen intent are
+saved as a pending cycle. Positive remote confirmation advances the latest
+published SHA, while final PR/ref verification marks the cycle complete. A failed
+push or evidence write retains the previous published SHA and pending contract.
+Retry recovers the same commit even if commit acknowledgement or the initial SHA
+write was lost, and skips push if the remote already contains that exact SHA.
+A lost PR update acknowledgement is reconciled against the same recorded PR.
+New reviews refuse unfinished cycles instead of discarding their retry evidence.
+
+Every later publication verifies the recorded commit objects and their ancestry,
+as well as the current review/intent. The remote must be at the previous published
+SHA or the current frozen SHA. A missing branch, rollback, unrelated or additional
+remote commit, missing/replaced PR, or changed PR repository/head/base refuses the
+operation. PR number is durable identity: matching branch names alone cannot
+authorize a replacement PR. All pushes use the existing normal, explicit SHA
+refspec; no amend, rebase, reset, or force-push extends published history.
+
+The initial reviewed base commit remains pinned for this lineage. Local or remote
+base movement stops follow-up publication without fetching or changing task
+history. Updating the local base and requesting a fresh review cannot bypass this
+restriction. Review currently uses a single base both for the diff and for the
+required ancestor/live target identity. Supporting an advanced target safely would
+require separate immutable diff-base and observed target-tip identities, with an
+independent review of integration against that target and fresh target checks
+before transport. That integration model is not implemented; inspect and review
+advanced-base integration manually while preserving published commits.
+
+Legacy publication evidence still forbids rewriting. A retry retaining the
+original accepted review and provable publishing intent can establish a completed
+cycle and pin the discovered matching PR. The older observation is preserved
+separately, including a published parent observed before the first workflow
+commit; it never becomes a fabricated review approval. Missing acceptance/intent
+provenance requires manual inspection; a fresh review cannot reconstruct old
+approvals or PR identity.
 
 ### Base advancement before first publication
 
@@ -459,16 +516,18 @@ authoritative; cached tracking refs and task branch push defaults are not used.
 Before the first push attempt, a pending marker is saved and fsynced. Observing
 the remote task ref records positive publication evidence; a verified successful
 push must save that evidence before any GitHub write or success reporting. The
-first positive record is retained permanently for that branch's workflow state, including
-across fresh/failed reviews. Later commits or pushes do not downgrade it. If the
+positive record for each cycle is retained for that branch's workflow state, including
+across fresh/failed reviews. Later pending pushes do not downgrade it. If the
 push acknowledgement or confirmation write fails, the pending marker survives:
 retry can verify or push the same commit, but cannot automatically rebase after
 the remote ref disappears. Failed evidence writes stop publication. Legacy
 records with an existing intent but no push history are treated as uncertain,
 rather than assumed never published.
 
-Before pushing, the task branch may be absent, at the accepted pre-publication
-HEAD, or already at the proven publication commit. Anything else conflicts.
+Before first publication, the task branch may be absent, at the accepted
+pre-publication HEAD, or already at the proven publication commit. Once positively
+published, the branch must exist; follow-ups allow only the prior published SHA or
+the current frozen SHA. Anything else conflicts.
 After push it must equal the publication commit. All PR history for this exact
 repository/head participates: there must be no PR, or exactly one open, unmerged
 PR with the configured base and expected head SHA. A fork, another base, closed
@@ -483,6 +542,16 @@ against unrelated changes between the final observation and the API write.
 GitHub owner/repository
 casing is equivalent, including in the reported PR URL. URL scheme, host, path,
 PR number, head/base branch names and head SHA remain strictly validated.
+
+After a follow-up push, including recovery of an unfinished publication, PR
+verification permits at most five observations within a five-second retry window
+when either GitHub response still names the previously published parent SHA.
+The recorded PR number, repository, head branch, base and open/unmerged state must
+match throughout. Before retrying, native refs and local state must prove the exact
+frozen publishing SHA. Both PR responses must converge to that SHA before use;
+an unexpected third SHA, changed identity or API error fails immediately. These
+retries repeat reads only, never PR writes, commits or pushes. Normal API request
+timeouts still apply; convergence observed after the retry window is refused.
 
 To reduce repeated authentication, a preflight observation that the remote task
 ref already equals the frozen publishing SHA skips the push stage. After a new
@@ -507,10 +576,13 @@ configuration; native prompts remain in the invoking terminal.
 | Unpublished base advanced | Probe integration, install only a conflict-free rebase, invalidate review and stop for a fresh independent pass. |
 | Rebase installation interrupted | Verify and reuse the saved replacement commits, finish only a provable checkout/ref transition, then require review. |
 | Fresh review after rebase | Require explicit approval of the frozen title/body for the reviewed state; reuse the exact rebased commit and metadata through push/PR. |
-| Files/index/history/identity conflicts, or base change after publication | Stop without force or repair; inspect the reported state. An explicit new review establishes a new contract after intentional changes. |
+| New edits after completed publication | Obtain a new clean review at the latest published HEAD; append one commit and reuse the recorded PR. |
+| New review during unfinished publication | Refuse before replacing acceptance/intent; finish the frozen cycle with `task pr`. |
+| Files/index/history/identity conflicts, or base change after publication | Stop without force or repair; inspect the reported state. A new review cannot bypass published ancestry, PR identity or the pinned base. |
 
 Do not delete or edit acceptance/intent records to bypass refusal. Rerunning `pr`
-continues a frozen contract, while explicitly running `review` starts a new one.
+continues a frozen contract, while explicitly running `review` after completed
+publication starts a new one.
 Neither a fresh review nor deletion of a remote ref clears publication history.
 
 ### Authentication and signing

@@ -192,6 +192,14 @@ independent review of the rebased result and preserved PR title/body. After that
 review, rerun `pr` to publish the same rebased commit with that metadata.
 Already published branches are never automatically rebased.
 
+For feedback on a published PR, leave the additional edits uncommitted, run a
+new `task review DEV-7`, then `task pr DEV-7`. Each cycle appends one reviewed
+commit and updates the same PR. Finish any interrupted publication with `pr`
+before starting another review. Follow-ups currently require the original
+reviewed base to remain unchanged; base advancement stops for manual inspection.
+See [follow-up publication](docs/lifecycle.md#follow-up-publication) for the
+lineage and recovery guarantees.
+
 The commit subject and PR title use `<type>: <summary> (DEV-7)`. The type comes
 from one canonical Linear category label; the reviewer supplies a public-safe
 summary of the actual implemented result and observed validation. Titles use a
