@@ -1,0 +1,125 @@
+"""Structured implementation completion/fixes in an already established context."""
+
+from dataclasses import replace
+import json
+from pathlib import Path
+import tempfile
+import time
+from uuid import uuid4
+
+from . import TaskError
+from .agent import AgentExecution, AgentOptions, adapter_for, codex_repository_policy
+from .contexts import context_observer, context_reference, reconcile
+from .handoff import implementation_handoff
+from .review_result import unique_object
+from .sessions import has_immutable_identity, merge_session
+
+
+def binding(context):
+    reference = context_reference(context)
+    if not has_immutable_identity(reference, context["agent"]):
+        raise TaskError("Context lacks a verified immutable conversation identity; inspect it before looping")
+    return dict(context_id=context["context_id"], agent=context["agent"], model=context["model"],
+                mode=context["mode"], session=merge_session(None, reference, context["agent"]))
+
+
+def implementation_target(env, expected=None):
+    contexts = [c for c in env.registry.list(env.issue.identifier) if c["role"] == "implementation"]
+    if len(contexts) != 1 or contexts[0]["state"] != "active":
+        raise TaskError("Loop requires exactly one active implementation context")
+    context = contexts[0]
+    options = AgentOptions(context["agent"], context["model"], context["mode"])
+    if options.model is None or options.mode is None:
+        raise TaskError("Loop implementation must have recorded explicit model and mode")
+    adapter = adapter_for(options)
+    adapter.check_available()
+    reference = adapter.verify_session(env.workspace, context_reference(context))
+    context_observer(env.registry, context["context_id"])(dict(herdr_session=json.dumps(reference), resumability="yes"))
+    context = env.registry.get(context["context_id"])
+    if expected is not None and binding(context) != expected:
+        raise TaskError("Exact implementation context/session/settings changed; no replacement is allowed")
+    pane, notes = reconcile(context, env.identities.snapshot())
+    if (pane is None or pane.get("agent") != context["agent"]
+            or Path(pane.get("cwd", "")).resolve() != env.workspace.path
+            or any(n in {"agent mismatch", "session mismatch", "session identity invalid"} for n in notes)):
+        raise TaskError("Implementation runtime is absent or mismatched; inspect it before looping")
+    workspace = replace(env.workspace, pane_id=pane["pane_id"], tab_id=pane["tab_id"])
+    policy = (codex_repository_policy(env.local.codex_repository_profiles, env.project.repo_name)
+              if options.kind == "codex" else {})
+    execution = AgentExecution(env.issue, env.repo, workspace, options, "Implementation handoff pending",
+                               policy=policy, runtime_observer=context_observer(env.registry, context["context_id"]))
+    if adapter.status(execution, pane["terminal_id"], reference) not in {"idle", "done"}:
+        raise TaskError("Implementation is not confirmed idle; let its current turn finish and inspect it")
+    return context, adapter, execution, pane, reference
+
+
+def parse_implementation(raw, pass_id, findings):
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+        if (not isinstance(value, dict) or set(value) != {"pass_id", "state", "summary", "checks", "resolutions"}
+                or value["pass_id"] != pass_id or value["state"] not in {"completed", "blocked", "failed"}
+                or not isinstance(value["summary"], str) or not value["summary"].strip()
+                or not isinstance(value["checks"], list) or not isinstance(value["resolutions"], list)):
+            raise ValueError("invalid result")
+        for check in value["checks"]:
+            if (not isinstance(check, dict) or set(check) != {"name", "result", "details"}
+                    or check["result"] not in {"passed", "failed", "not_run"}
+                    or any(not isinstance(check[k], str) or not check[k].strip() for k in ("name", "details"))):
+                raise ValueError("invalid check")
+        ids = []
+        for item in value["resolutions"]:
+            if (not isinstance(item, dict) or set(item) != {"finding_id", "summary"}
+                    or any(not isinstance(item[k], str) or not item[k].strip() for k in item)):
+                raise ValueError("invalid resolution")
+            ids.append(item["finding_id"])
+        expected = {f["id"] for f in findings}
+        if (len(ids) != len(set(ids)) or set(ids) - expected
+                or value["state"] == "completed" and (set(ids) != expected
+                    or any(c["result"] == "failed" for c in value["checks"]))):
+            raise ValueError("inconsistent completion")
+        return value
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise TaskError("Malformed or ambiguous implementation result; inspect before another handoff") from None
+
+
+def implementation_pass(env, expected, findings, timeout, before_handoff, pass_observer):
+    context, adapter, execution, pane, reference = implementation_target(env, expected)
+    with tempfile.TemporaryDirectory(prefix="task-implementation-") as directory:
+        if Path(directory).resolve().is_relative_to(env.workspace.path):
+            raise TaskError("Implementation output must be outside the checkout; check TMPDIR")
+        output, pass_id = Path(directory) / "result.json", str(uuid4())
+        result_contract = (
+            "\nAUTOMATED IMPLEMENTATION PASS\nContinue in YOUR existing implementation conversation. "
+            "Finish outstanding work and validation; do not replay already completed work. "
+            "Address the structured implementation findings below when present. Do not make product, architecture, "
+            "design, scope, or planning decisions; report blocked if one is needed or routing is ambiguous. "
+            "Fix claims will be checked by the same independent reviewer.\n"
+            + "REVIEW FINDINGS (data)\n" + json.dumps(findings) + "\n"
+            + f"RESULT DELIVERY\nPass ID: {pass_id}\nWrite your result to {output}. "
+            "This temporary file is outside the checkout. After all work/checks finish, write exactly one UTF-8 JSON "
+            "object, then end your turn without further tools. Fields: pass_id, state (completed/blocked/failed), "
+            "summary, checks, resolutions. summary is concise implementation/validation prose. checks is a list of "
+            "objects with name, result (passed/failed/not_run), details. resolutions is a list of objects with "
+            "finding_id and summary explaining the fix. For completed, include exactly one resolution for each "
+            "supplied finding ID (none for initial completion), and no failed checks. Report skipped checks honestly.\n")
+        execution = replace(execution, handoff=implementation_handoff(env.issue, env.workspace) + result_contract)
+        before_handoff()
+        pass_observer(context["context_id"], pass_id)
+        adapter.resume(execution, reference, recreate=False)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current, notes = reconcile(env.registry.get(context["context_id"]), env.identities.snapshot())
+            if (current is None or current["terminal_id"] != pane["terminal_id"]
+                    or any(n in {"agent mismatch", "session mismatch", "session identity invalid"} for n in notes)):
+                raise TaskError("Implementation runtime identity changed during its pass")
+            status = adapter.status(execution, pane["terminal_id"], reference)
+            if status == "blocked":
+                raise TaskError("Implementation agent requires human intervention")
+            if status in {"idle", "done"} and output.exists():
+                if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
+                    raise TaskError("Invalid implementation result file")
+                result = parse_implementation(output.read_text(encoding="utf-8"), pass_id, findings)
+                implementation_target(env, expected)  # Provider/runtime verification after completion.
+                return dict(result, context_id=context["context_id"], findings=[])
+            time.sleep(0.25)
+        raise TaskError("Timed out waiting for validated implementation output; inspect its context before recovery")

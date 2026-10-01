@@ -6,8 +6,9 @@ It combines a task-creation skill with a `task` command that coordinates your re
 Git worktrees, and interactive coding agents in Herdr.
 
 You choose the task and scope, the workflow prepares the checkout and hands over
-the current requirements, and you decide how to address findings and publish the
-result. Codex and Pi are supported execution agents; Codex is the default
+the current requirements, and you choose manual review or a bounded automatic
+fix/review loop. You retain decisions about scope and publication.
+Codex and Pi are supported execution agents; Codex is the default
 implementation.
 
 ## Core concepts
@@ -24,8 +25,9 @@ implementation.
 The normal path is: prepare an issue, start implementation, review the result,
 address any findings, publish with `task pr`, inspect and merge the PR, then clean
 up. Implementation stops ready for review. Review reports findings without
-applying fixes. You own scope, follow-up fixes, publication, and marking the
-Linear issue complete; there is no automatic fix or merge loop.
+applying fixes. The optional loop routes implementation defects back for fixes
+and resumes the same reviewer. You own product and architecture decisions,
+publication, merging, and marking the Linear issue complete.
 
 ## Setup
 
@@ -161,6 +163,34 @@ human follow-up. Use `--json` for structured output or `--timeout SECONDS` to
 change the default 1800-second wait after delivery. See the
 [review reference](docs/lifecycle.md#task-review) for guarantees, exit codes, and
 resume requirements.
+
+### Automate fixes and review
+
+With the original implementation context idle and the task workspace open:
+
+```sh
+task loop DEV-7
+task loop DEV-7 --pause-after-current
+task loop DEV-7 --status
+task loop DEV-7 --continue
+```
+
+The loop resumes that implementation conversation to finish validation and collect
+a result, then starts a fresh independent reviewer. It routes concrete defects
+back to the implementer and resumes the same reviewer for focused follow-ups.
+Clean review finishes with one combined report. Product/design/scope decisions,
+uncertain results, repeated findings, and pass limits stop for human action.
+Both contexts must retain verifiable sessions and explicit model/mode settings.
+
+Run `--pause-after-current` from another terminal while the command is working.
+The current pass finishes; the next handoff waits for explicit `--continue`.
+`--status` only inspects. Ctrl+C and cancellation require inspection and cannot
+be continued as a graceful pause. Defaults are three reviews, six total passes,
+and 1800 seconds per delivered pass; use `--max-reviews`, `--max-passes`, and
+`--timeout` when starting the loop. Agent selection flags choose the fresh
+reviewer; implementation settings remain those of the original context.
+Use `--json` for the combined structured report. See the
+[loop reference](docs/lifecycle.md#task-loop) for checkpoints, bounds, and recovery.
 
 ### Find your conversations
 

@@ -43,7 +43,15 @@ The repository entry point is [`task`](../task), with command orchestration in
 [`contexts.py`](../task_start/contexts.py) for context allocation and inspection,
 and [`review.py`](../task_start/review.py) for review passes. Review snapshots and
 result validation live in [`review_state.py`](../task_start/review_state.py) and
-[`review_result.py`](../task_start/review_result.py). Reviewed publishing stages
+[`review_result.py`](../task_start/review_result.py). The bounded
+[`loop.py`](../task_start/loop.py) controller composes that review pass with
+[`implementation_pass.py`](../task_start/implementation_pass.py) for completion
+and fixes through the same adapters' exact-session transport.
+[`loop_state.py`](../task_start/loop_state.py) serializes private checkpoint and
+pause updates; it does not store a run archive or choose models. The controller
+holds the existing publication lock and calls the review primitive within that
+ownership. See [loop controls and recovery](lifecycle.md#task-loop).
+Reviewed publishing stages
 live in [`publish.py`](../task_start/publish.py),
 with disposable integration and unpublished commit installation in
 [`publication_rebase.py`](../task_start/publication_rebase.py),
@@ -218,6 +226,14 @@ Cleanup tests exercise actual worktree/branch removal in disposable repositories
 narrow Python-cache disposal, exact Herdr workspace retirement, preservation on
 refusal, repeat runs, and partial-failure reporting.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
+
+Loop coverage uses real disposable Git worktrees, context registries, and private
+checkpoint databases with controlled agent/config/Linear boundaries. It covers
+clean-first-review, repeated fix/review passes, exact context reuse, all pause
+boundaries, a pause from a second process, continuation without replay, cancellation,
+orphaned claims, corrupt checkpoints, identity loss, malformed outcomes, drift,
+non-progress, and bounded escalation. These are offline checks, not live model
+or Herdr loop acceptance.
 
 For documentation changes, verify relative file links and heading anchors, compare
 commands with CLI help, and run `git diff --check`. No dedicated Markdown/link

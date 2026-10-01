@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import signal
 import sys
 
 from . import TaskError
@@ -11,6 +12,7 @@ from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, inspect_contexts, launch_registered
 from .handoff import implementation_handoff
 from .linear import Linear
+from .loop import loop
 from .review import review
 from .publish import publish
 from .workspace import Git, Herdr, branch_name, slice_slug
@@ -41,6 +43,23 @@ def parser() -> argparse.ArgumentParser:
     add_agent_options(review_command)
     review_command.add_argument("--json", action="store_true", help="Print the structured review result")
     review_command.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
+    loop_command = commands.add_parser("loop", help="Run bounded implementation/review passes in separate contexts")
+    loop_command.add_argument("issue", type=issue_identifier)
+    controls = loop_command.add_mutually_exclusive_group()
+    controls.add_argument("--pause-after-current", dest="action", action="store_const", const="pause",
+                          help="Request a sticky pause at the next handoff boundary")
+    controls.add_argument("--continue", dest="action", action="store_const", const="continue",
+                          help="Explicitly continue the exact paused boundary")
+    controls.add_argument("--status", dest="action", action="store_const", const="status",
+                          help="Inspect checkpoint without resuming or contacting Linear")
+    controls.add_argument("--new", dest="action", action="store_const", const="new",
+                          help="Explicitly replace a stopped loop after inspection, with a fresh reviewer")
+    loop_command.set_defaults(action="run")
+    add_agent_options(loop_command)
+    loop_command.add_argument("--max-reviews", type=int, help="Review limit (default 3; maximum 20)")
+    loop_command.add_argument("--max-passes", type=int, help="Total pass limit (default 6; maximum 40)")
+    loop_command.add_argument("--timeout", type=int, metavar="SECONDS", help="Wait per pass (default 1800)")
+    loop_command.add_argument("--json", action="store_true", help="Print the combined lifecycle result")
     pr_command = commands.add_parser("pr", help="Commit and publish the exact clean-reviewed task as a GitHub PR")
     pr_command.add_argument("issue", type=issue_identifier)
     return result
@@ -226,6 +245,22 @@ def main(argv: list[str] | None = None) -> int:
                             model=args.model, mode=args.mode, timeout=args.timeout)
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
             return {"clean": 0, "findings": 2, "blocked": 3, "failed": 1}[result.state]
+        elif args.command == "loop":
+            # SIGTERM is cancellation, never a graceful pause. SIGKILL leaves a
+            # persisted running claim that --continue also refuses to replay.
+            def interrupted(signum, frame):
+                raise KeyboardInterrupt()
+            previous = signal.signal(signal.SIGTERM, interrupted)
+            try:
+                result = loop(args.issue, action=args.action, agent_kind=args.agent_kind, model=args.model,
+                              mode=args.mode, max_reviews=args.max_reviews, max_passes=args.max_passes,
+                              timeout=args.timeout)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+            print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
+            if args.action in {"pause", "status"}:
+                return 0
+            return {"clean": 0, "paused": 3, "escalated": 3, "interrupted": 130}.get(result.state, 1)
         elif args.command == "pr":
             print(publish(args.issue))
         else:

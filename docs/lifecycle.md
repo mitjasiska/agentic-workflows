@@ -9,6 +9,7 @@ Command behavior, invariants, and refusal/retry cases. Start with the
 - [Workspace reuse and slices](#workspace-lifecycle-and-slices)
 - [Failure and retry behavior](#failure-and-retry-behavior)
 - [Fresh review and exact resume](#task-review)
+- [Automatic implementation/review loop](#task-loop)
 - [Reviewed PR publishing](#task-pr)
 - [Cleanup and partial failures](#task-cleanup)
 
@@ -255,8 +256,132 @@ be resumed implicitly. `--timeout` defaults to 1800 seconds after prompt deliver
 Exit status is 0 for clean, 2 for findings, 3 for blocked/invalidated, and 1 for
 failure. Missing/malformed output cannot be clean; drift overrides any model verdict.
 Preflight errors stop before a pass exists and are reported on stderr. Findings,
-validation limitations, and stopped/blocked agents require human action; no fix loop
-or implementation resume is included.
+validation limitations, and stopped/blocked agents require human action when using
+this single-pass command. Automatic findings routing is an explicit `task loop` action.
+
+## Task loop
+
+```sh
+task loop DEV-20
+task loop DEV-20 --agent codex --model gpt-6-astra --mode high --max-reviews 3 --max-passes 6
+task loop DEV-20 --pause-after-current
+task loop DEV-20 --status --json
+task loop DEV-20 --continue
+```
+
+Start with the original implementation context idle in the exact open task
+checkout. `loop` resumes it to finish outstanding implementation/validation and
+collect a nonce-bound structured completion result. This is also the entry point
+for an already-completed implementation: the agent is instructed to report its
+work without replaying it. The command does not adopt an arbitrary running turn
+or infer completion from idle status alone. Let an existing implementation turn
+finish before starting the loop.
+
+The first review uses the existing fresh review primitive with a newly allocated
+independent reviewer. It receives current requirements and actual repository
+state, without implementation conversation or completion prose. Implementation
+findings return to the original implementation context. A focused re-review uses
+the exact same reviewer context, previous findings, and structured fix claims.
+Review remains read-only and retains the single-pass drift checks. Clean review
+terminates; there is no publication, merge, cleanup, or Linear status change.
+
+Implementation and reviewer contexts require recorded explicit model and mode,
+provider-verifiable immutable session identity, and consistent registry/runtime
+bindings. In particular, a Pi runtime without a persisted session reference is
+insufficient. Missing or non-resumable implementation context stops the loop.
+Reviewer resume may recreate a stopped/missing pane through the existing review
+primitive after verifying the original conversation; it never allocates a
+replacement conversation. No replacement implementation or reviewer is selected
+automatically. Agent selection flags apply only to the first fresh reviewer;
+later passes and explicit continuation preserve recorded settings.
+
+### Boundaries and graceful pause
+
+The saved next phase is one of `implementation` (initial completion), `review`
+(fresh review), `fixes`, or `rereview`. Each completed pass and its next boundary
+are checkpointed before any automatic handoff. From another terminal, request
+`--pause-after-current` while either agent is working. The controller lets that
+pass finish, validates/collects its result, and stops before the next handoff.
+It does not send cancellation or restart the agent. A clean terminal review
+still finishes cleanly because no handoff remains; failure/human decisions still
+escalate rather than becoming a resumable pause.
+
+Pause is a sticky SQLite flag, checked between passes and atomically with each
+handoff claim after preflight. The committed claim is the start of the current
+pass: a request ordered before it prevents delivery, while one ordered after it
+waits for that pass. Result writes cannot overwrite a concurrent pause request.
+The controller holds the existing review/publication worktree lock throughout;
+pause and status use separate short transactions and remain available while it
+is running. Do not type additional agent prompts or edit the checkout during a run.
+
+`--continue` accepts only a saved `paused` boundary. It explicitly clears that
+pause, verifies the exact checkout/base, requirement fingerprint, contexts,
+sessions, and idle runtimes, then executes the pending phase. It never repeats a
+completed pass. Changes to requirements, checkout, identity, or resumability stop
+for inspection. A later pause remains sticky. `--status`, agent idleness, and
+repeating the ordinary `loop` command never continue a loop. Pause/status find
+the checkpoint through the context registry without loading credentials,
+workflow configuration, or Linear; continuation fetches current requirements.
+
+### Routing, bounds, and results
+
+Loop reviews extend each finding with a stable `F1`-style `id` and a `category`:
+`implementation` or `human_decision`. The reviewer must preserve unresolved IDs
+and report all remaining findings, including regressions. Product, architecture,
+design, scope, planning, and ambiguous decisions belong to `human_decision` and
+stop automatic routing, including when mixed with implementation defects.
+Manual review still accepts its original finding shape. The controller never
+classifies findings from free-form explanations.
+
+Fix results identify every supplied finding and describe the claimed resolution;
+the reviewer independently checks those claims. Duplicate/missing/unknown IDs,
+malformed output, failed checks claimed as completed work, blocked agents,
+delivery/identity failures, or absent output stop for inspection. No transport or
+uncertain pass is automatically retried. An unchanged content snapshot after
+fixes, repeated finding-ID sets, identical findings with renamed IDs, or retention
+of every previous unresolved ID also stops as non-progress.
+
+Defaults are at most three review passes, six total implementation/review passes,
+and 1800 seconds of waiting per delivered pass. Startup keeps the adapters' own
+bounded receipt checks. `--max-reviews` accepts 1–20, `--max-passes` accepts 1–40,
+and `--timeout` accepts 1–86400 seconds. These bounds persist across pauses.
+Exhausting the review budget stops before fixes that could not be re-reviewed.
+Selection, timeout, and limit flags cannot accompany controls.
+
+The compact final report includes implementation summaries, review iterations,
+substantive findings, claimed fixes, validation and limitations, final review
+state, context IDs, and whether human action is required. `--json` supplies the
+versioned equivalent, including the pending boundary and any uncertain active
+pass. Run/continue exit codes are 0 for clean, 3 for pause/escalation, 130 for
+caught interruption, and 1 for preflight/storage errors. Successful pause/status
+requests exit 0; their reported state remains authoritative.
+
+### Checkpoint and interruption recovery
+
+`agentic-workflows-loop.sqlite3` in the worktree's private Git directory retains
+one current checkpoint: exact bindings/session IDs, requirement fingerprint,
+snapshot, counters/limits, next phase, active pass nonce, routing findings, and
+bounded result summaries needed after a pause. It contains no issue description,
+transcripts, credentials, report archive, or publication approval. A versioned
+result and a post-checkpoint pass-result callback provide integration points for
+future report persistence.
+
+Ctrl+C, SIGTERM, and process cancellation are distinct from graceful pause. Caught
+interruption records `interrupted`; it never accepts output as a completed pass
+merely because the agent becomes idle. SIGKILL or loss before a result checkpoint
+can leave `running` with an active pass. Status reports that recorded claim; it
+does not prove a controller is still alive. `--continue` refuses both states.
+The exact context/nonce and any previously collected results remain for inspection;
+delivery may have succeeded and the agent may still be working. Do not retry or
+manufacture completion from a transcript or temporary result file.
+
+After inspecting and reconciling a stopped run, `task loop DEV-20 --new` explicitly
+replaces its single checkpoint and requests a fresh reviewer outside the old
+automatic continuation. All contexts must pass identity/idle checks. An orphaned
+`running`/`ready` claim, uncertain context, or missing session is refused and needs
+manual reconciliation of its evidence; there is no automatic recovery/replay or
+context repair command. `--new` also intentionally starts another loop after a
+clean result or abandons a paused boundary. It does not retain report history.
 
 ## Task pr
 
