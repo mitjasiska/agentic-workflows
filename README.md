@@ -279,3 +279,7 @@ explains which portions may already have completed.
 - [Repository instructions for agents](AGENTS.md): maintenance guidance and documentation ownership.
 
 Use `task --help` or `task <command> --help` for the available flags.
+
+## License
+
+Agentic Workflows is licensed under the [MIT License](LICENSE).
