@@ -127,15 +127,21 @@ def report(state, pause=False):
         pause_requested=pause, active_pass=state["active_pass"]))
 
 
-def new_state(env, reviewer_options, max_reviews, max_passes, timeout):
+def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_review=False):
     context, *_ = implementation_target(env)
     idle_reviewers(env)
-    return dict(version=1, run_id=str(uuid4()), binding=task_binding(env), requirements=requirements(env),
+    state = dict(version=1, run_id=str(uuid4()), binding=task_binding(env), requirements=requirements(env),
         implementation=binding(context), reviewer=None, reviewer_options=asdict(reviewer_options),
         status="ready", reason="Implementation completion pending", next_phase="implementation", active_pass=None,
         pass_count=0, review_count=0, max_reviews=max_reviews, max_passes=max_passes, timeout=timeout,
         snapshot=snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict(),
         findings=[], seen=[], records=[])
+    if from_review:
+        # Keep the default checkpoint path intact. Review-first runs need an
+        # explicit origin so validation never infers a missing completion pass.
+        state.update(version=2, initial_phase="review", next_phase="review",
+                     reason="Explicit review start; independent review pending")
+    return state
 
 
 def route(state, result, after):
@@ -295,10 +301,12 @@ def control_store(identifier):
 
 
 def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
-         max_reviews=None, max_passes=None, timeout=None, on_pass_result=None):
+         max_reviews=None, max_passes=None, timeout=None, from_review=False, on_pass_result=None):
     overrides = (agent_kind, model, mode, max_reviews, max_passes, timeout)
     if action not in {"run", "new", "continue", "pause", "status"}:
         raise TaskError("Unknown loop control action")
+    if from_review and action not in {"run", "new"}:
+        raise TaskError("--from-review only starts a new loop; controls preserve the saved boundary")
     if action not in {"run", "new"} and any(v is not None for v in overrides):
         raise TaskError("Loop controls preserve recorded settings/limits and do not accept selection overrides")
     if action in {"pause", "status", "continue"}:
@@ -324,6 +332,6 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
     adapter_for(options).check_available()
     with PublicationStore(env.workspace.path).locked() as publication:
         store = LoopStore(env.workspace.path)
-        state = new_state(env, options, max_reviews, max_passes, timeout)
+        state = new_state(env, options, max_reviews, max_passes, timeout, from_review=from_review)
         store.create(state, replace=action == "new")
         return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)

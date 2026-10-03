@@ -55,6 +55,8 @@ def parser() -> argparse.ArgumentParser:
     controls.add_argument("--new", dest="action", action="store_const", const="new",
                           help="Explicitly replace a stopped loop after inspection, with a fresh reviewer")
     loop_command.set_defaults(action="run")
+    loop_command.add_argument("--from-review", action="store_true",
+                              help="Start a new loop with fresh review of the completed implementation")
     add_agent_options(loop_command)
     loop_command.add_argument("--max-reviews", type=int, help="Review limit (default 3; maximum 20)")
     loop_command.add_argument("--max-passes", type=int, help="Total pass limit (default 6; maximum 40)")
@@ -259,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = loop(args.issue, action=args.action, agent_kind=args.agent_kind, model=args.model,
                               mode=args.mode, max_reviews=args.max_reviews, max_passes=args.max_passes,
-                              timeout=args.timeout)
+                              timeout=args.timeout, from_review=args.from_review)
             finally:
                 signal.signal(signal.SIGTERM, previous)
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())

@@ -36,7 +36,7 @@ class ImplementationAdapter:
         pass
 
     def verify_session(self, workspace, reference):
-        if self.test.impl_verification_error:
+        if not reference or self.test.impl_verification_error:
             raise TaskError("Implementation session no longer resumable")
         return dict(reference, conversation_id="original-implementation")
 
@@ -117,6 +117,17 @@ class LoopIntegrationTests(unittest.TestCase):
     def continue_loop(self):
         return loop("DEV-7", action="continue")
 
+    def pause_before_first_review(self):
+        original = LoopStore.begin
+        def before_claim(store, state):
+            store.pause()
+            return original(store, state)
+        with patch.object(LoopStore, "begin", before_claim):
+            result = self.run_loop(from_review=True)
+        self.assertEqual(result.state, "paused", result.render())
+        self.assertEqual((self.impl_prompts, self.prompts), ([], []))
+        return result
+
     def test_clean_first_review_preserves_separation_and_reports_validation(self):
         result = self.run_loop()
         self.assertEqual(result.state, "clean", result.render())
@@ -136,6 +147,194 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertIn("Final review: clean", result.render())
         self.linear.start.assert_not_called()
         self.assertNotIn("Current requirements", self.store.path.read_bytes().decode(errors="ignore"))
+        state, _ = self.store.read()
+        self.assertEqual(state["version"], 1)
+        self.assertNotIn("initial_phase", state)
+        self.assertEqual([r["phase"] for r in state["records"]], ["implementation", "review"])
+
+    def test_from_review_cli_clean_completion_skips_implementation_turn(self):
+        self.on_review = lambda _: self.pause()  # A clean final result still wins over pause.
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(cli.main(["loop", "DEV-7", "--from-review", "--json",
+                                       "--max-passes", "1", "--max-reviews", "1"]), 0)
+        value = json.loads(output.getvalue())
+        self.assertEqual((value["state"], value["passes"], value["reviews"]), ("clean", 1, 1))
+        self.assertEqual(value["implementation_context"], self.implementation)
+        self.assertEqual(value["reviewer_context"], "DEV-7-R1")
+        self.assertEqual(value["implementation"], [])
+        self.assertEqual(value["final_review_state"], "clean")
+        self.assertFalse(value["human_action_required"])
+        self.assertEqual(len(value["validation"]), 1)
+        self.assertEqual(self.impl_prompts, [])
+        self.assertEqual(len(self.prompts), 1)
+        self.assertIn("fresh independent review", self.prompts[0])
+        self.assertEqual(len(self.registry.list()), 2)
+        state, _ = LoopStore(self.path).read()
+        self.assertEqual((state["version"], state["initial_phase"]), (2, "review"))
+        self.assertEqual([r["phase"] for r in state["records"]], ["review"])
+        self.linear.start.assert_not_called()
+
+    def test_from_review_findings_continue_to_original_fixes_and_same_reviewer(self):
+        self.review_results = [findings(finding()), {}]
+        self.on_review = lambda _: self.pause()
+        paused = self.run_loop(from_review=True)
+        self.assertEqual(paused.state, "paused", paused.render())
+        self.assertEqual(paused.data["next_phase"], "fixes")
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (0, 1))
+        before, _ = self.store.read()
+        self.on_review = None
+        result = self.continue_loop()
+        self.assertEqual(result.state, "clean", result.render())
+        self.assertEqual((result.data["passes"], result.data["reviews"]), (3, 2))
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (1, 2))
+        self.assertEqual(self.recreated, [False])
+        self.assertEqual(len(self.registry.list()), 2)
+        self.assertIn('"id": "F1"', self.impl_prompts[0])
+        self.assertIn('"finding_id": "F1"', self.prompts[1])
+        self.assertIn("focused re-review", self.prompts[1])
+        self.assertEqual(result.data["resolutions"], [dict(finding_id="F1", summary="Fixed F1")])
+        after, _ = self.store.read()
+        self.assertEqual(after["implementation"], before["implementation"])
+        self.assertEqual(after["reviewer"], before["reviewer"])
+        self.assertEqual([r["phase"] for r in after["records"]], ["review", "fixes", "rereview"])
+        self.assertEqual([r["context_id"] for r in after["records"]],
+                         ["DEV-7-R1", self.implementation, "DEV-7-R1"])
+
+    def test_from_review_initial_pause_status_and_continue_preserve_boundary(self):
+        paused = self.pause_before_first_review()
+        state, sticky = LoopStore(self.path).read()
+        self.assertTrue(sticky)
+        self.assertEqual(state["initial_phase"], "review")
+        self.assertEqual(state["next_phase"], "review")
+        self.assertEqual((state["pass_count"], state["review_count"], state["records"]), (0, 0, []))
+        self.assertIsNone(state["reviewer"])
+        self.assertIsNone(state["active_pass"])
+        self.assertEqual(state["implementation"]["context_id"], self.implementation)
+        with patch("task_start.loop.load_local", side_effect=AssertionError("No config during controls")):
+            self.assertEqual(loop("DEV-7", action="status").as_dict(), paused.as_dict())
+        with self.assertRaisesRegex(TaskError, "checkpoint already exists"):
+            self.run_loop(from_review=True)
+        self.assertEqual(self.store.read()[0], state)
+        self.local = replace(self.local, reviewer=review_fixture.AgentConfig("pi", "changed-default", "low"))
+        result = self.continue_loop()
+        self.assertEqual(result.state, "clean", result.render())
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (0, 1))
+        self.assertEqual(self.options[-1].model, "review-model")
+        self.assertEqual(self.store.read()[0]["implementation"], state["implementation"])
+
+    def test_from_review_continue_rechecks_exact_implementation_binding(self):
+        self.pause_before_first_review()
+        # Simulate out-of-band replacement of the recorded settings.
+        with self.registry.connection(write=True) as db:
+            db.execute("UPDATE contexts SET model=? WHERE context_id=?", ("different-model", self.implementation))
+        result = self.continue_loop()
+        self.assertEqual(result.state, "escalated", result.render())
+        self.assertIn("Exact implementation context/session/settings changed", result.data["reason"])
+        self.assertEqual((self.impl_prompts, self.prompts), ([], []))
+
+    def test_from_review_invalid_implementation_is_refused_before_any_handoff(self):
+        for fault in ("missing", "ambiguous", "uncertain", "busy", "nonresumable", "missing_model",
+                      "missing_session", "missing_pane", "wrong_session", "wrong_checkout", "wrong_server"):
+            with self.subTest(fault=fault):
+                case = LoopIntegrationTests()
+                case.setUp()
+                try:
+                    if fault == "missing":
+                        case.registry.retire("DEV-7", case.repo, case.path,
+                                             endpoint="/server.sock", workspace_id="w1")
+                    elif fault == "ambiguous":
+                        case.registry.allocate("DEV-7", "implementation", agent="pi", model="implementation",
+                            mode="low", repository=str(case.repo), worktree=str(case.path), endpoint="/server.sock",
+                            workspace_id="w1", tab_id="t1", pane_id="p-other", terminal_id="term-other")
+                    elif fault == "uncertain":
+                        case.registry.update(case.implementation, state="uncertain")
+                    elif fault == "busy":
+                        case.impl_status = "working"
+                    elif fault == "nonresumable":
+                        case.impl_verification_error = True
+                    elif fault == "missing_model":
+                        with case.registry.connection(write=True) as db:
+                            db.execute("UPDATE contexts SET model=NULL WHERE context_id=?", (case.implementation,))
+                    elif fault == "missing_session":
+                        case.registry.update(case.implementation, session_id=None, session_kind=None)
+                    elif fault == "missing_pane":
+                        case.panes.clear()
+                    elif fault == "wrong_session":
+                        case.panes[0]["agent_session"]["value"] = "/other.jsonl"
+                    elif fault == "wrong_checkout":
+                        case.panes[0]["cwd"] = str(case.repo)
+                    elif fault == "wrong_server":
+                        case.identities.endpoint.return_value = "/other.sock"
+                    with self.assertRaises(TaskError):
+                        case.run_loop(from_review=True)
+                    self.assertEqual((case.impl_prompts, case.prompts), ([], []))
+                    self.assertFalse(case.store.path.exists())
+                    self.assertFalse(any(c["role"] == "review" for c in case.registry.list()))
+                finally:
+                    case.doCleanups()
+
+    def test_from_review_checkpoint_requires_explicit_origin_and_valid_sequence(self):
+        self.pause_before_first_review()
+        saved, pause = self.store.read()
+        candidates = [{k: v for k, v in saved.items() if k != "initial_phase"}]
+        candidates.extend(dict(saved, **change) for change in (
+            dict(version=1), dict(initial_phase="implementation"), dict(initial_phase="fixes"),
+            dict(initial_phase=None), dict(next_phase="implementation"), dict(next_phase="rereview")))
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(TaskError, "Malformed loop checkpoint"):
+                LoopStore.decode((json.dumps(candidate), pause))
+        self.assertEqual(self.store.read()[0], saved)
+
+    def test_from_review_setup_failure_preserves_checkpoint_without_reviewer(self):
+        with patch.object(self.identities, "split", side_effect=TaskError("Pane creation failed")):
+            result = self.run_loop(from_review=True)
+        self.assertEqual(result.state, "escalated", result.render())
+        self.assertEqual(result.data["final_review_state"], "failed")
+        self.assertEqual((result.data["passes"], result.data["reviews"]), (1, 1))
+        state, _ = LoopStore(self.path).read()
+        self.assertIsNone(state["reviewer"])
+        self.assertEqual([r["phase"] for r in state["records"]], ["review"])
+        self.assertEqual(loop("DEV-7", action="status").as_dict(), result.as_dict())
+        self.assertEqual((self.impl_prompts, self.prompts), ([], []))
+
+    def test_from_review_interruption_retains_first_review_claim_without_replay(self):
+        self.on_review = lambda _: (_ for _ in ()).throw(KeyboardInterrupt())
+        result = self.run_loop(from_review=True)
+        self.assertEqual(result.state, "interrupted", result.render())
+        state, _ = LoopStore(self.path).read()
+        self.assertEqual(state["initial_phase"], "review")
+        self.assertEqual(state["records"], [])
+        self.assertEqual((state["pass_count"], state["review_count"]), (1, 1))
+        self.assertEqual(state["active_pass"]["phase"], "review")
+        self.assertEqual(state["active_pass"]["context_id"], "DEV-7-R1")
+        self.assertIsNotNone(state["active_pass"]["pass_id"])
+        self.assertEqual(state["implementation"]["context_id"], self.implementation)
+        self.assertEqual(loop("DEV-7", action="status").as_dict(), result.as_dict())
+        with self.assertRaisesRegex(TaskError, "Only a paused"):
+            self.continue_loop()
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (0, 1))
+
+    def test_from_review_orphaned_first_claim_cannot_continue_or_be_replaced(self):
+        self.pause_before_first_review()
+        state = self.store.continue_paused()
+        self.store.begin(state)  # SIGKILL after claim, before reviewer allocation.
+        with self.assertRaisesRegex(TaskError, "Only a paused"):
+            self.continue_loop()
+        with self.assertRaisesRegex(TaskError, "unfinished handoff"):
+            self.run_loop(action="new", from_review=True)
+        result = loop("DEV-7", action="status")
+        self.assertEqual(result.state, "running")
+        self.assertEqual(result.data["active_pass"]["phase"], "review")
+        self.assertEqual((self.impl_prompts, self.prompts), ([], []))
+
+    def test_from_review_new_after_clean_allocates_fresh_reviewer(self):
+        self.assertEqual(self.run_loop().state, "clean")
+        implementation = self.store.read()[0]["implementation"]
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(cli.main(["loop", "DEV-7", "--new", "--from-review", "--json"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["reviewer_context"], "DEV-7-R2")
+        self.assertEqual(self.store.read()[0]["implementation"], implementation)
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (1, 2))
 
     def test_findings_fixes_and_focused_review_use_same_contexts(self):
         self.review_results = [findings(finding()), {}]
@@ -600,6 +799,14 @@ class LoopIntegrationTests(unittest.TestCase):
 
 
 class LoopContractTests(unittest.TestCase):
+    def test_from_review_cannot_override_existing_loop_controls(self):
+        with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
+                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")):
+            for flag in ("--continue", "--status", "--pause-after-current"):
+                with self.subTest(flag=flag), patch("sys.stderr", new_callable=io.StringIO) as error:
+                    self.assertEqual(cli.main(["loop", "DEV-7", flag, "--from-review"]), 1)
+                    self.assertIn("--from-review only starts a new loop", error.getvalue())
+
     def test_routing_result_rejects_duplicate_ids_unknown_categories_and_missing_ids(self):
         for items in ([finding(), finding()], [dict(finding(), category="scope")],
                       [{k: v for k, v in finding().items() if k != "id"}]):
