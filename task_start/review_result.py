@@ -56,7 +56,8 @@ def unique_object(pairs):
     return result
 
 
-def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = None, identifier=None) -> dict:
+def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = None, identifier=None,
+                  routing: bool = False) -> dict:
     try:
         value = json.loads(raw, object_pairs_hook=unique_object)
         # Initial publishing requires public prose; a rebased continuation needs
@@ -70,14 +71,23 @@ def parse_verdict(raw: str, pass_id: str, *, frozen_fingerprint: str | None = No
             raise ValueError("invalid verdict")
         if not isinstance(value["findings"], list) or not isinstance(value["checks"], list):
             raise ValueError("invalid lists")
+        finding_ids = set()
         for finding in value["findings"]:
+            fields = {"severity", "explanation", "evidence", "requirement"}
             if (not isinstance(finding, dict)
-                    or set(finding) != {"severity", "explanation", "evidence", "requirement"}
+                    or set(finding) not in (fields, fields | {"id", "category"})
                     or finding["severity"] not in {"critical", "high", "medium", "low"}
                     or any(not isinstance(finding[k], str) or not finding[k].strip()
                            for k in ("explanation", "evidence"))
                     or not isinstance(finding["requirement"], str)):
                 raise ValueError("invalid finding")
+            if routing or "id" in finding:
+                if (not isinstance(finding.get("id"), str)
+                        or not re.fullmatch(r"F[1-9][0-9]{0,5}", finding["id"])
+                        or finding["id"] in finding_ids
+                        or finding.get("category") not in {"implementation", "human_decision"}):
+                    raise ValueError("unroutable finding")
+                finding_ids.add(finding["id"])
         for check in value["checks"]:
             if (not isinstance(check, dict) or set(check) != {"name", "result", "details"}
                     or check["result"] not in {"passed", "failed", "not_run"}

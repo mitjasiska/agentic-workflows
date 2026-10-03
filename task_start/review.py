@@ -169,7 +169,8 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
 
 
 def review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
-                local, resume, agent_kind, model, mode, timeout, store):
+                local, resume, agent_kind, model, mode, timeout, store, *, loop_feedback=None,
+                before_handoff=None, pass_observer=None):
     context, pane = (resolve_reviewer(resume, issue, workspace, repo, endpoint, registry, identities)
                      if resume is not None else (None, None))
     options = (AgentOptions(context["agent"], context["model"], context["mode"]) if context else
@@ -235,9 +236,14 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                 nonlocal context_id, claimed
                 context_id = allocated
                 claimed = True
+                if pass_observer:
+                    pass_observer(allocated, pass_id)
                 return review_handoff(issue, repo, workspace, project.base_branch, before,
-                                      context_id, pass_kind, options, pass_id, output, frozen_publication=frozen)
+                                      context_id, pass_kind, options, pass_id, output, frozen_publication=frozen,
+                                      loop_feedback=loop_feedback)
 
+            if before_handoff:
+                before_handoff()
             if context:
                 registry.claim_review(context)
                 claimed = True
@@ -313,7 +319,8 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                     if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                         raise TaskError("Invalid reviewer result file")
                     verdict = parse_verdict(output.read_text(encoding="utf-8"), pass_id,
-                                            frozen_fingerprint=frozen_fingerprint, identifier=issue.identifier)
+                                            frozen_fingerprint=frozen_fingerprint, identifier=issue.identifier,
+                                            routing=loop_feedback is not None)
                     state, summary = verdict["state"], verdict["summary"]
                     break
                 # Herdr may infer idle from process/title detection even while Pi

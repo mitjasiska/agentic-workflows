@@ -97,6 +97,12 @@ class AgentAdapter(Protocol):
 
     def review_status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
 
+    def verify_session(self, workspace: Workspace, reference: dict) -> dict: ...
+
+    def resume(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult: ...
+
+    def status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
+
 
 def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides, *, section: str = "agent") -> AgentOptions:
     """Resolve independent CLI-over-config choices without mutating configuration."""
@@ -233,6 +239,17 @@ class HerdrAgentAdapter:
 
     def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
         raise TaskError(f"{self.display_name} cannot safely resume this reviewer session")
+
+    # Implementation follow-ups use the same exact-session transport as DEV-20.
+    # Keep the review entry points compatible with existing callers/adapters.
+    def verify_session(self, workspace: Workspace, reference: dict) -> dict:
+        return self.verify_review_session(workspace, reference)
+
+    def resume(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult:
+        return self.resume_review(execution, reference, recreate=recreate)
+
+    def status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str:
+        return self.review_status(execution, terminal_id, reference)
 
     def resume_args(self, execution: AgentExecution, reference: dict) -> list[str]:
         raise TaskError(f"{self.display_name} does not support explicit reviewer resume")
