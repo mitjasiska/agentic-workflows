@@ -24,9 +24,16 @@ STATES = {"ready", "running", "paused", "clean", "escalated", "interrupted"}
 
 def validate_checkpoint(state):
     """Never turn missing/corrupt routing evidence into a fresh or replayed pass."""
-    if set(state) != {"version", "run_id", "binding", "requirements", "implementation", "reviewer",
-                      "reviewer_options", "status", "reason", "next_phase", "active_pass", "pass_count",
-                      "review_count", "max_reviews", "max_passes", "timeout", "snapshot", "findings", "seen", "records"}:
+    fields = {"version", "run_id", "binding", "requirements", "implementation", "reviewer",
+              "reviewer_options", "status", "reason", "next_phase", "active_pass", "pass_count",
+              "review_count", "max_reviews", "max_passes", "timeout", "snapshot", "findings", "seen", "records"}
+    initial_phase = "implementation"  # Version 1 always starts with completion.
+    if state["version"] == 2:
+        fields.add("initial_phase")
+        initial_phase = state["initial_phase"]
+        if initial_phase != "review":
+            raise ValueError("invalid initial boundary")
+    if set(state) != fields:
         raise ValueError("unknown checkpoint fields")
     target = state["binding"]
     if (set(target) != {"issue", "repository", "worktree", "branch", "workspace_id", "endpoint", "base_branch"}
@@ -68,7 +75,7 @@ def validate_checkpoint(state):
     if state["pass_count"] != len(records) + (active is not None):
         raise ValueError("missing pass evidence")
     reviews = 0
-    next_phase = "implementation"
+    next_phase = initial_phase
     ids = set()
     for index, record in enumerate(records):
         if (set(record) != {"phase", "pass_id", "context_id", "state", "summary", "findings", "checks", "resolutions"}
@@ -147,7 +154,7 @@ class LoopStore:
             raise TaskError("No implementation-review loop checkpoint exists")
         try:
             state = json.loads(row[0], object_pairs_hook=unique_object)
-            if (state["version"] != 1 or str(UUID(state["run_id"])) != state["run_id"]
+            if (state["version"] not in {1, 2} or str(UUID(state["run_id"])) != state["run_id"]
                     or state["status"] not in STATES
                     or state["next_phase"] not in PHASES | {None}
                     or type(state["pass_count"]) is not int or type(state["review_count"]) is not int

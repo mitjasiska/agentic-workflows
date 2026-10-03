@@ -176,8 +176,10 @@ task loop DEV-7 --continue
 ```
 
 The loop resumes that implementation conversation to finish validation and collect
-a result, then starts a fresh independent reviewer. It routes concrete defects
-back to the implementer and resumes the same reviewer for focused follow-ups.
+a result, then starts a fresh independent reviewer. If you already know the initial
+implementation is complete, use `task loop DEV-7 --from-review` to start a new loop
+directly with fresh review. Both paths retain the original implementation context
+for fixes and resume the same reviewer for focused follow-ups.
 Clean review finishes with one combined report. Product/design/scope decisions,
 uncertain results, repeated findings, and pass limits stop for human action.
 Both contexts must retain verifiable sessions and explicit model/mode settings.

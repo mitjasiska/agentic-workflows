@@ -270,6 +270,7 @@ this single-pass command. Automatic findings routing is an explicit `task loop` 
 
 ```sh
 task loop DEV-20
+task loop DEV-20 --from-review
 task loop DEV-20 --agent codex --model gpt-6-astra --mode high --max-reviews 3 --max-passes 6
 task loop DEV-20 --pause-after-current
 task loop DEV-20 --status --json
@@ -277,12 +278,19 @@ task loop DEV-20 --continue
 ```
 
 Start with the original implementation context idle in the exact open task
-checkout. `loop` resumes it to finish outstanding implementation/validation and
-collect a nonce-bound structured completion result. This is also the entry point
-for an already-completed implementation: the agent is instructed to report its
-work without replaying it. The command does not adopt an arbitrary running turn
-or infer completion from idle status alone. Let an existing implementation turn
-finish before starting the loop.
+checkout. By default, `loop` resumes it to finish outstanding implementation and
+validation and collect a nonce-bound structured completion result. For an already-completed
+implementation, this default pass asks the agent to report its work without
+replaying it.
+
+When you know the initial implementation is complete, `--from-review` explicitly
+starts a new loop at fresh review, without sending an initial implementation
+completion turn. It still verifies and saves the exact single idle, resumable implementation
+context for later fixes. The human selects the starting boundary; idle status alone
+never establishes completion. Neither path adopts an arbitrary running turn or
+creates a replacement implementation context. Let the existing implementation turn
+finish before starting either path. `--from-review` can accompany `--new`, but
+cannot accompany `--continue`, `--status`, or `--pause-after-current`.
 
 The first review uses the existing fresh review primitive with a newly allocated
 independent reviewer. It receives current requirements and actual repository
@@ -305,8 +313,10 @@ later passes and explicit continuation preserve recorded settings.
 ### Boundaries and graceful pause
 
 The saved next phase is one of `implementation` (initial completion), `review`
-(fresh review), `fixes`, or `rereview`. Each completed pass and its next boundary
-are checkpointed before any automatic handoff. From another terminal, request
+(fresh review), `fixes`, or `rereview`. A review-start checkpoint also records its
+explicit initial boundary; default checkpoints retain their initial completion
+semantics. Each completed pass and its next boundary are checkpointed before any
+automatic handoff. From another terminal, request
 `--pause-after-current` while either agent is working. The controller lets that
 pass finish, validates/collects its result, and stops before the next handoff.
 It does not send cancellation or restart the agent. A clean terminal review
@@ -359,7 +369,9 @@ The compact final report includes implementation summaries, review iterations,
 substantive findings, claimed fixes, validation and limitations, final review
 state, context IDs, and whether human action is required. `--json` supplies the
 versioned equivalent, including the pending boundary and any uncertain active
-pass. Run/continue exit codes are 0 for clean, 3 for pause/escalation, 130 for
+pass. Review-start reports include only passes actually run: a clean first review
+counts as one pass, with no initial implementation summary or validation claim.
+Run/continue exit codes are 0 for clean, 3 for pause/escalation, 130 for
 caught interruption, and 1 for preflight/storage errors. Successful pause/status
 requests exit 0; their reported state remains authoritative.
 
