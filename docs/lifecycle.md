@@ -40,9 +40,16 @@ committing, pushing, merging, or opening a PR. The Python workflow owns the Line
 lookup; the execution agent is told not to contact Linear or read its credentials.
 No task description file is written into the worktree.
 
+Before any Git update, worktree creation/reuse, Linear status change, or context
+allocation/agent launch, agent-backed starts require a recognizable collapsed
+`Agent instructions` section in the current issue description. Missing guidance
+refuses the start and asks the human to refine the issue in Linear. This checks
+section presence only; it does not validate its contents or publication labels.
+
 `task start ISSUE --no-agent` performs the same workspace preparation and Linear
-transition without starting an agent. It does not require `[agent]` or an installed
-agent and cannot be combined with `--agent`, `--model`, or `--mode`.
+transition without starting an agent. It does not require an `Agent instructions`
+block, `[agent]`, or an installed agent and cannot be combined with `--agent`,
+`--model`, or `--mode`.
 
 ## Workspace lifecycle and slices
 
