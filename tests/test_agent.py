@@ -1030,7 +1030,8 @@ class HandoffOrchestrationTests(unittest.TestCase):
         self.linear.start.side_effect = lambda *a: order.append("linear")
         self.agent.launch.side_effect = lambda *a: order.append("agent") or LaunchResult(
             "codex", self.workspace.pane_id, "working")
-        self.linear.get_issue.return_value = replace(ISSUE, title="New title", description="Fresh task\n  exact\n")
+        self.linear.get_issue.return_value = replace(ISSUE, title="New title",
+                                                    description="Fresh task\n  exact\n" + ISSUE.description)
         cli.start("DEV-7", slice="Codex Handoff")
         self.assertEqual(order, ["base", "workspace", "linear", "agent"])
         execution = self.agent.launch.call_args.args[0]

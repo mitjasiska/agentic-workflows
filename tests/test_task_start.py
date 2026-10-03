@@ -20,7 +20,9 @@ from task_start.workspace import Git, Herdr, Workspace, branch_name, run
 
 
 PROJECT = Project("KnowledgeBase", "knowledge-base", "main")
-ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started", state_type="unstarted")
+ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started",
+              description="+++ Agent instructions\n\nImplement the ingestion CLI and validate it.\n\n+++",
+              state_type="unstarted")
 # Deliberately not an API key; no real credentials are used by these tests.
 LOCAL = LocalConfig(Path("/projects"), "test-placeholder", AgentConfig("codex", "gpt-6-astra", "high"))
 
@@ -28,7 +30,7 @@ LOCAL = LocalConfig(Path("/projects"), "test-placeholder", AgentConfig("codex", 
 def issue_data():
     return {"issue": {
         "id": "issue-id", "identifier": "DEV-7", "title": "Add ingestion CLI",
-        "description": "",
+        "description": ISSUE.description,
         "project": {"id": "project-id", "name": "KnowledgeBase"},
         "state": {"id": "todo", "name": "Todo", "type": "unstarted"},
         "team": {"id": "team-id", "states": {
@@ -385,6 +387,70 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(len(output.splitlines()), 7)
         self.assertIn("Linear: In Progress", output)
         self.assertNotIn("test-placeholder", output)
+
+    def test_missing_agent_instructions_refuses_before_any_workflow_mutation(self):
+        for kind in ("codex", "pi"):
+            for description in (None, "", "Implement the ingestion CLI.",
+                                "Mention Agent instructions in the documentation.",
+                                "+++ Reviewer instructions\nReview the changes.\n+++",
+                                "+++ Agent instructions for reviewers\nReview the changes.\n+++"):
+                with self.subTest(kind=kind, description=description):
+                    data = issue_data()
+                    data["issue"]["description"] = description
+                    with patch.object(Linear, "request", return_value=data):
+                        self.linear.get_issue.return_value = Linear("placeholder").get_issue("DEV-7")
+                    with patch("task_start.cli.Git") as git, patch("task_start.cli.Herdr") as herdr, \
+                            patch("task_start.cli.launch_registered") as launch, \
+                            self.assertRaisesRegex(TaskError, "DEV-7.*Agent instructions.*[Rr]efine.*Linear.*agent"):
+                        cli.start("DEV-7", agent_kind=kind)
+                    git.assert_not_called()
+                    herdr.assert_not_called()
+                    self.linear.start.assert_not_called()
+                    launch.assert_not_called()
+                    self.agent.launch.assert_not_called()
+
+    def test_agent_instructions_representations_preserve_exact_handoff(self):
+        for description in (
+                ISSUE.description,
+                "## Outcome\n\nAdd ingestion.\n\n>>> Agent instructions\n\nImplement and validate.\n\n>>>",
+                "+++Agent instructions\nImplement and validate.\n+++",
+                "Fresh task α\r\n\r\n>>> Agent instructions \t\r\n\r\n  Exact whitespace.\r\n\r\n>>>\r\n"):
+            with self.subTest(description=description):
+                data = issue_data()
+                data["issue"]["description"] = description
+                with patch.object(Linear, "request", return_value=data):
+                    issue = Linear("placeholder").get_issue("DEV-7")
+                self.linear.get_issue.return_value = issue
+                self.agent.reset_mock()
+                output = cli.start("DEV-7")
+                self.agent.launch.assert_called_once()
+                execution = self.agent.launch.call_args.args[0]
+                self.assertEqual(execution.issue, issue)
+                self.assertIn(f"Task:\n{description}\n\nInstructions:", execution.handoff)
+                self.assertEqual(issue.labels, ())  # Publication classification is not a start prerequisite.
+                self.assertIn("Linear: In Progress", output)
+
+    def test_missing_agent_instructions_cli_error_requests_refinement(self):
+        self.linear.get_issue.return_value = replace(ISSUE, description="")
+        with patch("sys.stderr", new=io.StringIO()) as stderr, patch("sys.stdout", new=io.StringIO()) as stdout:
+            self.assertEqual(cli.main(["start", "DEV-7"]), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(),
+                         "task: Linear issue DEV-7 has no recognizable Agent instructions block. "
+                         "Refine the issue in Linear before starting agent execution\n")
+
+    def test_no_agent_without_instructions_still_prepares_and_updates_status(self):
+        issue = replace(ISSUE, description="")
+        self.linear.get_issue.return_value = issue
+        with patch("task_start.cli.adapter_for") as adapter, \
+                patch("task_start.cli.launch_registered") as launch:
+            output = cli.start("DEV-7", no_agent=True)
+        self.git.update_base.assert_called_once_with(PROJECT.base_branch)
+        self.herdr.prepare.assert_called_once()
+        self.linear.start.assert_called_once_with(issue)
+        adapter.assert_not_called()
+        launch.assert_not_called()
+        self.assertIn("skipped (--no-agent)", output)
 
     def test_herdr_failure_does_not_update_linear(self):
         self.herdr.prepare.side_effect = TaskError("Herdr failed")

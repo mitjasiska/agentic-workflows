@@ -101,6 +101,11 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
     projects = load_projects()
     linear = Linear(local.api_key)
     issue = linear.get_issue(identifier)
+    # Recognize the collapsed section header only; leave the description intact.
+    if not no_agent and not re.search(
+            r"(?m)^(?:\+\+\+|>>>)[ \t]*Agent instructions[ \t]*\r?$", issue.description):
+        raise TaskError(f"Linear issue {issue.identifier} has no recognizable Agent instructions block. "
+                        "Refine the issue in Linear before starting agent execution")
     project = resolve_project(projects, issue.project)
     repo = repository_path(local, project)
     git = Git(repo)
