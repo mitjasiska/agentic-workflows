@@ -142,6 +142,46 @@ or edit its base checkout during a start.
 See [handoff transport](architecture.md#handoff-transport) for agent-specific
 readiness checks, delivery guarantees, and timeouts.
 
+### Codex first-use trust and setup
+
+For `task start`, initial `task loop` implementation, and fresh `task review`, a
+recognized Codex **Trust this folder?** menu or sign-in method menu pauses the
+original workflow command before task delivery. The message identifies the context,
+checkout, workspace, pane, terminal and any already observed provider session.
+`task contexts ISSUE` shows `awaiting_user`.
+This works with any checkout path, including newly created isolated checkouts.
+
+1. Keep the original workflow command running. Inspect the identified Codex pane
+   and make the trust or authentication decision there yourself.
+2. Return to the terminal running the workflow command and press Enter. This
+   acknowledges your action to the workflow; it sends no keystrokes to Codex.
+3. The workflow reconciles that same process and terminal, finds the provider
+   session using its original readiness marker, and verifies recorded history
+   before attempting the first task delivery. It allows up to 30 seconds for
+   transient post-trust readiness and provider/history verification. If the
+   recognized menu remains, it asks again. Timeout, replacement, additional session
+   input or conflicting evidence stops delivery. A session reported by startup is
+   retained even when startup was non-ready and may continue through the human
+   wait, provided every later runtime observation and provider discovery matches
+   it. Missing or conflicting identity prevents delivery. Initial loop startup
+   also retains that identity while history is unreadable during setup; it must
+   verify the recorded readiness turn after setup before sending the task.
+
+Do not rerun `start`, `review`, or `loop` to get past trust. The original command
+retains the handoff and any review/loop result paths, and the execution timeout
+starts after launch/delivery completes. It neither launches a replacement nor
+replays a queued prompt. `loop --continue` is for saved loop pause boundaries;
+it does not acknowledge a startup trust dialog.
+
+An interactive workflow stdin is required for this continuation. Closed stdin,
+interruption, unsupported/clipped menus, unavailable process evidence, or identity
+changes fail closed. If the original command ends, inspect the retained pane and
+context; a new command cannot reconstruct that in-memory launch or deliver its
+handoff. An `awaiting_user` context continues to prevent replacement allocation
+even after its owner exits; normal confirmed cleanup can retire the mapping.
+Trust/setup after a queue attempt is outside this recovery path: delivery may
+already have happened, so inspect the exact session and never blindly resend.
+
 ## Task review
 
 Review the existing task checkout in a new independent reviewer pane:

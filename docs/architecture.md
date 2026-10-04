@@ -90,6 +90,14 @@ Once ready, the adapter clears stale shell input once and initializes the receip
 API. It issues `agent start` once; Herdr owns the subsequent runtime-readiness wait
 (`--timeout 30000`). The adapter validates the returned runtime target, status and
 exact argv. It never retries `agent start` after a failure or uncertain response.
+If a validated non-ready launch report contains a provider session, the adapter
+persists that identity before further startup inspection. Later omissions or
+conflicting reports cannot erase or replace it, including during trust recovery.
+Initial loop launches retain that identity in the same context guard immediately,
+without requiring readable provider history at the first runtime observation.
+The loop adopts the verified session binding only after the Codex adapter confirms
+the recorded readiness turn within its reconciliation budget; completion verifies
+provider history again.
 Session discovery and recorded-turn confirmation below poll observation only;
 delayed visibility never repeats launch or queues another handoff. Errors identify
 the failed phase; a session that has not been observed is not assumed absent.
@@ -112,10 +120,38 @@ Herdr's `interactive_ready` and `working` states alone do not prove a Codex turn
 startup/trust dialogs can consume terminal input, and `agent prompt --wait` does
 not track individual turns. Codex task text is therefore never pasted into the
 terminal. Receipt polling has a 30-second deadline and never resends input. A blocked
-startup, delivery failure, or timeout is an error, with pane and session IDs for
-inspection. First-time repository trust or authentication may require action in
-Codex; the workflow never approves those dialogs. A queued task may start after
-you resolve a blocker, so inspect that session before retrying.
+startup normally fails closed, with pane and session IDs for inspection.
+
+Before any queue attempt, a typed Herdr `agent_not_ready` response (or a valid
+session-discovery timeout) permits read-only startup inspection. Recovery requires
+the exact Codex argv including the native readiness nonce, foreground process
+identity and checkout, the allocated terminal, and a recognized menu in the visible
+viewport. The supported signatures are Codex's folder-access trust menu and its
+ChatGPT/device-code/API-key sign-in method menu. Missing argv/cwd information or
+clipped/unknown screens refuse this path. An already observed provider identity
+permits this boundary, provided every subsequent runtime observation and provider
+discovery matches it. It does not prove readiness or authorize delivery by itself.
+The adapter never reads credentials, changes trust configuration, or answers a
+Codex dialog.
+
+The original workflow remains alive at an explicit human-action boundary. It saves
+`awaiting_user` in the context registry while retaining the handoff, nonce and
+caller result paths in memory. User acknowledgement rechecks the original process
+and terminal; it does not establish readiness. A single 30-second budget covers
+post-action runtime reconciliation, provider discovery and readiness/history checks.
+Transient `blocked` or `unknown` reports are polled on the same process and terminal;
+observations receive the remaining budget, and late responses cannot authorize
+delivery. Identity conflicts, replacement, unsupported evidence or timeout stop
+recovery. Only the exact provider session and recorded readiness exchange permit
+progress. A paginated history check rejects
+additional user input, and the adapter rechecks process identity before its first
+queue attempt. If readiness regresses during verification, history must be checked
+again after the same runtime becomes ready within that budget. Process observation,
+provider identity, and recorded task delivery
+remain separate facts. Queue errors and uncertain receipts never enter recovery.
+Interrupted owners retain the pending mapping and cannot be replaced automatically;
+there is no reconstruction of a lost launch from a new command. See the
+[user-action flow](lifecycle.md#codex-first-use-trust-and-setup).
 
 ### Pi prompt submission
 
@@ -170,7 +206,7 @@ Cleanup never resets ordinals. Deleting this database is a destructive registry
 reset that discards allocation history; normal operations never do that.
 
 Context identity, runtime/session references, resumability, and lifecycle status
-are independent fields. The registry records `launching`, `active`, `uncertain`,
+are independent fields. The registry records `launching`, `awaiting_user`, `active`, `uncertain`,
 and `retired` observations; it does not implement a state-machine framework or
 semantic run reports. Adapter observers save real session handles as soon as they
 become available in startup, confirmation, or prompt responses, including before

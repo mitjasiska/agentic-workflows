@@ -1,6 +1,7 @@
 import copy
 from dataclasses import replace
 import json
+import io
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,12 +9,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from task_start import TaskError, cli
+from task_start import AgentNotReady, TaskError, cli
 from task_start.agent import AgentOptions, Codex
 from task_start.contexts import ContextRegistry, HerdrContexts
 from task_start.handoff import implementation_handoff
 from task_start.workspace import Workspace
-from codex_startup_fixture import CodexStartupTransport
+from codex_startup_fixture import AUTH_SCREEN, TRUST_SCREEN, CodexStartupTransport
 from test_task_start import ISSUE, LOCAL, PROJECT
 
 
@@ -184,8 +185,574 @@ class FreshCodexStartTests(unittest.TestCase):
         row = self.registry.get("DEV-7-I1")
         self.assertEqual((row["state"], row["session_id"], row["resumability"]), ("uncertain", t.thread_id, "yes"))
 
+    def human_input(self, action, *, interactive=True):
+        self.enterContext(patch('task_start.agent.sys.stdin', SimpleNamespace(
+            isatty=lambda: interactive, readline=action)))
+        return self.enterContext(patch('task_start.agent.sys.stderr', new_callable=io.StringIO))
+
+    def test_trust_before_identity_continues_original_launch_and_context(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        def accept():
+            row = self.registry.get('DEV-7-I1')
+            self.assertEqual((row['state'], row['session_id']), ('awaiting_user', None))
+            self.assertEqual((row['pane_id'], row['terminal_id']), ('p1', 'term1'))
+            t.assert_effects(1, 0)
+            with self.assertRaisesRegex(TaskError, 'already occupies'):
+                cli.start('DEV-7')
+            # Even a caller choosing a new pane cannot replace the waiting context.
+            with self.assertRaisesRegex(TaskError, 'no replacement'):
+                self.registry.allocate('DEV-7', 'implementation', agent='codex',
+                    repository=row['repository'], worktree=row['worktree'], pane_id='replacement')
+            t.accept_setup()
+            return '\n'
+        out = self.human_input(accept)
+        result = cli.start('DEV-7')
+        self.assertIn('DEV-7-I1: Codex turn task-turn confirmed', result)
+        self.assertIn('waiting for user repository trust', out.getvalue())
+        self.assertIn(str(self.workspace.path), out.getvalue())
+        self.assertIn('pane: p1; terminal: term1', out.getvalue())
+        self.assertIn('task delivery not attempted', out.getvalue())
+        self.assertEqual(len(self.registry.list()), 1)
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], t.thread_id)
+        t.assert_effects(1, 1)
+        t.keys.assert_called_once()  # Only the pre-launch shell Ctrl+C.
+
+    def test_new_isolated_checkout_is_not_replaced_after_trust(self):
+        path = self.workspace.path / 'integrations' / 'unique-attempt' / 'checkout'
+        path.mkdir(parents=True)
+        self.workspace = replace(self.workspace, path=path)
+        self.herdr.prepare.return_value = self.workspace
+        self.pane['cwd'] = str(path)
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['worktree'], str(path))
+        self.assertEqual(t.argv[t.argv.index('--cd') + 1], str(path))
+        self.assertEqual(t.queued['input'][0]['text'], implementation_handoff(ISSUE, self.workspace))
+        t.assert_effects(1, 1)
+
+    def test_known_authentication_then_trust_uses_same_human_boundary(self):
+        t = self.transport
+        t.blocker = AUTH_SCREEN
+        actions = []
+        def accept():
+            actions.append(t.blocker)
+            if len(actions) == 1:
+                t.blocker = TRUST_SCREEN
+            else:
+                t.accept_setup()
+            return '\n'
+        out = self.human_input(accept)
+        cli.start('DEV-7')
+        self.assertEqual(actions, [AUTH_SCREEN, TRUST_SCREEN])
+        self.assertIn('authentication setup', out.getvalue())
+        self.assertIn('repository trust', out.getvalue())
+        t.assert_effects(1, 1)
+
+    def test_idle_trust_screen_without_provider_is_also_reconciled(self):
+        t = self.transport
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        cli.start('DEV-7')
+        t.assert_effects(1, 1)
+
+    def test_enter_does_not_prove_setup_completed_or_send_input(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        calls = []
+        def accept():
+            calls.append(True)
+            t.assert_effects(1, 0)
+            if len(calls) == 2:
+                t.accept_setup()
+            return '\n'
+        self.human_input(accept)
+        cli.start('DEV-7')
+        self.assertEqual(len(calls), 2)
+        t.assert_effects(1, 1)
+
+    def test_noninteractive_wait_fails_closed_and_retains_pending_context(self):
+        self.transport.blocker = TRUST_SCREEN
+        out = self.human_input(lambda: self.fail('must not read noninteractive stdin'), interactive=False)
+        with self.assertRaisesRegex(TaskError, 'stdin is not a terminal'):
+            cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'awaiting_user')
+        self.assertIn('Do not rerun', out.getvalue())
+        self.transport.assert_effects(1, 0)
+
+    def test_interrupted_wait_retains_context_without_provider_or_delivery(self):
+        self.transport.blocker = TRUST_SCREEN
+        def interrupt():
+            raise KeyboardInterrupt()
+        self.human_input(interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            cli.start('DEV-7')
+        row = self.registry.get('DEV-7-I1')
+        self.assertEqual((row['state'], row['session_id']), ('awaiting_user', None))
+        self.transport.assert_effects(1, 0)
+
+    def test_eof_during_wait_is_not_acknowledgement(self):
+        self.transport.blocker = TRUST_SCREEN
+        self.human_input(lambda: '')
+        with self.assertRaisesRegex(TaskError, 'input closed'):
+            cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'awaiting_user')
+        self.transport.assert_effects(1, 0)
+
+    def test_process_replacement_after_user_action_never_queues(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        def accept():
+            t.accept_setup()
+            t.process_pid += 1
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'process changed'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_terminal_replacement_after_user_action_never_queues(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        def accept():
+            t.accept_setup()
+            self.pane['terminal_id'] = 'replacement'
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'terminal changed'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_acknowledgement_without_provider_identity_never_delivers(self):
+        t = self.transport
+        t.blocker, t.session_delay = TRUST_SCREEN, 100
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        with self.assertRaisesRegex(TaskError, 'readiness turn not found'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_extra_provider_input_after_user_action_makes_delivery_uncertain(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        def accept():
+            t.accept_setup()
+            t.extra_items = [dict(turnId='external', item=dict(type='userMessage', clientId='external',
+                content=[dict(type='text', text=implementation_handoff(ISSUE, self.workspace))]))]
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'delivery is uncertain'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_queue_response_lost_after_trust_never_reenters_recovery(self):
+        t = self.transport
+        t.blocker, t.queue_error = TRUST_SCREEN, TaskError('queue response lost')
+        calls = []
+        def accept():
+            calls.append(True)
+            t.accept_setup()
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'prompt queue.*queue response lost'):
+            cli.start('DEV-7')
+        self.assertEqual(calls, [True])
+        self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'uncertain')
+        t.assert_effects(1, 1)
+
+    def test_unknown_setup_screen_never_requests_or_sends_input(self):
+        self.transport.blocker = 'Trust this folder?\nA quoted log line, not the recognized menu'
+        self.human_input(lambda: self.fail('unrecognized screen must fail closed'))
+        with self.assertRaisesRegex(TaskError, 'ambiguous or unsupported'):
+            cli.start('DEV-7')
+        self.transport.assert_effects(1, 0)
+
+    def test_mismatched_viewport_is_not_accepted(self):
+        self.transport.blocker = TRUST_SCREEN
+        self.transport.view_changes = dict(pane_id='another-pane')
+        self.human_input(lambda: self.fail('mismatched screen must fail closed'))
+        with self.assertRaisesRegex(TaskError, 'invalid startup viewport'):
+            cli.start('DEV-7')
+        self.transport.assert_effects(1, 0)
+
+    def test_wrapped_trust_disclosure_is_recognized_with_complete_menu(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN.replace('Codex can read, edit, and run files here,',
+                                         'Codex can read,\n  edit, and run files here,')
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        cli.start('DEV-7')
+        t.assert_effects(1, 1)
+
+    def test_nonready_launch_with_stable_session_continues_after_user_trust_once(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value=t.thread_id)
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='blocked', agent_session=first)
+        t.get_changes = dict(agent_status='blocked', agent_session=first)
+        actions = []
+        def accept():
+            row = self.registry.get('DEV-7-I1')
+            self.assertEqual((row['state'], row['session_id']), ('awaiting_user', first['value']))
+            self.assertEqual(json.loads(row['herdr_session']), first)
+            self.assertEqual((row['pane_id'], row['terminal_id'], row['worktree']),
+                             ('p1', 'term1', str(self.workspace.path)))
+            t.assert_effects(1, 0)
+            with self.assertRaisesRegex(TaskError, 'no replacement'):
+                self.registry.allocate('DEV-7', 'implementation', agent='codex',
+                    repository=row['repository'], worktree=row['worktree'], pane_id='replacement')
+            actions.append(True)
+            t.accept_setup()
+            t.get_changes = dict(agent_session=first)
+            return '\n'
+        out = self.human_input(accept)
+        result = cli.start('DEV-7')
+        self.assertIn('DEV-7-I1: Codex turn task-turn confirmed', result)
+        self.assertEqual(actions, [True])
+        self.assertIn('waiting for user repository trust', out.getvalue())
+        self.assertIn('provider session observed: ' + first['value'], out.getvalue())
+        self.assertNotIn('provider session not yet observed', out.getvalue())
+        self.assertIn('task delivery not attempted', out.getvalue())
+        row = self.registry.get('DEV-7-I1')
+        self.assertEqual((row['state'], row['session_id'], row['resumability']), ('active', first['value'], 'yes'))
+        self.assertEqual((row['pane_id'], row['terminal_id']), ('p1', 'term1'))
+        self.assertEqual(len(self.registry.list()), 1)
+        self.assertEqual(t.queued['threadId'], first['value'])
+        self.assertEqual(t.queued['input'][0]['text'], implementation_handoff(ISSUE, self.workspace))
+        t.assert_effects(1, 1)
+        t.keys.assert_called_once()  # Only the pre-launch shell Ctrl+C.
+
+    def test_established_startup_session_must_remain_reported_after_human_wait(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value=t.thread_id)
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='blocked', agent_session=first)
+        t.get_changes = dict(agent_session=first)
+        actions = []
+        def accept():
+            actions.append(True)
+            t.accept_setup()
+            t.get_changes = dict(agent_session=None)
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'session changed or is no longer reported'):
+            cli.start('DEV-7')
+        self.assertEqual(actions, [True])
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        t.assert_effects(1, 0)
+
+    def test_established_startup_session_cannot_change_during_human_wait(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value=t.thread_id)
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='blocked', agent_session=first)
+        t.get_changes = dict(agent_session=first)
+        actions = []
+        def accept():
+            actions.append(True)
+            t.accept_setup()
+            t.get_changes = dict(agent_session=dict(first, value='11a0d314-bd68-7203-8b68-f2520f892afa'))
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'session changed'):
+            cli.start('DEV-7')
+        self.assertEqual(actions, [True])
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        self.assertEqual(len(self.registry.list()), 1)
+        t.assert_effects(1, 0)
+
+    def test_established_startup_session_with_prior_task_input_never_replays(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value=t.thread_id)
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='blocked', agent_session=first)
+        t.get_changes = dict(agent_session=first)
+        t.extra_items = [dict(turnId='external', item=dict(type='userMessage', clientId='external',
+            content=[dict(type='text', text=implementation_handoff(ISSUE, self.workspace))]))]
+        actions = []
+        def accept():
+            actions.append(True)
+            t.accept_setup()
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'delivery is uncertain'):
+            cli.start('DEV-7')
+        self.assertEqual(actions, [True])
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        t.assert_effects(1, 0)
+
+    def test_nonready_launch_session_is_not_forgotten_before_recovery(self):
+        # R1: start reports A, subsequent startup reads omit it, and accepting
+        # trust would expose B. The first immutable identity must survive.
+        t = self.transport
+        first = dict(agent='codex', kind='id', value='11a0d314-bd68-7203-8b68-f2520f892afa')
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='blocked', agent_session=first)
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        with self.assertRaisesRegex(TaskError, 'session changed or is no longer reported') as caught:
+            cli.start('DEV-7')
+        self.assertIn('Session: ' + first['value'], str(caught.exception))
+        row = self.registry.get('DEV-7-I1')
+        self.assertEqual((row['session_id'], row['session_kind']), (first['value'], 'id'))
+        self.assertEqual(json.loads(row['herdr_session']), first)
+        self.assertEqual(len(self.registry.list()), 1)
+        t.assert_effects(1, 0)
+
+    def test_nonready_launch_refuses_conflicting_next_session_without_rebinding(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value='11a0d314-bd68-7203-8b68-f2520f892afa')
+        t.blocker, t.start_not_ready = TRUST_SCREEN, False
+        t.start_changes = dict(agent_status='unknown', agent_session=first)
+        t.get_changes = dict(agent_session=dict(first, value=t.thread_id))
+        self.human_input(lambda: self.fail('conflicting session must not enter human wait'))
+        with self.assertRaisesRegex(TaskError, 'session changed'):
+            cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        t.assert_effects(1, 0)
+
+    def test_post_trust_transient_runtime_statuses_reconcile_same_launch(self):
+        # R1: the trust menu has gone but runtime detection still reports blocked
+        # and unknown before observing idle on the same original process.
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        pending, observed = [], []
+        def accept():
+            t.accept_setup()
+            pending.extend(['blocked', 'unknown', 'idle'])
+            return '\n'
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if (group, operation) == ('agent', 'get') and pending:
+                status = pending.pop(0)
+                observed.append(status)
+                result['agent']['agent_status'] = status
+                t.assert_effects(1, 0)
+            return result
+        t.command.side_effect = herdr
+        self.human_input(accept)
+        result = cli.start('DEV-7')
+        self.assertIn('DEV-7-I1: Codex turn task-turn confirmed', result)
+        self.assertEqual(observed, ['blocked', 'unknown', 'idle'])
+        self.assertEqual(len(self.registry.list()), 1)
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], t.thread_id)
+        t.assert_effects(1, 1)
+
+    def test_post_trust_persistent_unknown_status_times_out_without_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        accepted = []
+        def accept():
+            t.accept_setup()
+            accepted.append(t.now)
+            t.get_changes = dict(agent_status='unknown')
+            return '\n'
+        self.human_input(accept)
+        with patch.object(Codex, 'POST_TRUST_READY_TIMEOUT', 0.5), self.assertRaisesRegex(
+                TaskError, 'Timed out reconciling Codex readiness'):
+            cli.start('DEV-7')
+        self.assertEqual(t.now, accepted[0] + 0.5)
+        self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'awaiting_user')
+        t.assert_effects(1, 0)
+
+    def test_post_trust_process_replacement_during_transient_status_refuses_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        pending = []
+        def accept():
+            t.accept_setup()
+            pending.append(True)
+            return '\n'
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if pending and (group, operation) == ('agent', 'get'):
+                pending.pop()
+                result['agent']['agent_status'] = 'blocked'
+                t.process_pid += 1
+            return result
+        t.command.side_effect = herdr
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'process changed during user action'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_post_trust_runtime_session_conflict_retains_first_observation(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value='11a0d314-bd68-7203-8b68-f2520f892afa')
+        t.blocker = TRUST_SCREEN
+        pending = []
+        def accept():
+            t.accept_setup()
+            pending.extend([first, dict(first, value=t.thread_id)])
+            return '\n'
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if pending and (group, operation) == ('agent', 'get'):
+                result['agent'].update(agent_session=pending.pop(0), agent_status='blocked')
+            return result
+        t.command.side_effect = herdr
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'session changed'):
+            cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        t.assert_effects(1, 0)
+
+    def test_post_trust_runtime_session_must_match_provider_discovery(self):
+        t = self.transport
+        first = dict(agent='codex', kind='id', value='11a0d314-bd68-7203-8b68-f2520f892afa')
+        t.blocker = TRUST_SCREEN
+        def accept():
+            t.accept_setup()
+            t.get_changes = dict(agent_session=first)
+            return '\n'
+        self.human_input(accept)
+        with self.assertRaisesRegex(TaskError, 'session does not match the provider session'):
+            cli.start('DEV-7')
+        self.assertEqual(self.registry.get('DEV-7-I1')['session_id'], first['value'])
+        t.assert_effects(1, 0)
+
+    def test_post_trust_ready_observation_after_deadline_does_not_deliver(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        accepted, budgets = [], []
+        def accept():
+            t.accept_setup()
+            accepted.append(t.now)
+            return '\n'
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if accepted:
+                budgets.append(kwargs['timeout'])
+                if (group, operation) == ('pane', 'read'):
+                    t.advance(0.5)
+            return result
+        t.command.side_effect = herdr
+        self.human_input(accept)
+        with patch.object(Codex, 'POST_TRUST_READY_TIMEOUT', 0.5), self.assertRaisesRegex(
+                TaskError, 'Timed out reconciling Codex readiness'):
+            cli.start('DEV-7')
+        self.assertEqual(budgets, [0.5, 0.5, 0.5])
+        self.assertEqual(t.now, accepted[0] + 0.5)
+        t.assert_effects(1, 0)
+
+    def test_post_trust_provider_discovery_uses_remaining_runtime_budget(self):
+        t = self.transport
+        t.blocker, t.session_delay = TRUST_SCREEN, 100
+        accepted, pending = [], []
+        def accept():
+            t.accept_setup()
+            accepted.append(t.now)
+            pending.append(True)
+            return '\n'
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if pending and (group, operation) == ('agent', 'get'):
+                pending.pop()
+                result['agent']['agent_status'] = 'blocked'
+            return result
+        t.command.side_effect = herdr
+        self.human_input(accept)
+        with patch.object(Codex, 'POST_TRUST_READY_TIMEOUT', 0.5), self.assertRaisesRegex(
+                TaskError, 'readiness turn not found'):
+            cli.start('DEV-7')
+        self.assertEqual(t.now, accepted[0] + 0.5)
+        calls = [c for c in t.rpc.request.call_args_list if c.args[0] == 'thread/list']
+        self.assertEqual([c.kwargs['timeout'] for c in calls], [0.25])
+        t.assert_effects(1, 0)
+
+    def test_post_trust_delivery_history_is_rechecked_after_late_status_regression(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        reads, regressed = [], []
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        def request(method, params, **kwargs):
+            if method == 'thread/items/list':
+                reads.append(True)
+            return t.request(method, params, **kwargs)
+        def herdr(group, operation, *args, **kwargs):
+            result = t.herdr(group, operation, *args, **kwargs)
+            if len(reads) == 2 and not regressed and (group, operation) == ('agent', 'get'):
+                regressed.append(True)
+                result['agent']['agent_status'] = 'unknown'
+                t.extra_items = [dict(turnId='external', item=dict(type='userMessage',
+                    content=[dict(type='text', text='task already entered')]))]
+            return result
+        t.rpc.request.side_effect = request
+        t.command.side_effect = herdr
+        with self.assertRaisesRegex(TaskError, 'delivery is uncertain'):
+            cli.start('DEV-7')
+        self.assertEqual(regressed, [True])
+        self.assertEqual(len(reads), 3)
+        t.assert_effects(1, 0)
+
+    def test_changed_process_during_history_reconciliation_prevents_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        reads = []
+        def request(method, params, **kwargs):
+            result = t.request(method, params, **kwargs)
+            if method == 'thread/items/list':
+                reads.append(True)
+                if len(reads) == 2:
+                    t.process_pid += 1
+            return result
+        t.rpc.request.side_effect = request
+        with self.assertRaisesRegex(TaskError, 'changed before delivery'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_additional_input_on_later_history_page_prevents_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        def request(method, params, **kwargs):
+            result = t.request(method, params, **kwargs)
+            if method == 'thread/items/list':
+                if params.get('cursor') == 'second':
+                    return dict(data=[dict(turnId='external', item=dict(type='userMessage',
+                        content=[dict(type='text', text='already delivered task')]))], nextCursor=None)
+                result['nextCursor'] = 'second'
+            return result
+        t.rpc.request.side_effect = request
+        with self.assertRaisesRegex(TaskError, 'delivery is uncertain'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_cyclic_history_pages_fail_closed(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), '\n')[1])
+        def request(method, params, **kwargs):
+            result = t.request(method, params, **kwargs)
+            if method == 'thread/items/list':
+                if params.get('cursor'):
+                    return dict(data=[], nextCursor='cycle')
+                result['nextCursor'] = 'cycle'
+            return result
+        t.rpc.request.side_effect = request
+        with self.assertRaisesRegex(TaskError, 'ambiguous Codex history pagination'):
+            cli.start('DEV-7')
+        t.assert_effects(1, 0)
+
+    def test_missing_process_evidence_is_not_accepted(self):
+        self.transport.blocker = TRUST_SCREEN
+        self.transport.process_changes = dict(foreground_processes=[])
+        self.human_input(lambda: self.fail('missing process must fail closed'))
+        with self.assertRaisesRegex(TaskError, 'Cannot prove the original'):
+            cli.start('DEV-7')
+        self.transport.assert_effects(1, 0)
+
 
 class ShellReadinessTransportTests(unittest.TestCase):
+    def test_agent_not_ready_transport_error_is_typed_without_echoing_output(self):
+        from task_start.workspace import run
+        error = json.dumps(dict(error=dict(code='agent_not_ready', message='sensitive UI text'))).encode()
+        with patch('task_start.workspace.subprocess.run', return_value=subprocess.CompletedProcess(
+                [], 1, b'', error)), self.assertRaises(AgentNotReady) as caught:
+            run(['herdr', 'agent', 'start', 'task-name'])
+        self.assertIn('agent_not_ready', str(caught.exception))
+        self.assertNotIn('sensitive', str(caught.exception))
+
     def test_remaining_budget_reaches_subprocess_and_transport_timeout_stops_input(self):
         workspace = Workspace("dev-7-test", Path("/checkout"), "w1", "t1", "p1", "ready")
         adapter = Codex(AgentOptions("codex"))

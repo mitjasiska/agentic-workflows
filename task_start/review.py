@@ -174,6 +174,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
 def review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
                 local, resume, agent_kind, model, mode, timeout, store, *, loop_feedback=None,
                 before_handoff=None, pass_observer=None):
+    registry.check_pending_startup(issue.identifier, repo, workspace.path, "review")
     context, pane = (resolve_reviewer(resume, issue, workspace, repo, endpoint, registry, identities)
                      if resume is not None else (None, None))
     options = (AgentOptions(context["agent"], context["model"], context["mode"]) if context else

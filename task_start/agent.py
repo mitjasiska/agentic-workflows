@@ -8,11 +8,12 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
-from . import TaskError
+from . import AgentNotReady, TaskError
 from .codex_rpc import CodexRPC
 from .config import AgentConfig
 from .linear import Issue
@@ -60,6 +61,7 @@ class AgentExecution:
     policy: Mapping[str, object] = field(default_factory=dict)
     # Optional workflow-owned persistence hook; never includes the semantic handoff.
     runtime_observer: Callable[[dict], None] | None = field(default=None, compare=False, repr=False)
+    context_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.handoff, str) or not self.handoff.strip():
@@ -150,6 +152,7 @@ class HerdrAgentAdapter:
     def command(self, group: str, operation: str, *args: str, timeout: float = 120) -> dict:
         output = run(["herdr", group, operation, *args], timeout=timeout)
         expected = {("pane", "list"): "pane_list", ("agent", "start"): "agent_started",
+                    ("pane", "read"): "pane_read",
                     ("pane", "process-info"): "pane_process_info",
                     ("agent", "get"): "agent_info", ("agent", "prompt"): "agent_prompted"}
         try:
@@ -200,10 +203,12 @@ class HerdrAgentAdapter:
                               "--kind", self.kind, "--pane", workspace.pane_id,
                               "--timeout", "30000", "--", *args)
         self.validate_agent(result["agent"], workspace, review=review)
-        if (result["agent"]["agent_status"] not in {"idle", "done", "working"}
-                or result["argv"] != [self.kind, *args]):
+        if result["argv"] != [self.kind, *args]:
             raise ValueError(f"{self.display_name} launch/readiness not confirmed: "
                              f"status={result['agent']['agent_status']!r}, argv_match={result['argv'] == [self.kind, *args]}")
+        if result["agent"]["agent_status"] not in {"idle", "done", "working"}:
+            raise AgentNotReady(f"{self.display_name} launch/readiness not confirmed: "
+                                f"status={result['agent']['agent_status']!r}", agent=result["agent"])
         return result["agent"]
 
     def observe_agent(self, execution: AgentExecution, agent: dict,
@@ -316,6 +321,10 @@ class HerdrAgentAdapter:
             raise TaskError("Reviewer resume identity or delivery was not confirmed; inspect its pane") from None
 
 
+class CodexSessionNotObserved(TaskError):
+    """Only a bounded, valid observation with no matching readiness session."""
+
+
 class CodexAdapter(HerdrAgentAdapter):
     """Codex TUI adapter with durable app-server prompt receipt confirmation."""
 
@@ -323,6 +332,7 @@ class CodexAdapter(HerdrAgentAdapter):
     display_name = "Codex"
     MODES = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
     SHELL_READY_TIMEOUT = 30
+    POST_TRUST_READY_TIMEOUT = 30
 
     def validate_options(self) -> None:
         mode = "none" if self.options.mode == "off" else self.options.mode
@@ -457,12 +467,174 @@ class CodexAdapter(HerdrAgentAdapter):
             time.sleep(min(0.25, remaining))
         run(["herdr", "pane", "send-keys", workspace.pane_id, "ctrl+c"])
 
+    def startup_process(self, workspace: Workspace, args: list[str], *, timeout=120) -> tuple[int, int, int]:
+        """Bind a delayed launch to its exact native argv, checkout and OS process.
+
+        This is process evidence only; it never establishes a provider session or
+        authorizes a prompt. Platforms without argv/cwd evidence fail closed.
+        """
+        info = self.command("pane", "process-info", "--pane", workspace.pane_id, timeout=timeout)["process_info"]
+        processes = info["foreground_processes"]
+        if (info["pane_id"] != workspace.pane_id or not isinstance(processes, list)
+                or any(not isinstance(p, dict) for p in processes)):
+            raise ValueError("invalid startup process observation")
+        matches = [p for p in processes if isinstance(p.get("argv"), list)
+                   and p["argv"] and Path(p["argv"][0]).name == "codex" and p["argv"][1:] == args]
+        if len(matches) != 1:
+            raise TaskError("Cannot prove the original Codex startup process; inspect the pane")
+        process = matches[0]
+        identity = (info["shell_pid"], info["foreground_process_group_id"], process["pid"])
+        if (any(type(pid) is not int or pid <= 0 for pid in identity)
+                or not Path(process["cwd"]).is_absolute()
+                or Path(process["cwd"]).resolve() != workspace.path):
+            raise ValueError("startup process identity/checkout mismatch")
+        return identity
+
+    def startup_blocker(self, workspace: Workspace, *, timeout=120) -> str | None:
+        # Use only the visible viewport, never scrollback or a loose word search.
+        # These signatures match Codex's onboarding widgets. Unknown versions,
+        # clipped menus and later approval dialogs are deliberately unsupported.
+        view = self.command("pane", "read", workspace.pane_id, "--source", "visible", "--format", "text",
+                            timeout=timeout)["read"]
+        if (any(view[k] != v for k, v in dict(pane_id=workspace.pane_id,
+                workspace_id=workspace.workspace_id, tab_id=workspace.tab_id,
+                source="visible", format="text").items())
+                or view["truncated"] is not False or not isinstance(view["text"], str)):
+            raise ValueError("invalid startup viewport observation")
+        lines = [line.strip() for line in view["text"].splitlines()]
+
+        def option(number, text):
+            return any(re.fullmatch(r"[›>❯]?\s*" + str(number) + r"\.\s*" + re.escape(text), line)
+                       for line in lines)
+
+        if (any(line.startswith("Trust this folder?") for line in lines)
+                and "Trust this folder? Codex can read, edit, and run files here" in " ".join(lines)
+                and "Folder access" in lines and option(1, "Trust and continue") and option(2, "Quit")):
+            return "repository trust"
+        if (option(1, "Sign in with ChatGPT") and option(2, "Sign in with Device Code")
+                and (option(3, "Use an OpenAI API key") or option(3, "Provide your own API key"))):
+            return "authentication setup"
+        return None
+
+    def wait_for_startup_action(self, execution: AgentExecution, observed: dict, blocker: str) -> None:
+        """Keep the owning operation, handoff and temporary result paths alive.
+
+        Enter is sent to this workflow's stdin, never to the Codex pane. A closed
+        or noninteractive caller cannot retain a safe continuation and fails closed.
+        """
+        reference = observed.get("_session_reference")
+        session = (f"provider session observed: {reference['value']}" if reference is not None
+                   else "provider session not yet observed")
+        message = (f"{execution.context_id or execution.issue.identifier} ({execution.purpose}): "
+                   f"Codex is waiting for user {blocker}.\nCheckout: {execution.workspace.path}\n"
+                   f"Workspace: {execution.workspace.workspace_id}; pane: {execution.workspace.pane_id}; "
+                   f"terminal: {observed['terminal_id']}\n"
+                   f"Process verified; {session}; task delivery not attempted.\n"
+                   "Handle trust/setup yourself in that Codex pane. Keep this workflow command running; "
+                   "return here and press Enter to reconcile the same launch. Do not rerun the task command.\n"
+                   "If this command ends, inspect the retained context; automatic recovery is unavailable.")
+        print("".join(c if c.isprintable() or c == "\n" else "?" for c in message), file=sys.stderr, flush=True)
+        if not sys.stdin.isatty():
+            raise TaskError("User action requires the original interactive workflow command; "
+                            "stdin is not a terminal. Context retained; inspect it, do not relaunch")
+        if sys.stdin.readline() == "":
+            raise TaskError("Workflow input closed during user action; context retained for inspection")
+
+    @staticmethod
+    def startup_remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TaskError("Timed out reconciling Codex readiness after user action; "
+                            "inspect the retained context. No task prompt was sent")
+        return remaining
+
+    def reconcile_startup(self, execution, args, process, observed, deadline, *, expected_session=None):
+        """Poll only observations of the original runtime within one shared budget."""
+        workspace = execution.workspace
+        while True:
+            if self.startup_process(workspace, args, timeout=self.startup_remaining(deadline)) != process:
+                raise TaskError("Codex startup process changed during user action; no task prompt was sent")
+            observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id,
+                timeout=self.startup_remaining(deadline))["agent"], observed, expected_session=expected_session)
+            blocker = self.startup_blocker(workspace, timeout=self.startup_remaining(deadline))
+            remaining = self.startup_remaining(deadline)  # Reject even ready observations returned late.
+            if blocker is not None or observed["agent_status"] in {"idle", "done", "working"}:
+                return observed, blocker
+            if observed["agent_status"] not in {"blocked", "unknown"}:
+                raise TaskError("Codex runtime state is unsupported after user action; no task prompt was sent")
+            time.sleep(min(0.25, remaining))
+
+    def recover_startup(self, execution: AgentExecution, args: list[str], previous=None) -> tuple[dict, tuple[int, int, int], float]:
+        """Observation and human reconciliation only, reachable strictly pre-queue."""
+        workspace = execution.workspace
+        observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id)["agent"], previous)
+        process = self.startup_process(workspace, args)
+        while True:
+            blocker = self.startup_blocker(workspace)
+            if blocker is None or observed["agent_status"] not in {"blocked", "unknown", "idle"}:
+                raise TaskError("Codex startup blocker is ambiguous or unsupported; inspect the exact pane/session. "
+                                "No task prompt was sent")
+            # A session may already be known before setup finishes. Keep it
+            # bound across every observation, including the human wait.
+            observed = self.confirm_target(execution, observed)
+            if self.startup_process(workspace, args) != process:
+                raise TaskError("Codex startup identity changed during blocker inspection")
+            if execution.runtime_observer:
+                execution.runtime_observer(dict(state="awaiting_user"))
+            self.wait_for_startup_action(execution, observed, blocker)
+            # Acknowledgement is not readiness. Runtime detection can lag behind
+            # trust acceptance; preserve identity while polling, never restart.
+            deadline = time.monotonic() + self.POST_TRUST_READY_TIMEOUT
+            observed, blocker = self.reconcile_startup(execution, args, process, observed, deadline)
+            if blocker is None:
+                return observed, process, deadline
+
+    def confirm_no_task_input(self, rpc, thread_id, bootstrap, *, deadline=None):
+        """After a human boundary, refuse any input beyond our native readiness turn.
+
+        This call path has never attempted queue/add. Combined with exact provider
+        history, that permits its first delivery only; missing receipts after a
+        queue attempt elsewhere never reach this recovery path.
+        """
+        cursor, seen, users = None, set(), 0
+        deadline = time.monotonic() + 30 if deadline is None else deadline
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TaskError("Codex history reconciliation timed out; no task prompt was sent")
+            params = {"threadId": thread_id, "sortDirection": "asc", "limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = rpc.request("thread/items/list", params, timeout=remaining)
+            if not isinstance(page["data"], list):
+                raise ValueError("invalid Codex history")
+            for entry in page["data"]:
+                item = entry["item"]
+                if item["type"] == "userMessage":
+                    users += 1
+                    content = item["content"]
+                    if (users != 1 or len(content) != 1 or content[0]["type"] != "text"
+                            or content[0]["text"] != bootstrap):
+                        raise TaskError("Codex has additional input after user action; task delivery is uncertain. "
+                                        "Inspect the session; no task prompt will be replayed")
+            cursor = page.get("nextCursor")
+            if cursor is None:
+                break
+            if not isinstance(cursor, str) or not cursor or cursor in seen or len(seen) >= 1000:
+                raise ValueError("ambiguous Codex history pagination")
+            seen.add(cursor)
+        if users != 1:
+            raise TaskError("Codex readiness history disappeared after user action; no task prompt was sent")
+
     def launch(self, execution: AgentExecution) -> LaunchResult:
         self.validate_execution(execution)
         workspace = execution.workspace
         prompt = execution.handoff
         phase = "pane readiness (before launch)"
         thread_id = None
+        recovered = False
+        startup_identity = None
+        startup_deadline = None
         try:
             self.check_target(workspace, review=execution.purpose == "review")
             self.clear_shell_input(workspace)
@@ -476,21 +648,65 @@ class CodexAdapter(HerdrAgentAdapter):
             phase = "receipt API initialization (before launch)"
             with CodexRPC(workspace.path) as rpc:
                 phase = "startup launch/runtime confirmation"
-                observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
+                try:
+                    observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
+                except AgentNotReady as error:
+                    # Persist the validated launch report before any later read
+                    # can omit or conflict with its provider/terminal identity.
+                    observed = self.observe_agent(execution, error.agent) if error.agent is not None else None
+                    if observed and observed.get("_session_reference") is not None:
+                        thread_id = observed["_session_reference"]["value"]
+                    observed, startup_identity, startup_deadline = self.recover_startup(execution, args, observed)
+                    recovered = True
                 phase = "readiness confirmation"
-                thread_id = self.find_session(rpc, workspace, bootstrap)
+                try:
+                    thread_id = self.find_session(rpc, workspace, bootstrap, deadline=startup_deadline)
+                except CodexSessionNotObserved as error:
+                    if recovered:
+                        raise
+                    try:
+                        observed, startup_identity, startup_deadline = self.recover_startup(execution, args, observed)
+                    except (TaskError, KeyError, ValueError, TypeError, OSError) as recovery_error:
+                        raise TaskError(f"{error}. Startup inspection: {recovery_error}") from None
+                    recovered = True
+                    thread_id = self.find_session(rpc, workspace, bootstrap, deadline=startup_deadline)
                 provider_session = dict(agent=self.kind, kind="id", value=thread_id)
                 if observed.get("agent_session") is not None and not same_session(
                         observed["agent_session"], provider_session, self.kind):
                     raise TaskError("agent session does not match the provider session during handoff")
                 if execution.runtime_observer:
                     execution.runtime_observer(dict(session_id=thread_id, session_kind="id"))
-                self.confirm_prompt(rpc, workspace, thread_id, None, bootstrap)
+                self.confirm_prompt(rpc, workspace, thread_id, None, bootstrap, deadline=startup_deadline)
                 # Unlike Herdr metadata, the separate receipt API has now read
                 # this exact session's persisted readiness turn.
                 if execution.runtime_observer:
                     execution.runtime_observer(dict(resumability="yes"))
-                observed = self.confirm_target(execution, observed, expected_session=provider_session)
+                if recovered:
+                    while True:
+                        observed, blocker = self.reconcile_startup(execution, args, startup_identity, observed,
+                            startup_deadline, expected_session=provider_session)
+                        if blocker is not None:
+                            raise TaskError("Codex setup reappeared after provider discovery; inspect the session. "
+                                            "No task prompt was sent")
+                        self.confirm_no_task_input(rpc, thread_id, bootstrap, deadline=startup_deadline)
+                        if self.startup_process(workspace, args, timeout=self.startup_remaining(startup_deadline)) != startup_identity:
+                            raise TaskError("Codex startup process/readiness changed before delivery; no task prompt was sent")
+                        observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id,
+                            timeout=self.startup_remaining(startup_deadline))["agent"], observed,
+                            expected_session=provider_session)
+                        remaining = self.startup_remaining(startup_deadline)
+                        if observed["agent_status"] in {"idle", "done", "working"}:
+                            break
+                        if observed["agent_status"] not in {"blocked", "unknown"}:
+                            raise TaskError("Codex runtime state is unsupported before delivery; no task prompt was sent")
+                        # If readiness regressed during verification, recheck
+                        # history too: input may have appeared while waiting.
+                        time.sleep(min(0.25, remaining))
+                    if execution.runtime_observer:
+                        execution.runtime_observer(dict(state="launching"))
+                    self.startup_remaining(startup_deadline)
+                else:
+                    observed = self.confirm_target(execution, observed, expected_session=provider_session)
                 phase = "prompt queue"
                 inputs = [{"type": "text", "text": prompt, "text_elements": []}]
                 queued = rpc.request("thread/queue/add", {"threadId": thread_id,
@@ -514,8 +730,8 @@ class CodexAdapter(HerdrAgentAdapter):
                             f"Session: {thread_id or 'not yet observed'}. "
                             "Workspace left intact; inspect the pane before retrying") from None
 
-    def find_session(self, rpc, workspace: Workspace, bootstrap: str) -> str:
-        deadline = time.monotonic() + 30
+    def find_session(self, rpc, workspace: Workspace, bootstrap: str, *, deadline=None) -> str:
+        deadline = time.monotonic() + 30 if deadline is None else deadline
         while time.monotonic() < deadline:
             result = rpc.request("thread/list", {"cwd": str(workspace.path), "limit": 100},
                                  timeout=max(0, deadline - time.monotonic()))
@@ -531,13 +747,13 @@ class CodexAdapter(HerdrAgentAdapter):
                     raise ValueError("Codex readiness session mismatch")
                 return thread["id"]
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
-        raise TaskError("Codex readiness turn not found (last observed: no session matching the readiness marker); "
+        raise CodexSessionNotObserved("Codex readiness turn not found (last observed: no session matching the readiness marker); "
                         "inspect the pane for trust or startup dialogs")
 
     def confirm_prompt(self, rpc, workspace: Workspace, thread_id: str,
-                       message_id: str | None, prompt: str) -> str:
+                       message_id: str | None, prompt: str, *, deadline=None) -> str:
         # Poll persisted receipt, never resubmit. The terminal-owned TUI executes.
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 30 if deadline is None else deadline
         while time.monotonic() < deadline:
             thread = rpc.request("thread/read", {"threadId": thread_id},
                                  timeout=max(0, deadline - time.monotonic()))["thread"]

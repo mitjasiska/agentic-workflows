@@ -5,6 +5,23 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from task_start.agent import Codex
+from task_start import AgentNotReady
+
+
+TRUST_SCREEN = """  Folder access
+  /some/new/checkout
+
+  Trust this folder? Codex can read, edit, and run files here,
+  subject to your permission settings.
+
+› 1. Trust and continue
+  2. Quit
+"""
+AUTH_SCREEN = """  Sign in with ChatGPT to use Codex as part of your paid plan
+› 1. Sign in with ChatGPT
+  2. Sign in with Device Code
+  3. Use an OpenAI API key
+"""
 
 
 class CodexStartupTransport:
@@ -29,6 +46,12 @@ class CodexStartupTransport:
         self.start_changes = {}
         self.get_changes = {}
         self.queue_error = None
+        self.blocker = None
+        self.start_not_ready = True
+        self.process_pid = 456
+        self.process_changes = {}
+        self.view_changes = {}
+        self.extra_items = []
         self.command = test.enterContext(patch.object(Codex, "command", side_effect=self.herdr))
         self.keys = test.enterContext(patch("task_start.agent.run", side_effect=self.send_keys))
         test.enterContext(patch.object(Codex, "check_available"))
@@ -54,6 +77,10 @@ class CodexStartupTransport:
         if (group, operation) == ("pane", "list"):
             return dict(panes=copy.deepcopy(self.panes()))
         if (group, operation) == ("pane", "process-info"):
+            if self.started_at is not None:
+                return dict(process_info=dict(dict(pane_id=self.target, shell_pid=123,
+                    foreground_process_group_id=456, foreground_processes=[dict(pid=self.process_pid,
+                    argv=self.argv, cwd=self.pane['cwd'])]), **self.process_changes))
             self.target = args[-1]
             self.last_process = self.processes[min(self.process_reads, len(self.processes) - 1)]
             self.process_timeouts.append(timeout)
@@ -71,17 +98,27 @@ class CodexStartupTransport:
             self.advance(self.runtime_delay)
             self.pane.update(agent="codex", agent_status="idle", launch_pending=False,
                              foreground_cwd=self.pane["cwd"])
-            return dict(agent=dict(self.pane, **self.start_changes), argv=["codex", *args[args.index("--") + 1:]])
+            self.argv = ["codex", *args[args.index("--") + 1:]]
+            if self.blocker:
+                self.pane['agent_status'] = 'blocked'
+                if self.start_not_ready:
+                    raise AgentNotReady('agent_not_ready')
+                self.pane['agent_status'] = 'idle'
+            return dict(agent=dict(self.pane, **self.start_changes), argv=self.argv)
         if (group, operation) == ("agent", "get"):
-            if self.now >= self.started_at + self.runtime_delay + self.session_delay:
+            if not self.blocker and self.now >= self.started_at + self.runtime_delay + self.session_delay:
                 self.pane["agent_session"] = dict(agent="codex", kind="id", value=self.thread_id)
             return dict(agent=dict(self.pane, **self.get_changes))
+        if (group, operation) == ('pane', 'read'):
+            return dict(read=dict(dict(pane_id=self.target, workspace_id=self.pane['workspace_id'],
+                tab_id=self.pane['tab_id'], source='visible', format='text', truncated=False,
+                text=self.blocker or 'Codex ready'), **self.view_changes))
         self.test.fail((group, operation, args))
 
     def request(self, method, params, **kwargs):
         thread = dict(id=self.thread_id, cwd=self.pane["cwd"], preview=self.bootstrap)
         if method == "thread/list":
-            visible = self.now >= self.started_at + self.runtime_delay + self.session_delay
+            visible = not self.blocker and self.now >= self.started_at + self.runtime_delay + self.session_delay
             return dict(data=[thread] if visible else [])
         if method == "thread/read":
             return dict(thread=thread)
@@ -91,7 +128,7 @@ class CodexStartupTransport:
             if self.queued_at is not None and self.now >= self.queued_at + self.receipt_delay:
                 items.append(dict(turnId="task-turn", item=dict(type="userMessage",
                              clientId=self.queued["clientUserMessageId"], content=self.queued["input"])))
-            return dict(data=items, nextCursor=None)
+            return dict(data=items + self.extra_items, nextCursor=None)
         if method == "thread/queue/add":
             self.test.assertIsNone(self.queued_at, "handoff must never be resubmitted")
             self.queued_at, self.queued = self.now, params
@@ -100,6 +137,10 @@ class CodexStartupTransport:
                 raise self.queue_error
             return dict(queuedSubmission=dict(id="queue", **params))
         self.test.fail(method)
+
+    def accept_setup(self):
+        self.blocker = None
+        self.pane['agent_status'] = 'idle'
 
     def assert_effects(self, launches, prompts):
         self.test.assertEqual(sum(c.args[:2] == ("agent", "start") for c in self.command.call_args_list), launches)
