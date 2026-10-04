@@ -22,7 +22,7 @@ from task_start.sessions import SessionInvalid
 from task_start.workspace import Git, Herdr, Workspace
 from test_task_start import ISSUE
 import test_task_start as baseline
-from codex_startup_fixture import CodexStartupTransport
+from codex_startup_fixture import TRUST_SCREEN, CodexStartupTransport
 
 
 def verdict(pass_id="pass", **changes):
@@ -151,6 +151,42 @@ class ReviewTests(unittest.TestCase):
         row = self.registry.get(result.context_id)
         self.assertEqual((row["state"], row["session_id"], row["resumability"]),
                          ("active", transport.thread_id, "yes"))
+
+    def test_fresh_codex_review_trust_wait_preserves_pass_and_refuses_replacement(self):
+        transport = self.codex_transport()
+        transport.blocker = TRUST_SCREEN
+        def accept():
+            row = self.registry.get('DEV-7-R1')
+            self.assertEqual((row['state'], row['session_id']), ('awaiting_user', None))
+            pane_count = len(self.panes)
+            with self.assertRaisesRegex(TaskError, 'owns this worktree'):
+                review('DEV-7')
+            self.assertEqual(len(self.panes), pane_count)
+            transport.advance(2000)  # Human time does not consume the review result budget.
+            transport.accept_setup()
+            return '\n'
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = accept
+            result = review('DEV-7', timeout=2)
+        self.assertEqual((result.context_id, result.state, result.invalidated), ('DEV-7-R1', 'clean', False), result.summary)
+        self.assertEqual([c['context_id'] for c in self.registry.list() if c['role'] == 'review'], ['DEV-7-R1'])
+        self.assertEqual(len(self.prompts), 1)
+        transport.assert_effects(1, 1)
+
+    def test_fresh_codex_review_abandoned_trust_wait_keeps_context(self):
+        transport = self.codex_transport()
+        transport.blocker = TRUST_SCREEN
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = False
+            result = review('DEV-7')
+        self.assertEqual(result.state, 'failed')
+        self.assertIn('stdin is not a terminal', result.summary)
+        self.assertNotIn('could not be finalized', result.summary)
+        self.assertEqual(self.registry.get('DEV-7-R1')['state'], 'awaiting_user')
+        with self.assertRaisesRegex(TaskError, 'waiting for Codex trust/setup'):
+            review('DEV-7')
+        transport.assert_effects(1, 0)
 
     def test_fresh_codex_review_gets_full_execution_timeout_after_slow_startup(self):
         transport = self.codex_transport()

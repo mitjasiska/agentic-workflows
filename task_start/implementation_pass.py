@@ -142,12 +142,22 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
                 if current["resumability"] != "yes":
                     env.registry.update(context["context_id"], resumability="yes")
                 return
-            try:
-                verified = adapter.verify_session(env.workspace, candidate)
-            except SessionInvalid:
-                if has_immutable_identity(candidate, current["agent"]):
-                    raise
-                return  # A newly reported Pi path may precede persisted history.
+            if current["agent"] == "codex":
+                # The active context guard has already retained this identity.
+                # A non-ready report can precede trust/setup and readable history.
+                # Codex marks resumability only after its bounded readiness
+                # history check; use that evidence instead of an early or extra
+                # unbounded provider read. Completion still verifies again.
+                if current["resumability"] != "yes":
+                    return
+                verified = candidate
+            else:
+                try:
+                    verified = adapter.verify_session(env.workspace, candidate)
+                except SessionInvalid:
+                    if has_immutable_identity(candidate, current["agent"]):
+                        raise
+                    return  # A newly reported Pi path may precede persisted history.
             # Enrich the active guard, not a separate observer with its own cache.
             # Startup confirmation and later polls may still report only a Pi path.
             persist(dict(herdr_session=json.dumps(verified), resumability="yes"))

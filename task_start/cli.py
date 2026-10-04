@@ -71,6 +71,11 @@ def parser() -> argparse.ArgumentParser:
     loop_command.add_argument("--json", action="store_true", help="Print the combined lifecycle result")
     pr_command = commands.add_parser("pr", help="Commit and publish the exact clean-reviewed task as a GitHub PR")
     pr_command.add_argument("issue", type=issue_identifier)
+    for command in (start, review_command, loop_command):
+        command.epilog = ("If Codex pauses for recognized trust/setup, handle it in the indicated pane, "
+                          "then press Enter in this original command to reconcile the same launch. "
+                          "Keep this command running; do not rerun it to bypass trust. "
+                          "See docs/lifecycle.md for interruption and uncertain-delivery limits.")
     return result
 
 

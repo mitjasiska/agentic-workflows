@@ -18,7 +18,7 @@ from task_start.workspace import Git, Herdr
 from test_loop import ImplementationAdapter, finding, findings
 import test_loop as loop_fixture
 import test_review as fixture
-from codex_startup_fixture import CodexStartupTransport
+from codex_startup_fixture import TRUST_SCREEN, CodexStartupTransport
 
 
 UPDATE_BASE = Git.update_base
@@ -346,6 +346,37 @@ class BootstrapLoopTests(unittest.TestCase):
         transport.assert_effects(1, 1)
         self.assertEqual(self.prompts, [])
 
+    def test_initial_codex_trust_wait_retains_claim_and_continues_same_pass(self):
+        transport = self.codex_transport()
+        transport.blocker = TRUST_SCREEN
+        pending = []
+        def accept():
+            state, _ = self.store.read()
+            pending.append(state['active_pass']['pass_id'])
+            self.assertEqual(state['status'], 'running')
+            self.assertEqual(state['implementation'], dict(context_id='DEV-7-I1'))
+            self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'awaiting_user')
+            transport.assert_effects(1, 0)
+            transport.advance(2000)
+            transport.accept_setup()
+            return '\n'
+        def deliver(prompt):
+            output = Path(re.search(r'Write your result to (.*?)\. This temporary', prompt).group(1))
+            pass_id = re.search(r'Pass ID: ([^\n]+)', prompt).group(1)
+            self.assertEqual(pending, [pass_id])
+            self.assertTrue(output.parent.is_dir())
+            output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
+                                              checks=[], resolutions=[])))
+        transport.on_queue = deliver
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = accept
+            result = self.run_loop()
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual((result.data['passes'], result.data['reviews']), (2, 1))
+        self.assertEqual(self.store.read()[0]['implementation']['session']['value'], transport.thread_id)
+        transport.assert_effects(1, 1)
+
     def test_codex_uncertain_queue_preserves_observed_identity_and_never_requeues(self):
         transport = self.codex_transport()
         transport.queue_error = TaskError('Queue acknowledgement lost')
@@ -359,6 +390,113 @@ class BootstrapLoopTests(unittest.TestCase):
             with self.assertRaises(TaskError):
                 loop('DEV-7', **kwargs)
         transport.assert_effects(1, 1)
+
+    def test_initial_codex_stable_session_waits_for_setup_before_reading_history(self):
+        transport = self.codex_transport()
+        first = dict(agent='codex', kind='id', value=transport.thread_id)
+        transport.blocker, transport.start_not_ready = TRUST_SCREEN, False
+        transport.start_changes = dict(agent_status='blocked', agent_session=first)
+        transport.get_changes = dict(agent_status='blocked', agent_session=first)
+        pending, premature_reads, verified_reads = [], [], []
+        def request(method, params, **kwargs):
+            if method == 'thread/read':
+                if transport.blocker:
+                    premature_reads.append(params['threadId'])
+                    raise TaskError('Provider history is temporarily unreadable during setup')
+                if transport.queued_at is None:
+                    verified_reads.append((params['threadId'], kwargs.get('timeout')))
+            return transport.request(method, params, **kwargs)
+        transport.rpc.request.side_effect = request
+        def accept():
+            state, _ = self.store.read()
+            pending.append(state['active_pass']['pass_id'])
+            self.assertEqual(state['implementation'], dict(context_id='DEV-7-I1'))
+            row = self.registry.get('DEV-7-I1')
+            self.assertEqual(context_reference(row), first)
+            self.assertEqual((row['state'], row['resumability']), ('awaiting_user', 'unknown'))
+            self.assertEqual((row['pane_id'], row['terminal_id']), ('p1', self.panes[0]['terminal_id']))
+            self.assertEqual(premature_reads, [])
+            transport.assert_effects(1, 0)
+            transport.accept_setup()
+            transport.get_changes = dict(agent_session=first)
+            return '\n'
+        def deliver(prompt):
+            output = Path(re.search(r'Write your result to (.*?)\. This temporary', prompt).group(1))
+            pass_id = re.search(r'Pass ID: ([^\n]+)', prompt).group(1)
+            self.assertEqual(pending, [pass_id])
+            self.assertTrue(verified_reads)
+            for session_id, timeout in verified_reads:
+                self.assertEqual(session_id, first['value'])
+                self.assertIsNotNone(timeout, 'Pre-delivery history reads must use the reconciliation budget')
+                self.assertTrue(0 < timeout <= Codex.POST_TRUST_READY_TIMEOUT)
+            state, _ = self.store.read()
+            self.assertEqual(state['implementation']['session'], first)
+            self.assertTrue(output.parent.is_dir())
+            output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
+                                              checks=[], resolutions=[])))
+        transport.on_queue = deliver
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = accept
+            result = self.run_loop()
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual((result.data['passes'], result.data['reviews']), (2, 1))
+        self.assertEqual(premature_reads, [])
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(self.store.read()[0]['implementation']['session'], first)
+        self.assertEqual([c['context_id'] for c in self.registry.list() if c['role'] == 'implementation'], ['DEV-7-I1'])
+        transport.assert_effects(1, 1)
+
+    def test_initial_codex_unreadable_history_after_setup_never_delivers(self):
+        transport = self.codex_transport()
+        first = dict(agent='codex', kind='id', value=transport.thread_id)
+        transport.blocker, transport.start_not_ready = TRUST_SCREEN, False
+        transport.start_changes = dict(agent_status='blocked', agent_session=first)
+        transport.get_changes = dict(agent_session=first)
+        actions = []
+        def request(method, params, **kwargs):
+            if method == 'thread/read':
+                raise TaskError('Provider history is temporarily unreadable')
+            return transport.request(method, params, **kwargs)
+        transport.rpc.request.side_effect = request
+        def accept():
+            actions.append(True)
+            transport.accept_setup()
+            return '\n'
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = accept
+            result = self.run_loop()
+        self.assertEqual(actions, [True])
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Provider history is temporarily unreadable', result.data['reason'])
+        self.assertEqual(context_reference(self.registry.get('DEV-7-I1')), first)
+        self.assertEqual(self.registry.get('DEV-7-I1')['resumability'], 'unknown')
+        self.assertEqual(self.prompts, [])
+        transport.assert_effects(1, 0)
+
+    def test_initial_codex_identity_conflict_after_setup_never_delivers(self):
+        transport = self.codex_transport()
+        first = dict(agent='codex', kind='id', value=transport.thread_id)
+        transport.blocker, transport.start_not_ready = TRUST_SCREEN, False
+        transport.start_changes = dict(agent_status='blocked', agent_session=first)
+        transport.get_changes = dict(agent_session=first)
+        actions = []
+        def accept():
+            actions.append(True)
+            transport.accept_setup()
+            transport.get_changes = dict(agent_session=dict(first, value='11a0d314-bd68-7203-8b68-f2520f892afa'))
+            return '\n'
+        with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = accept
+            result = self.run_loop()
+        self.assertEqual(actions, [True])
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('session changed', result.data['reason'])
+        self.assertEqual(context_reference(self.registry.get('DEV-7-I1')), first)
+        self.assertEqual(self.prompts, [])
+        transport.assert_effects(1, 0)
 
     def test_findings_use_original_implementation_and_same_reviewer(self):
         self.review_results = [findings(finding()), {}]

@@ -91,9 +91,15 @@ class ContextRegistry:
         if role not in {"implementation", "review"}:
             raise TaskError("Context role must be implementation or review")
         with self.connection(write=True) as db:
+            pending = db.execute("""SELECT context_id FROM contexts WHERE issue=? AND role=?
+                AND repository IS ? AND worktree IS ? AND state='awaiting_user'""",
+                (issue, role, repository, worktree)).fetchone()
+            if pending:
+                raise TaskError(f"{pending['context_id']} is waiting for Codex trust/setup; "
+                                "continue its original workflow command or inspect it; no replacement was allocated")
             if endpoint and pane_id:
                 pending = db.execute("""SELECT context_id FROM contexts WHERE endpoint=?
-                    AND pane_id=? AND state='launching'""", (endpoint, pane_id)).fetchone()
+                    AND pane_id=? AND state IN ('launching', 'awaiting_user')""", (endpoint, pane_id)).fetchone()
                 if pending:
                     raise TaskError(f"{pending['context_id']} has an unfinished launch in {pane_id}; "
                                     "inspect it before retrying or cleaning up")
@@ -131,6 +137,13 @@ class ContextRegistry:
         if len(matches) != 1:
             raise TaskError(f"Unknown workflow context {context_id}")
         return matches[0]
+
+    def check_pending_startup(self, issue: str, repository: Path, worktree: Path, role: str) -> None:
+        for context in self.list(issue):
+            if (context["repository"] == str(repository) and context["worktree"] == str(worktree)
+                    and context["role"] == role and context["state"] == "awaiting_user"):
+                raise TaskError(f"{context['context_id']} is waiting for Codex trust/setup in {context['pane_id']}; "
+                                "continue its original workflow command or inspect it; no replacement was allocated")
 
     def claim_review(self, context: dict) -> None:
         """Serialize passes in one reviewer, without a second identity store."""
@@ -376,7 +389,7 @@ def launch_allocated(adapter, execution, context_id, registry, herdr, *, handoff
         if handoff_factory is not None:
             execution = replace(execution, handoff=handoff_factory(context_id))
         herdr.label(pane, context_id)
-        result = adapter.launch(replace(execution, runtime_observer=record))
+        result = adapter.launch(replace(execution, runtime_observer=record, context_id=context_id))
         if result.kind != execution.options.kind or result.pane_id != workspace.pane_id:
             raise TaskError("Execution result does not match the allocated workflow context")
         record(dict(state="reviewing" if execution.purpose == "review" else "active", session_id=result.session_id,
@@ -385,7 +398,10 @@ def launch_allocated(adapter, execution, context_id, registry, herdr, *, handoff
     except BaseException as error:
         # Startup/prompt delivery may have succeeded before a timeout. Keep its identity.
         try:
-            registry.update(context_id, state="uncertain")
+            # Retain the human boundary even if stdin closes or the owner exits.
+            # Another command must not allocate a replacement for that launch.
+            if registry.get(context_id)["state"] != "awaiting_user":
+                registry.update(context_id, state="uncertain")
         except TaskError:
             pass  # The committed allocation remains even if a later write fails.
         if isinstance(error, Exception):

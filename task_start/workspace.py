@@ -8,7 +8,7 @@ import stat
 import subprocess
 import unicodedata
 
-from . import TaskError
+from . import AgentNotReady, TaskError
 from .github import MergedPull, check_history, merged_pull, repository_name
 
 
@@ -75,19 +75,22 @@ def run(args: list[str], *, input: bytes | None = None, env: dict[str, str] | No
         # Commands can include authenticated remote URLs in stderr; don't echo them.
         operation = (args[5] if args[3] == "-c" else args[3]) if args[0] == "git" else " ".join(args[1:3])
         hint = "inspect it manually"
+        error_type = TaskError
         if args[0] == "herdr":
             hint = "check the running Herdr session, repository trust, and worktree state"
             try:
                 code = json.loads(result.stderr)["error"]["code"]
                 if isinstance(code, str) and re.fullmatch(r"[a-z_]+", code):
                     hint = f"{code}; {hint}"
+                    if args[1:3] == ["agent", "start"] and code == "agent_not_ready":
+                        error_type = AgentNotReady
             except (ValueError, KeyError, TypeError):
                 pass
         elif operation in {"fetch", "ls-remote"}:
             hint = "check remote access and whether the upstream base branch exists"
         elif operation == "merge":
             hint = "base could not be updated safely; inspect the checkout before retrying"
-        raise TaskError(f"{args[0]} {operation} failed (exit {result.returncode}); {hint}")
+        raise error_type(f"{args[0]} {operation} failed (exit {result.returncode}); {hint}")
     try:
         # Git emits filesystem bytes for unquoted paths. Preserve undecodable
         # bytes with the filesystem codec's error handler (surrogateescape on POSIX).
