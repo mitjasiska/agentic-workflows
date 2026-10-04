@@ -888,7 +888,7 @@ class Herdr:
         return TaskWorktree(branch, path, match.get("open_workspace_id"))
 
     def prepare(self, git: Git, base: str, branch: str, identifier: str,
-                slice: str | None = None) -> Workspace:
+                slice: str | None = None, *, default_only: bool = False) -> Workspace:
         target = self.resolve_task(git, identifier, branch=branch, slice=slice)
         if target is None:
             git.check_history(base, branch, existing=False)
@@ -902,6 +902,8 @@ class Herdr:
         branch, path = target.branch, target.path
         git.check_history(base, branch, existing=True)
         scope = git.resolve_scope(path, branch, identifier, slice)
+        if default_only and scope is not None:
+            raise TaskError("From-scratch loop requires an unsliced default workspace")
         label = identifier if scope is None else f"{identifier} / {scope}"
         opened = self.command("open", "--path", str(path), "--label", label, "--focus")
         workspace = self.confirm(opened, branch, "workspace reopened and focused", path)

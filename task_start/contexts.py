@@ -260,7 +260,11 @@ def context_reference(context: dict) -> dict | None:
 
 
 def context_observer(registry: ContextRegistry, context_id: str):
-    """Use the same identity guard for launch, resume, and later runtime discovery."""
+    """Guard observations against identity retained by this observer.
+
+    Feed provider verification back through the active observer so later locator-only
+    reports retain that evidence. A new observer reads the registry only at creation.
+    """
     context = registry.get(context_id)
     established = context_reference(context)
     resumability = context["resumability"]
@@ -302,10 +306,8 @@ def context_observer(registry: ContextRegistry, context_id: str):
     return record
 
 
-def launch_registered(adapter, execution, *, registry: ContextRegistry | None = None,
-                      herdr: HerdrContexts | None = None, handoff_factory=None):
-    """Register a fresh launch; existing agents are never resumed or relabeled here."""
-    registry, herdr = registry or ContextRegistry(), herdr or HerdrContexts()
+def allocate_launch(execution, registry, herdr):
+    """Reserve the exact shell/context before launch or loop checkpoint creation."""
     workspace = execution.workspace
     endpoint = herdr.endpoint()
     panes = herdr.snapshot()
@@ -318,13 +320,57 @@ def launch_registered(adapter, execution, *, registry: ContextRegistry | None = 
             or matches[0]["tab_id"] != workspace.tab_id or matches[0].get("agent")):
         raise TaskError("Confirmed Herdr shell pane is missing or occupied; no context was launched")
     pane = matches[0]
-    context_id = registry.allocate(execution.issue.identifier, execution.purpose,
+    return registry.allocate(execution.issue.identifier, execution.purpose,
         agent=execution.options.kind, model=execution.options.model, mode=execution.options.mode,
         repository=str(execution.repository), worktree=str(workspace.path), endpoint=endpoint,
         workspace_id=workspace.workspace_id, tab_id=workspace.tab_id, pane_id=workspace.pane_id,
         terminal_id=pane["terminal_id"])
 
-    record = context_observer(registry, context_id)
+
+def pending_launch(execution, context_id, registry, herdr):
+    """A reserved launch is usable only while its original shell is still empty."""
+    context = registry.get(context_id)
+    workspace = execution.workspace
+    expected = dict(issue=execution.issue.identifier, role=execution.purpose, agent=execution.options.kind,
+                    model=execution.options.model, mode=execution.options.mode,
+                    repository=str(execution.repository), worktree=str(workspace.path),
+                    endpoint=herdr.endpoint(), workspace_id=workspace.workspace_id,
+                    tab_id=workspace.tab_id, pane_id=workspace.pane_id, state="launching")
+    if (any(context[k] != v for k, v in expected.items()) or context["retired_at"]
+            or context_reference(context) is not None):
+        raise TaskError("Reserved implementation context changed or launch is uncertain; no replay is allowed")
+    panes = herdr.snapshot()
+    pane, _ = reconcile(context, panes)
+    if (pane is None or pane.get("agent") is not None
+            or Path(pane.get("cwd", "")).resolve() != workspace.path
+            or any(p.get("agent") for p in panes if p["workspace_id"] == workspace.workspace_id)):
+        raise TaskError("Reserved implementation shell is missing, occupied, or changed; no launch is safe")
+    return pane
+
+
+def launch_registered(adapter, execution, *, registry: ContextRegistry | None = None,
+                      herdr: HerdrContexts | None = None, handoff_factory=None):
+    """Register a fresh launch; existing agents are never resumed or relabeled here."""
+    registry, herdr = registry or ContextRegistry(), herdr or HerdrContexts()
+    context_id = allocate_launch(execution, registry, herdr)
+    return launch_allocated(adapter, execution, context_id, registry, herdr, handoff_factory=handoff_factory)
+
+
+def launch_allocated(adapter, execution, context_id, registry, herdr, *, handoff_factory=None,
+                     persist_observer=None):
+    """Deliver once to an allocation owned by the caller (and its durable claim)."""
+    workspace = execution.workspace
+    context = registry.get(context_id)
+    pane, _ = reconcile(context, herdr.snapshot())
+    if pane is None or pane.get("agent") or context["state"] != "launching":
+        raise TaskError("Allocated shell changed before launch; inspect before retrying")
+    # Initial loop passes share this guard with provider verification and polling.
+    persist = persist_observer or context_observer(registry, context_id)
+
+    def record(values):
+        persist(values)
+        if execution.runtime_observer:
+            execution.runtime_observer(values)
 
     try:
         if handoff_factory is not None:

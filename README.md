@@ -164,9 +164,9 @@ change the default 1800-second wait after delivery. See the
 [review reference](docs/lifecycle.md#task-review) for guarantees, exit codes, and
 resume requirements.
 
-### Automate fixes and review
+### Automate implementation, fixes, and review
 
-With the original implementation context idle and the task workspace open:
+Start an agent-ready issue with one command:
 
 ```sh
 task loop DEV-7
@@ -175,22 +175,36 @@ task loop DEV-7 --status
 task loop DEV-7 --continue
 ```
 
-The loop resumes that implementation conversation to finish validation and collect
-a result, then starts a fresh independent reviewer. If you already know the initial
-implementation is complete, use `task loop DEV-7 --from-review` to start a new loop
-directly with fresh review. Both paths retain the original implementation context
-for fixes and resume the same reviewer for focused follow-ups.
-Clean review finishes with one combined report. Product/design/scope decisions,
-uncertain results, repeated findings, and pass limits stop for human action.
-Both contexts must retain verifiable sessions and explicit model/mode settings.
+With no implementation context, the loop performs the same default workspace
+preparation and Linear `In Progress` transition as `task start`, then launches the
+initial implementation with a structured completion contract. A validated result
+automatically starts fresh independent review. This startup supports unsliced
+workspaces only.
+
+If an implementation context already exists, the loop resumes that idle conversation
+to finish validation and collect its result. If you already know implementation is
+complete, use `task loop DEV-7 --from-review` to start directly with fresh review.
+All paths route fixes to the original implementation context and resume the same
+reviewer for focused follow-ups. Clean review finishes with one combined report.
+Product/design/scope decisions, uncertain results, repeated findings, and pass
+limits stop for human action.
+
+Configured use needs only `task loop DEV-7`: `[agent]` supplies initial
+implementation settings and `[reviewer]` supplies review settings. Optional
+`--i-agent`, `--i-model`, and `--i-mode` override implementation; `--r-agent`,
+`--r-model`, and `--r-mode` override the fresh reviewer. Both roles require explicit
+resolved model and mode. Existing implementation contexts retain their recorded
+settings and reject `--i-*` overrides. Generic `--agent`, `--model`, and `--mode`
+remain available on `task start` and `task review`; `task loop` uses only the
+role-prefixed overrides.
 
 Run `--pause-after-current` from another terminal while the command is working.
 The current pass finishes; the next handoff waits for explicit `--continue`.
 `--status` only inspects. Ctrl+C and cancellation require inspection and cannot
 be continued as a graceful pause. Defaults are three reviews, six total passes,
 and 1800 seconds per delivered pass; use `--max-reviews`, `--max-passes`, and
-`--timeout` when starting the loop. Agent selection flags choose the fresh
-reviewer; implementation settings remain those of the original context.
+`--timeout` when starting the loop. The initial implementation counts as one pass;
+review counts begin when review runs.
 Use `--json` for the combined structured report. See the
 [loop reference](docs/lifecycle.md#task-loop) for checkpoints, bounds, and recovery.
 

@@ -1,4 +1,4 @@
-"""Structured implementation completion/fixes in an already established context."""
+"""Structured initial implementation, completion, and fixes with exact identity."""
 
 from dataclasses import replace
 import json
@@ -9,10 +9,10 @@ from uuid import uuid4
 
 from . import TaskError
 from .agent import AgentExecution, AgentOptions, adapter_for, codex_repository_policy
-from .contexts import context_observer, context_reference, reconcile
+from .contexts import context_observer, context_reference, launch_allocated, pending_launch, reconcile
 from .handoff import implementation_handoff
 from .review_result import unique_object
-from .sessions import has_immutable_identity, merge_session
+from .sessions import SessionInvalid, has_immutable_identity, merge_session
 
 
 def binding(context):
@@ -82,15 +82,34 @@ def parse_implementation(raw, pass_id, findings):
         raise TaskError("Malformed or ambiguous implementation result; inspect before another handoff") from None
 
 
-def implementation_pass(env, expected, findings, timeout, before_handoff, pass_observer):
-    context, adapter, execution, pane, reference = implementation_target(env, expected)
+def initial_execution(env, options):
+    policy = (codex_repository_policy(env.local.codex_repository_profiles, env.project.repo_name)
+              if options.kind == "codex" else {})
+    return AgentExecution(env.issue, env.repo, env.workspace, options, "Initial implementation pending",
+                          policy=dict(policy, session_reporting=True))
+
+
+def implementation_pass(env, expected, findings, timeout, before_handoff, pass_observer, *, initial_options=None):
+    fresh = initial_options is not None
+    if fresh:
+        execution = initial_execution(env, initial_options)
+        adapter = adapter_for(initial_options)
+        adapter.check_available()
+        context = env.registry.get(expected["context_id"])
+        pane = pending_launch(execution, context["context_id"], env.registry, env.identities)
+        persist = context_observer(env.registry, context["context_id"])
+        reference = None
+    else:
+        context, adapter, execution, pane, reference = implementation_target(env, expected)
     with tempfile.TemporaryDirectory(prefix="task-implementation-") as directory:
         if Path(directory).resolve().is_relative_to(env.workspace.path):
             raise TaskError("Implementation output must be outside the checkout; check TMPDIR")
         output, pass_id = Path(directory) / "result.json", str(uuid4())
+        introduction = ("Start the requested implementation in this fresh conversation. Complete the work and validation. "
+                        if fresh else "Continue in YOUR existing implementation conversation. "
+                        "Finish outstanding work and validation; do not replay already completed work. ")
         result_contract = (
-            "\nAUTOMATED IMPLEMENTATION PASS\nContinue in YOUR existing implementation conversation. "
-            "Finish outstanding work and validation; do not replay already completed work. "
+            "\nAUTOMATED IMPLEMENTATION PASS\n" + introduction +
             "Address the structured implementation findings below when present. Do not make product, architecture, "
             "design, scope, or planning decisions; report blocked if one is needed or routing is ambiguous. "
             "Fix claims will be checked by the same independent reviewer.\n"
@@ -105,7 +124,48 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
         execution = replace(execution, handoff=implementation_handoff(env.issue, env.workspace) + result_contract)
         before_handoff()
         pass_observer(context["context_id"], pass_id)
-        adapter.resume(execution, reference, recreate=False)
+
+        def observe_initial(_=None):
+            nonlocal reference, expected
+            current = env.registry.get(context["context_id"])
+            if (current["agent"], current["model"], current["mode"]) != (
+                    initial_options.kind, initial_options.model, initial_options.mode):
+                raise TaskError("Initial implementation settings changed during launch")
+            candidate = context_reference(current)
+            if candidate is None:
+                return
+            if reference is not None:
+                if binding(current) != expected:
+                    raise TaskError("Initial implementation conversation changed during launch")
+                # Startup/status reports are observations, not another provider
+                # verification on every poll. Final completion verifies again.
+                if current["resumability"] != "yes":
+                    env.registry.update(context["context_id"], resumability="yes")
+                return
+            try:
+                verified = adapter.verify_session(env.workspace, candidate)
+            except SessionInvalid:
+                if has_immutable_identity(candidate, current["agent"]):
+                    raise
+                return  # A newly reported Pi path may precede persisted history.
+            # Enrich the active guard, not a separate observer with its own cache.
+            # Startup confirmation and later polls may still report only a Pi path.
+            persist(dict(herdr_session=json.dumps(verified), resumability="yes"))
+            observed = binding(env.registry.get(context["context_id"]))
+            expected, reference = observed, observed["session"]
+            pass_observer(context["context_id"], pass_id, observed)
+
+        if fresh:
+            execution = replace(execution, runtime_observer=observe_initial)
+            launch_allocated(adapter, execution, context["context_id"], env.registry, env.identities,
+                             persist_observer=persist)
+            # Keep the guard (including any verified identity) active across launch.
+            def observe(values):
+                persist(values)
+                observe_initial()
+            execution = replace(execution, runtime_observer=observe)
+        else:
+            adapter.resume(execution, reference, recreate=False)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             current, notes = reconcile(env.registry.get(context["context_id"]), env.identities.snapshot())
@@ -113,12 +173,16 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
                     or any(n in {"agent mismatch", "session mismatch", "session identity invalid"} for n in notes)):
                 raise TaskError("Implementation runtime identity changed during its pass")
             status = adapter.status(execution, pane["terminal_id"], reference)
+            if fresh:
+                observe_initial()
             if status == "blocked":
                 raise TaskError("Implementation agent requires human intervention")
             if status in {"idle", "done"} and output.exists():
                 if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                     raise TaskError("Invalid implementation result file")
                 result = parse_implementation(output.read_text(encoding="utf-8"), pass_id, findings)
+                if fresh and reference is None:
+                    raise TaskError("Initial implementation has no verified conversation identity")
                 implementation_target(env, expected)  # Provider/runtime verification after completion.
                 return dict(result, context_id=context["context_id"], findings=[])
             time.sleep(0.25)

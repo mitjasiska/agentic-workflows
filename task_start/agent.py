@@ -104,11 +104,12 @@ class AgentAdapter(Protocol):
     def status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
 
 
-def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides, *, section: str = "agent") -> AgentOptions:
+def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides, *, section: str = "agent",
+                          agent_flag: str = "--agent") -> AgentOptions:
     """Resolve independent CLI-over-config choices without mutating configuration."""
     kind = overrides.kind if overrides.kind is not None else (config.kind if config else None)
     if kind is None:
-        raise TaskError(f"Configure [{section}] kind in ~/.agentic-workflows/config.toml or pass --agent")
+        raise TaskError(f"Configure [{section}] kind in ~/.agentic-workflows/config.toml or pass {agent_flag}")
     model = overrides.model if overrides.model is not None else (config.model if config else None)
     mode = overrides.mode if overrides.mode is not None else (config.mode if config else None)
     return AgentOptions(kind, model, mode)
@@ -716,7 +717,8 @@ class PiAdapter(HerdrAgentAdapter):
             self.validate_model_mode(workspace)
             phase = "startup"
             self.check_target(workspace, review=execution.purpose == "review")
-            args = self.review_args() if execution.purpose == "review" else self.launch_args()
+            args = (self.review_args() if execution.purpose == "review" or execution.policy.get("session_reporting")
+                    else self.launch_args())
             observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
             observed = self.confirm_target(execution, observed)
             phase = "prompt submission"

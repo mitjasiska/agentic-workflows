@@ -11,29 +11,45 @@ from uuid import uuid4
 from . import TaskError
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
-from .contexts import ContextRegistry, HerdrContexts
-from .implementation_pass import binding, implementation_pass, implementation_target
+from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch
+from .implementation_pass import binding, implementation_pass, implementation_target, initial_execution
 from .linear import Linear
 from .loop_state import LoopStore, PauseRequested
 from .publication_state import PublicationStore, prepare_review_continuation
+from .preparation import prepare_task, require_agent_instructions
 from .review import resolve_review_workspace, resolve_reviewer, review_pass
 from .review_state import snapshot
-from .workspace import Git
+from .workspace import Git, Herdr
 
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
-def environment(identifier):
+def environment(identifier, *, allow_bootstrap=False, pending_implementation=None):
     local = load_local()
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
     registry, identities = ContextRegistry(), HerdrContexts()
-    workspace, anchor, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities)
-    return SimpleNamespace(local=local, issue=issue, project=project, repo=repo, registry=registry,
-                           identities=identities, workspace=workspace, anchor=anchor, base=base, endpoint=endpoint)
+    env = SimpleNamespace(local=local, issue=issue, project=project, repo=repo, registry=registry,
+                          identities=identities, workspace=None)
+    if allow_bootstrap and not any(c["role"] == "implementation" for c in registry.list(issue.identifier)):
+        if registry.list(issue.identifier, include_retired=True):
+            raise TaskError("Context history exists without an established implementation; inspect it before starting")
+        return env
+    env.workspace, env.anchor, env.base, env.endpoint = resolve_review_workspace(
+        issue, project, repo, registry, identities, pending_implementation=pending_implementation)
+    return env
+
+
+def bootstrap(env, options):
+    require_agent_instructions(env.issue)
+    adapter_for(options).check_available()
+    env.workspace = prepare_task(env.issue, env.project, Linear(env.local.api_key), Git(env.repo),
+                                 lambda: Herdr(env.repo), default_only=True)
+    env.endpoint = env.identities.endpoint()
+    env.base = Git(env.repo).command("rev-parse", "--verify", f"refs/heads/{env.project.base_branch}^{{commit}}").strip()
 
 
 def task_binding(env):
@@ -127,15 +143,28 @@ def report(state, pause=False):
         pause_requested=pause, active_pass=state["active_pass"]))
 
 
-def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_review=False):
-    context, *_ = implementation_target(env)
-    idle_reviewers(env)
+def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_review=False,
+              initial_options=None):
+    if initial_options is None:
+        context, *_ = implementation_target(env)
+        implementation = binding(context)
+        idle_reviewers(env)
+    else:
+        # Reserve before checkpoint creation so all controls can locate the run.
+        # An interruption in this gap leaves a launching context, never a retry.
+        if env.registry.list(env.issue.identifier, include_retired=True):
+            raise TaskError("Context history changed before initial allocation; inspect before starting")
+        execution = initial_execution(env, initial_options)
+        implementation = dict(context_id=allocate_launch(execution, env.registry, env.identities))
     state = dict(version=1, run_id=str(uuid4()), binding=task_binding(env), requirements=requirements(env),
-        implementation=binding(context), reviewer=None, reviewer_options=asdict(reviewer_options),
+        implementation=implementation, reviewer=None, reviewer_options=asdict(reviewer_options),
         status="ready", reason="Implementation completion pending", next_phase="implementation", active_pass=None,
         pass_count=0, review_count=0, max_reviews=max_reviews, max_passes=max_passes, timeout=timeout,
         snapshot=snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict(),
         findings=[], seen=[], records=[])
+    if initial_options is not None:
+        state.update(version=3, initial_phase="initial_implementation", next_phase="initial_implementation",
+                     implementation_options=asdict(initial_options), reason="Initial implementation pending")
     if from_review:
         # Keep the default checkpoint path intact. Review-first runs need an
         # explicit origin so validation never infers a missing completion pass.
@@ -154,7 +183,7 @@ def route(state, result, after):
     state["snapshot"] = after
     if result["state"] in {"failed", "blocked"}:
         state.update(status="escalated", reason=result["summary"])
-    elif phase in {"implementation", "fixes"}:
+    elif phase in {"initial_implementation", "implementation", "fixes"}:
         if result["state"] != "completed":
             raise TaskError("Implementation outcome cannot be routed")
         if before["head"] != after["head"]:
@@ -162,7 +191,7 @@ def route(state, result, after):
         elif phase == "fixes" and before["content"] == after["content"]:
             state.update(status="escalated", reason="Fix pass made no Git-visible progress on the review findings")
         else:
-            state.update(next_phase="review" if phase == "implementation" else "rereview",
+            state.update(next_phase="rereview" if phase == "fixes" else "review",
                          reason="Implementation result collected; independent review pending")
     elif before != after:
         state.update(status="escalated", reason="Checkout changed across the review boundary; inspect the invalid result")
@@ -197,18 +226,25 @@ class LoopRuntime:
         self.env = None
 
     def prepare(self, state):
-        env = environment(self.identifier)
+        initial = state["next_phase"] == "initial_implementation"
+        env = environment(self.identifier, pending_implementation=state["implementation"]["context_id"] if initial else None)
         if task_binding(env) != state["binding"] or requirements(env) != state["requirements"]:
             raise TaskError("Task requirements or exact checkout binding changed; human inspection is required")
         if snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict() != state["snapshot"]:
             raise TaskError("Checkout/base changed since the saved boundary; no completed pass will be replayed")
-        implementation_target(env, state["implementation"])
+        if initial:
+            options = AgentOptions(**state["implementation_options"])
+            adapter_for(options).check_available()
+            pending_launch(initial_execution(env, options), state["implementation"]["context_id"],
+                           env.registry, env.identities)
+        else:
+            implementation_target(env, state["implementation"])
         idle_reviewers(env, state["reviewer"])
         self.env = env
 
     def execute(self, state, before_handoff, pass_observer):
         env, phase = self.env, state["next_phase"]
-        if phase in {"implementation", "fixes"}:
+        if phase in {"initial_implementation", "implementation", "fixes"}:
             saved = self.publication.read()
             if saved["rebase"] is not None and saved["rebase"].get("result") is None:
                 raise TaskError("Unpublished rebase is pending; inspect publication before implementation")
@@ -217,7 +253,9 @@ class LoopRuntime:
             saved.update(acceptance=None, intent=None)
             self.publication.write(saved)
             return implementation_pass(env, state["implementation"], state["findings"], state["timeout"],
-                                       before_handoff, pass_observer)
+                                       before_handoff, pass_observer,
+                                       initial_options=AgentOptions(**state["implementation_options"])
+                                       if phase == "initial_implementation" else None)
         options = state["reviewer_options"]
         feedback = ({} if phase == "review" else
                     dict(findings=state["findings"], resolutions=state["records"][-1]["resolutions"]))
@@ -257,8 +295,12 @@ def drive(store, state, runtime, *, on_pass_result=None):
                 break
             runtime.prepare(state)
 
-            def observe(context_id, pass_id):
+            def observe(context_id, pass_id, implementation=None):
                 state["active_pass"].update(context_id=context_id, pass_id=pass_id)
+                if implementation is not None:
+                    if state["implementation"]["context_id"] != implementation["context_id"]:
+                        raise TaskError("Implementation context changed during launch")
+                    state["implementation"] = implementation
                 if state["next_phase"] == "review":
                     state["reviewer"] = dict(context_id=context_id)
                 store.save(state)
@@ -301,8 +343,10 @@ def control_store(identifier):
 
 
 def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
-         max_reviews=None, max_passes=None, timeout=None, from_review=False, on_pass_result=None):
-    overrides = (agent_kind, model, mode, max_reviews, max_passes, timeout)
+         max_reviews=None, max_passes=None, timeout=None, from_review=False, on_pass_result=None,
+         impl_agent_kind=None, impl_model=None, impl_mode=None):
+    implementation_overrides = (impl_agent_kind, impl_model, impl_mode)
+    overrides = (agent_kind, model, mode, max_reviews, max_passes, timeout, *implementation_overrides)
     if action not in {"run", "new", "continue", "pause", "status"}:
         raise TaskError("Unknown loop control action")
     if from_review and action not in {"run", "new"}:
@@ -325,13 +369,26 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
             or type(max_passes) is not int or not 1 <= max_passes <= 40
             or not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400):
         raise TaskError("Loop requires 1..20 reviews, 1..40 passes, and a positive timeout up to 86400 seconds")
-    env = environment(identifier)
-    options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode), section="reviewer")
+    if from_review and any(v is not None for v in implementation_overrides):
+        raise TaskError("--i-* options require a from-scratch loop, not --from-review")
+    env = environment(identifier, allow_bootstrap=not from_review)
+    options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode),
+                                    section="reviewer", agent_flag="--r-agent")
     if options.model is None or options.mode is None:
-        raise TaskError("Loop reviewer requires explicit model and mode")
+        raise TaskError("Loop reviewer requires explicit model and mode ([reviewer] or --r-model/--r-mode)")
     adapter_for(options).check_available()
+    initial_options = None
+    if env.workspace is None:
+        initial_options = resolve_agent_options(env.local.agent, AgentOverrides(*implementation_overrides),
+                                                agent_flag="--i-agent")
+        if initial_options.model is None or initial_options.mode is None:
+            raise TaskError("Loop implementation requires explicit model and mode ([agent] or --i-model/--i-mode)")
+        bootstrap(env, initial_options)
+    elif any(v is not None for v in implementation_overrides):
+        raise TaskError("--i-* options require a from-scratch loop; existing implementation settings are preserved")
     with PublicationStore(env.workspace.path).locked() as publication:
         store = LoopStore(env.workspace.path)
-        state = new_state(env, options, max_reviews, max_passes, timeout, from_review=from_review)
+        state = new_state(env, options, max_reviews, max_passes, timeout, from_review=from_review,
+                          initial_options=initial_options)
         store.create(state, replace=action == "new")
         return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)

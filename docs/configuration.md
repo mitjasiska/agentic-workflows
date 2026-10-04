@@ -58,7 +58,7 @@ mode = "high"
 
 ## Agent and reviewer selection
 
-`kind` may be `codex` (the default implementation) or `pi`. For implementation,
+`kind` may be `codex` (the default implementation) or `pi`. For `task start`,
 `model` and `mode` are optional; when omitted, the selected agent's own local
 default is used. The legacy `reasoning = "high"` field remains accepted as an alias
 for `mode` so
@@ -105,6 +105,15 @@ mode = "high"
 Fresh review requires an explicit model and mode in `[reviewer]` or command flags.
 Resuming a review retains its saved agent/model/mode and rejects selection flags.
 See [review lifecycle](lifecycle.md#task-review) for exact resume requirements.
+
+Configured loop use needs only `task loop DEV-7`. It resolves initial implementation
+from `[agent]` and fresh review from `[reviewer]`, requiring explicit model and mode
+for both roles. Optional `--i-agent`, `--i-model`, and `--i-mode` override implementation;
+`--r-agent`, `--r-model`, and `--r-mode` override review. Each override resolves
+independently over its role's configuration. Established implementation contexts
+keep their recorded settings and reject `--i-*`. Generic `--agent`, `--model`, and
+`--mode` remain available on `task start` and `task review`, but are not accepted by
+`task loop`. See [loop lifecycle](lifecycle.md#task-loop) for startup and controls.
 
 ## Codex permissions for trusted repositories
 
