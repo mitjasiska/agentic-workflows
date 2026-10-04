@@ -15,7 +15,8 @@ from .linear import Linear
 from .loop import loop
 from .review import review
 from .publish import publish
-from .workspace import Git, Herdr, branch_name, slice_slug
+from .preparation import prepare_task, require_agent_instructions
+from .workspace import Git, Herdr, slice_slug
 
 
 def issue_identifier(value: str) -> str:
@@ -43,7 +44,12 @@ def parser() -> argparse.ArgumentParser:
     add_agent_options(review_command)
     review_command.add_argument("--json", action="store_true", help="Print the structured review result")
     review_command.add_argument("--timeout", type=int, default=1800, metavar="SECONDS")
-    loop_command = commands.add_parser("loop", help="Run bounded implementation/review passes in separate contexts")
+    loop_command = commands.add_parser("loop", help="Prepare a task and run bounded implementation/review passes",
+        description="Prepare an unsliced workspace and launch initial implementation when no context exists, "
+                    "then run independent review and fixes. Existing implementation contexts retain their settings. "
+                    "Configured use needs only task loop ISSUE: [agent] selects initial implementation and "
+                    "[reviewer] selects review. Optional --i-* and --r-* flags override those roles. "
+                    "Both selections require explicit resolved model and mode.")
     loop_command.add_argument("issue", type=issue_identifier)
     controls = loop_command.add_mutually_exclusive_group()
     controls.add_argument("--pause-after-current", dest="action", action="store_const", const="pause",
@@ -57,7 +63,8 @@ def parser() -> argparse.ArgumentParser:
     loop_command.set_defaults(action="run")
     loop_command.add_argument("--from-review", action="store_true",
                               help="Start a new loop with fresh review of the completed implementation")
-    add_agent_options(loop_command)
+    add_agent_options(loop_command, prefix="i-", role="initial implementation")
+    add_agent_options(loop_command, prefix="r-", role="reviewer")
     loop_command.add_argument("--max-reviews", type=int, help="Review limit (default 3; maximum 20)")
     loop_command.add_argument("--max-passes", type=int, help="Total pass limit (default 6; maximum 40)")
     loop_command.add_argument("--timeout", type=int, metavar="SECONDS", help="Wait per pass (default 1800)")
@@ -67,12 +74,16 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def add_agent_options(command: argparse.ArgumentParser, *, include_no_agent: bool = False) -> None:
+def add_agent_options(command: argparse.ArgumentParser, *, include_no_agent: bool = False,
+                      prefix: str = "", role: str = "execution") -> None:
     """Add reusable execution selection flags to a workflow subcommand."""
-    command.add_argument("--agent", dest="agent_kind", metavar="KIND",
-                         help="Override the configured execution agent (codex or pi)")
-    command.add_argument("--model", help="Override the configured model for this run")
-    command.add_argument("--mode", help="Override reasoning/thinking mode for this run")
+    dest = prefix.replace("-", "_")
+    command.add_argument(f"--{prefix}agent", dest=f"{dest}agent_kind", metavar="KIND",
+                         help=f"Override the configured {role} agent (codex or pi)")
+    command.add_argument(f"--{prefix}model", dest=f"{dest}model",
+                         help=f"Override the configured {role} model")
+    command.add_argument(f"--{prefix}mode", dest=f"{dest}mode",
+                         help=f"Override the configured {role} reasoning/thinking mode")
     if include_no_agent:
         command.add_argument("--no-agent", action="store_true",
                              help="Prepare/focus the workspace without starting an execution agent")
@@ -103,21 +114,11 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
     projects = load_projects()
     linear = Linear(local.api_key)
     issue = linear.get_issue(identifier)
-    # Recognize the collapsed section header only; leave the description intact.
-    if not no_agent and not re.search(
-            r"(?m)^(?:\+\+\+|>>>)[ \t]*Agent instructions[ \t]*\r?$", issue.description):
-        raise TaskError(f"Linear issue {issue.identifier} has no recognizable Agent instructions block. "
-                        "Refine the issue in Linear before starting agent execution")
+    if not no_agent:
+        require_agent_instructions(issue)
     project = resolve_project(projects, issue.project)
     repo = repository_path(local, project)
-    git = Git(repo)
-    git.update_base(project.base_branch)
-    workspace = Herdr(repo).prepare(git, project.base_branch,
-                                   branch_name(issue.identifier, slice or issue.title), issue.identifier, slice)
-    try:
-        linear.start(issue)
-    except TaskError as error:
-        raise TaskError(f"Workspace ready on {workspace.branch}, but status update failed: {error}") from None
+    workspace = prepare_task(issue, project, linear, Git(repo), lambda: Herdr(repo), slice=slice)
     if agent:
         policy = (codex_repository_policy(local.codex_repository_profiles, project.repo_name)
                   if options.kind == "codex" else {})
@@ -259,9 +260,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise KeyboardInterrupt()
             previous = signal.signal(signal.SIGTERM, interrupted)
             try:
-                result = loop(args.issue, action=args.action, agent_kind=args.agent_kind, model=args.model,
-                              mode=args.mode, max_reviews=args.max_reviews, max_passes=args.max_passes,
-                              timeout=args.timeout, from_review=args.from_review)
+                result = loop(args.issue, action=args.action, agent_kind=args.r_agent_kind, model=args.r_model,
+                              mode=args.r_mode, max_reviews=args.max_reviews, max_passes=args.max_passes,
+                              timeout=args.timeout, from_review=args.from_review,
+                              impl_agent_kind=args.i_agent_kind, impl_model=args.i_model, impl_mode=args.i_mode)
             finally:
                 signal.signal(signal.SIGTERM, previous)
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())

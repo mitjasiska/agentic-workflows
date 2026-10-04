@@ -22,7 +22,7 @@ from .sessions import SessionInvalid, has_immutable_identity, merge_session, sam
 from .workspace import Git, Herdr, Workspace
 
 
-def resolve_review_workspace(issue, project, repo, registry, identities):
+def resolve_review_workspace(issue, project, repo, registry, identities, *, pending_implementation=None):
     git, herdr = Git(repo), Herdr(repo)
     git.check_base(project.base_branch)
     target = herdr.resolve_task(git, issue.identifier, include_remotes=False)
@@ -44,9 +44,12 @@ def resolve_review_workspace(issue, project, repo, registry, identities):
                                  dict(agent=other["agent"], kind=other["session_kind"], value=other["session_id"]), context["agent"]))
             if shared_runtime or shared_session:
                 raise TaskError("Multiple workflow contexts claim the same reviewer/implementation identity")
-    implementations = [c for c in contexts if c["role"] == "implementation" and c["state"] == "active"]
+    implementation_state = "launching" if pending_implementation else "active"
+    implementations = [c for c in contexts if c["role"] == "implementation" and c["state"] == implementation_state]
     if len(implementations) != 1:
         raise TaskError("Review requires exactly one active implementation context mapping")
+    if pending_implementation and (len(contexts) != 1 or implementations[0]["context_id"] != pending_implementation):
+        raise TaskError("Pending implementation allocation changed; inspect before launching")
     anchor, notes = reconcile(implementations[0], panes)
     if anchor is None or any(n in {"agent mismatch", "session mismatch", "session identity invalid"} for n in notes):
         raise TaskError("Implementation pane identity is missing or inconsistent")

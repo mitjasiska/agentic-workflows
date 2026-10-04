@@ -152,6 +152,19 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertNotIn("initial_phase", state)
         self.assertEqual([r["phase"] for r in state["records"]], ["implementation", "review"])
 
+    def test_cli_reviewer_overrides_keep_existing_implementation_settings(self):
+        self.local = replace(self.local, agent=review_fixture.AgentConfig("codex", "unused", "high"))
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(cli.main(["loop", "DEV-7", "--from-review", "--r-agent", "codex",
+                                       "--r-model", "review-override", "--r-mode", "medium", "--json"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["state"], "clean")
+        state, _ = self.store.read()
+        self.assertEqual(state["reviewer_options"], dict(kind="codex", model="review-override", mode="medium"))
+        self.assertEqual((state["implementation"]["context_id"], state["implementation"]["agent"],
+                          state["implementation"]["model"], state["implementation"]["mode"]),
+                         (self.implementation, "pi", "implementation", "low"))
+        self.assertEqual(self.impl_prompts, [])
+
     def test_from_review_cli_clean_completion_skips_implementation_turn(self):
         self.on_review = lambda _: self.pause()  # A clean final result still wins over pause.
         with patch("sys.stdout", new_callable=io.StringIO) as output:
@@ -799,6 +812,42 @@ class LoopIntegrationTests(unittest.TestCase):
 
 
 class LoopContractTests(unittest.TestCase):
+    def test_cli_accepts_only_role_explicit_loop_selection_flags(self):
+        args = cli.parser().parse_args([
+            "loop", "DEV-7", "--i-agent", "pi", "--i-model", "implementation", "--i-mode", "low",
+            "--r-agent", "codex", "--r-model", "reviewer", "--r-mode", "high"])
+        self.assertEqual((args.i_agent_kind, args.i_model, args.i_mode), ("pi", "implementation", "low"))
+        self.assertEqual((args.r_agent_kind, args.r_model, args.r_mode), ("codex", "reviewer", "high"))
+        for flag, value in (("--agent", "codex"), ("--model", "model"), ("--mode", "high"),
+                            ("--impl-agent", "pi"), ("--impl-model", "model"), ("--impl-mode", "low")):
+            with self.subTest(flag=flag), patch("task_start.cli.loop") as run, \
+                    patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                cli.main(["loop", "DEV-7", flag, value])
+            self.assertEqual(error.exception.code, 2)
+            run.assert_not_called()
+
+    def test_start_and_review_keep_generic_selection_flags(self):
+        for command in ("start", "review"):
+            with self.subTest(command=command):
+                args = cli.parser().parse_args([command, "DEV-7", "--agent", "pi",
+                                                "--model", "provider/model", "--mode", "high"])
+                self.assertEqual((args.agent_kind, args.model, args.mode), ("pi", "provider/model", "high"))
+                for prefix in ("i", "r"):
+                    with patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit):
+                        cli.parser().parse_args([command, "DEV-7", f"--{prefix}-model", "model"])
+
+    def test_loop_controls_reject_both_roles_before_loading_config_or_checkpoint(self):
+        with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
+                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")):
+            for control in ("--continue", "--status", "--pause-after-current"):
+                for prefix in ("i", "r"):
+                    for option, value in (("agent", "codex"), ("model", "model"), ("mode", "high")):
+                        flag = f"--{prefix}-{option}"
+                        with self.subTest(control=control, flag=flag), \
+                                patch("sys.stderr", new_callable=io.StringIO) as error:
+                            self.assertEqual(cli.main(["loop", "DEV-7", control, flag, value]), 1)
+                            self.assertIn("preserve recorded settings", error.getvalue())
+
     def test_from_review_cannot_override_existing_loop_controls(self):
         with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
                 patch("task_start.loop.load_local", side_effect=AssertionError("No config access")):

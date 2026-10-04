@@ -593,6 +593,16 @@ class PiAdapterTests(unittest.TestCase):
                          ("agent", "prompt", "w6:p20", self.handoff))
         self.assertEqual(command.call_args_list[4].args, ("agent", "get", "w6:p20"))
 
+    def test_initial_loop_launch_loads_session_reporter_without_changing_start(self):
+        extension = str(Path(__file__).resolve().parents[1] / "task_start" / "pi_session.mjs")
+        args = [*self.args, "--extension", extension]
+        self.results[1]["argv"] = ["pi", *args]
+        execution = replace(self.execution, policy=dict(session_reporting=True))
+        with patch.object(self.pi, "command", side_effect=self.results) as command:
+            self.pi.launch(execution)
+        self.assertEqual(command.call_args_list[1].args[-len(args):], tuple(args))
+        self.assertEqual(command.call_args_list[3].args, ("agent", "prompt", "w6:p20", self.handoff))
+
     def registered_pi_launch(self, results):
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.registry = ContextRegistry(Path(directory) / "contexts.sqlite3")

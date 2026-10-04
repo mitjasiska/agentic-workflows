@@ -271,26 +271,53 @@ this single-pass command. Automatic findings routing is an explicit `task loop` 
 ```sh
 task loop DEV-20
 task loop DEV-20 --from-review
-task loop DEV-20 --agent codex --model gpt-6-astra --mode high --max-reviews 3 --max-passes 6
+task loop DEV-20 --r-agent codex --r-model gpt-6-astra --r-mode high --max-reviews 3 --max-passes 6
+task loop DEV-20 --i-agent codex --i-model gpt-6-astra --i-mode high
 task loop DEV-20 --pause-after-current
 task loop DEV-20 --status --json
 task loop DEV-20 --continue
 ```
 
-Start with the original implementation context idle in the exact open task
-checkout. By default, `loop` resumes it to finish outstanding implementation and
-validation and collect a nonce-bound structured completion result. For an already-completed
-implementation, this default pass asks the agent to report its work without
-replaying it.
+With no implementation context or context history, `task loop ISSUE` prepares
+and runs the initial implementation itself. It shares `task start`'s agent-ready
+preflight, project/base resolution, base update, default workspace create/reuse,
+and Linear `In Progress` transition. Both implementation and reviewer selections
+are validated before preparation mutates Git, Herdr, or Linear. Preparation
+failure prevents the Linear update; a failed Linear update leaves the prepared
+workspace but allocates no context and launches no agent.
+
+This entry supports only the unsliced default workspace, including a workspace
+prepared earlier with `task start --no-agent`. Existing slice scope, ambiguous or
+historical workspaces, and retired/conflicting context history are refused.
+It does not adopt an unregistered running agent or repair a missing context.
+The first implementation handoff already contains the loop's nonce-bound structured
+result contract. Validated completion proceeds directly to fresh review, without
+an extra implementation turn just to collect completion. Blocked, failed, malformed,
+timed-out, or uncertain delivery stops before review. Idleness is never completion.
+
+Normal configured use is `task loop ISSUE`, with initial implementation settings
+from `[agent]` and fresh reviewer settings from `[reviewer]`. Optional `--i-agent`,
+`--i-model`, and `--i-mode` override implementation; `--r-agent`, `--r-model`, and
+`--r-mode` override review. Each option resolves independently over its role's
+configuration. Both roles require explicit resolved model and mode before mutation.
+The loop rejects generic `--agent`, `--model`, and `--mode`; those flags are unchanged
+on `task start` and `task review`. Implementation overrides are refused when a
+context already exists, with `--from-review`, and with controls. Existing
+implementation contexts always retain their recorded settings.
+
+When an exact implementation context already exists, start with it idle in the
+open task checkout. The default path still resumes it to finish outstanding
+implementation and validation and collect a structured completion result. For an
+already-completed implementation, this pass reports work without replaying it.
 
 When you know the initial implementation is complete, `--from-review` explicitly
 starts a new loop at fresh review, without sending an initial implementation
-completion turn. It still verifies and saves the exact single idle, resumable implementation
-context for later fixes. The human selects the starting boundary; idle status alone
-never establishes completion. Neither path adopts an arbitrary running turn or
-creates a replacement implementation context. Let the existing implementation turn
-finish before starting either path. `--from-review` can accompany `--new`, but
-cannot accompany `--continue`, `--status`, or `--pause-after-current`.
+completion turn. It still verifies and saves the exact single idle, resumable
+implementation context for later fixes. The human selects the starting boundary;
+idle status alone never establishes completion. Existing-context entries never
+adopt an arbitrary running turn or create a replacement implementation context.
+Let its current turn finish before starting. `--from-review` can accompany `--new`,
+but cannot accompany `--continue`, `--status`, or `--pause-after-current`.
 
 The first review uses the existing fresh review primitive with a newly allocated
 independent reviewer. It receives current requirements and actual repository
@@ -298,25 +325,29 @@ state, without implementation conversation or completion prose. Implementation
 findings return to the original implementation context. A focused re-review uses
 the exact same reviewer context, previous findings, and structured fix claims.
 Review remains read-only and retains the single-pass drift checks. Clean review
-terminates; there is no publication, merge, cleanup, or Linear status change.
+terminates; there is no publication, merge, cleanup, or Linear completion. Only
+from-scratch preparation changes Linear to `In Progress`.
 
 Implementation and reviewer contexts require recorded explicit model and mode,
 provider-verifiable immutable session identity, and consistent registry/runtime
 bindings. In particular, a Pi runtime without a persisted session reference is
-insufficient. Missing or non-resumable implementation context stops the loop.
+insufficient. An established context that is missing, uncertain, or non-resumable
+stops the loop; it never triggers bootstrap.
 Reviewer resume may recreate a stopped/missing pane through the existing review
 primitive after verifying the original conversation; it never allocates a
 replacement conversation. No replacement implementation or reviewer is selected
-automatically. Agent selection flags apply only to the first fresh reviewer;
-later passes and explicit continuation preserve recorded settings.
+automatically. Reviewer flags (`--r-agent`, `--r-model`, `--r-mode`) apply only to the
+first fresh reviewer; later passes and explicit continuation preserve recorded
+settings.
 
 ### Boundaries and graceful pause
 
-The saved next phase is one of `implementation` (initial completion), `review`
-(fresh review), `fixes`, or `rereview`. A review-start checkpoint also records its
-explicit initial boundary; default checkpoints retain their initial completion
-semantics. Each completed pass and its next boundary are checkpointed before any
-automatic handoff. From another terminal, request
+The saved next phase is one of `initial_implementation` (fresh launch),
+`implementation` (completion in an established conversation), `review` (fresh
+review), `fixes`, or `rereview`. Fresh-launch and review-start checkpoints record
+their explicit origin; existing version-1 completion checkpoints remain valid.
+Each completed pass and its next boundary are checkpointed before any automatic
+handoff. From another terminal, request
 `--pause-after-current` while either agent is working. The controller lets that
 pass finish, validates/collects its result, and stops before the next handoff.
 It does not send cancellation or restart the agent. A clean terminal review
@@ -333,7 +364,10 @@ is running. Do not type additional agent prompts or edit the checkout during a r
 
 `--continue` accepts only a saved `paused` boundary. It explicitly clears that
 pause, verifies the exact checkout/base, requirement fingerprint, contexts,
-sessions, and idle runtimes, then executes the pending phase. It never repeats a
+sessions, and idle runtimes, then executes the pending phase. Before an initial
+launch, it instead verifies the reserved context and its exact empty shell; no
+provider session exists yet. It retains the saved implementation options without
+rerunning workspace preparation or the Linear transition. It never repeats a
 completed pass. Changes to requirements, checkout, identity, or resumability stop
 for inspection. A later pause remains sticky. `--status`, agent idleness, and
 repeating the ordinary `loop` command never continue a loop. Pause/status find
@@ -362,7 +396,9 @@ Defaults are at most three review passes, six total implementation/review passes
 and 1800 seconds of waiting per delivered pass. Startup keeps the adapters' own
 bounded receipt checks. `--max-reviews` accepts 1–20, `--max-passes` accepts 1–40,
 and `--timeout` accepts 1–86400 seconds. These bounds persist across pauses.
-Exhausting the review budget stops before fixes that could not be re-reviewed.
+The initial implementation consumes one total pass and its configured wait timeout;
+review count remains zero until review runs. Exhausting the review budget stops
+before fixes that could not be re-reviewed.
 Selection, timeout, and limit flags cannot accompany controls.
 
 The compact final report includes implementation summaries, review iterations,
@@ -384,6 +420,24 @@ bounded result summaries needed after a pause. It contains no issue description,
 transcripts, credentials, report archive, or publication approval. A versioned
 result and a post-checkpoint pass-result callback provide integration points for
 future report persistence.
+
+Before the initial handoff, the controller reserves the implementation context
+and saves a version-3 checkpoint with its ID and explicit implementation settings.
+This makes pause/status available even before launch. A pause before the handoff
+claim leaves that exact shell reservation pending for `--continue`. The durable
+claim precedes labeling, agent startup, and task delivery. Observed provider
+identity is retained in the registry immediately and added to the checkpoint as
+soon as it can be verified. Launch, provider verification, and polling share one
+persistence observer, so later Pi path-only reports retain the verified immutable
+conversation ID. The same session must serve later fixes. Pi initial
+loop launches load the session reporter used by review; ordinary `task start`
+launch arguments are unchanged.
+
+A crash between context reservation and checkpoint creation leaves a `launching`
+context for inspection. A crash after the claim leaves an uncertain active pass,
+even if startup never reached delivery. Neither case authorizes automatic launch,
+replacement, or prompt replay. Once claimed, output is accepted only during that
+controller pass through the normal result parser and final identity checks.
 
 Ctrl+C, SIGTERM, and process cancellation are distinct from graceful pause. Caught
 interruption records `interrupted`; it never accepts output as a completed pass

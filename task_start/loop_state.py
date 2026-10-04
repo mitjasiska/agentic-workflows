@@ -18,7 +18,7 @@ from .sessions import has_immutable_identity
 from .workspace import Git
 
 
-PHASES = {"implementation", "review", "fixes", "rereview"}
+PHASES = {"initial_implementation", "implementation", "review", "fixes", "rereview"}
 STATES = {"ready", "running", "paused", "clean", "escalated", "interrupted"}
 
 
@@ -33,6 +33,15 @@ def validate_checkpoint(state):
         initial_phase = state["initial_phase"]
         if initial_phase != "review":
             raise ValueError("invalid initial boundary")
+    if state["version"] == 3:
+        fields.update({"initial_phase", "implementation_options"})
+        initial_phase = state["initial_phase"]
+        if initial_phase != "initial_implementation":
+            raise ValueError("invalid initial launch boundary")
+        options = state["implementation_options"]
+        if (set(options) != {"kind", "model", "mode"}
+                or any(not isinstance(v, str) or not v for v in options.values())):
+            raise ValueError("invalid implementation settings")
     if set(state) != fields:
         raise ValueError("unknown checkpoint fields")
     target = state["binding"]
@@ -49,6 +58,12 @@ def validate_checkpoint(state):
             continue
         if not re.fullmatch(re.escape(target["issue"]) + f"-{role}[1-9][0-9]*", context["context_id"]):
             raise ValueError("invalid context selector")
+        if (key == "implementation" and state["version"] == 3 and set(context) == {"context_id"}):
+            if (state["records"] or state["reviewer"] is not None or state["review_count"] != 0
+                    or state["next_phase"] != "initial_implementation"
+                    or state["status"] == "clean"):
+                raise ValueError("missing established implementation")
+            continue  # Reservation is durable before any provider/session exists.
         if (key == "reviewer" and set(context) == {"context_id"}
                 and state["status"] in {"running", "escalated", "interrupted"}):
             continue  # Allocation is recorded even before provider receipt exists.
@@ -56,6 +71,10 @@ def validate_checkpoint(state):
                 or any(not isinstance(context[k], str) or not context[k] for k in ("agent", "model", "mode"))
                 or not has_immutable_identity(context["session"], context["agent"])):
             raise ValueError("invalid saved session")
+        if key == "implementation" and state["version"] == 3:
+            options = state["implementation_options"]
+            if any(context[k] != options[o] for k, o in (("agent", "kind"), ("model", "model"), ("mode", "mode"))):
+                raise ValueError("implementation settings changed")
     pinned = state["snapshot"]
     if (set(pinned) != {"base_commit", "head", "branch", "index", "fingerprint", "content", "version"}
             or pinned["version"] != 2 or pinned["branch"] != target["branch"]
@@ -84,10 +103,10 @@ def validate_checkpoint(state):
                 or any(not isinstance(record[k], list) for k in ("findings", "checks", "resolutions"))):
             raise ValueError("invalid pass sequence")
         ids.add(record["pass_id"])
-        if next_phase in {"implementation", "fixes"}:
+        if next_phase in {"initial_implementation", "implementation", "fixes"}:
             if record["context_id"] != state["implementation"]["context_id"]:
                 raise ValueError("implementation changed")
-            next_phase = "review" if next_phase == "implementation" else "rereview"
+            next_phase = "rereview" if next_phase == "fixes" else "review"
         else:
             reviews += 1
             if state["reviewer"] is None:
@@ -154,7 +173,7 @@ class LoopStore:
             raise TaskError("No implementation-review loop checkpoint exists")
         try:
             state = json.loads(row[0], object_pairs_hook=unique_object)
-            if (state["version"] not in {1, 2} or str(UUID(state["run_id"])) != state["run_id"]
+            if (state["version"] not in {1, 2, 3} or str(UUID(state["run_id"])) != state["run_id"]
                     or state["status"] not in STATES
                     or state["next_phase"] not in PHASES | {None}
                     or type(state["pass_count"]) is not int or type(state["review_count"]) is not int
