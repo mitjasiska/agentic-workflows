@@ -107,7 +107,8 @@ class Git:
     def command(self, *args: str) -> str:
         return run(["git", "-C", str(self.repo), *args])
 
-    def check_base(self, base: str) -> None:
+    def check_repository(self) -> Path:
+        """Validate the permanent repository identity without requiring an idle base."""
         if not self.repo.is_dir():
             raise TaskError(f"Repository does not exist: {self.repo}")
         if not (self.repo / ".git").exists():
@@ -119,6 +120,10 @@ class Git:
         common = self.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
         if Path(git_dir).resolve() != Path(common).resolve():
             raise TaskError("Configured repository must be the permanent checkout, not a linked worktree")
+        return Path(git_dir)
+
+    def check_base(self, base: str) -> None:
+        git_dir = self.check_repository()
         self.command("check-ref-format", f"refs/heads/{base}")
         refs = self.command("for-each-ref", "--format=%(refname)", "refs/heads").splitlines()
         if f"refs/heads/{base}" not in refs:
@@ -278,9 +283,12 @@ class Git:
         return entries
 
     def check_cleanup_target(self, base: str, target: TaskWorktree, identifier: str,
-                             *, require_clean: bool = True) -> None:
+                             *, require_clean: bool = True, require_base: bool = True) -> None:
         """Revalidate all local target identity and safety checks without external lookups."""
-        self.check_base(base)
+        if require_base:
+            self.check_base(base)
+        else:
+            self.check_repository()
         path, branch = target.path, target.branch
         common = Path(self.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
         if (branch == base or not belongs_to_issue(branch, identifier)

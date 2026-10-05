@@ -11,6 +11,7 @@ Command behavior, invariants, and refusal/retry cases. Start with the
 - [Fresh review and exact resume](#task-review)
 - [Automatic implementation/review loop](#task-loop)
 - [Reviewed PR publishing](#task-pr)
+- [Isolated conflict recovery](#task-integrate)
 - [Cleanup and partial failures](#task-cleanup)
 
 ## Task start
@@ -144,8 +145,8 @@ readiness checks, delivery guarantees, and timeouts.
 
 ### Codex first-use trust and setup
 
-For `task start`, initial `task loop` implementation, and fresh `task review`, a
-recognized Codex **Trust this folder?** menu or sign-in method menu pauses the
+For `task start`, initial `task loop` implementation, fresh `task review`, and
+`task integrate`, a recognized Codex **Trust this folder?** menu or sign-in method menu pauses the
 original workflow command before task delivery. The message identifies the context,
 checkout, workspace, pane, terminal and any already observed provider session.
 `task contexts ISSUE` shows `awaiting_user`.
@@ -163,12 +164,13 @@ This works with any checkout path, including newly created isolated checkouts.
    input or conflicting evidence stops delivery. A session reported by startup is
    retained even when startup was non-ready and may continue through the human
    wait, provided every later runtime observation and provider discovery matches
-   it. Missing or conflicting identity prevents delivery. Initial loop startup
-   also retains that identity while history is unreadable during setup; it must
-   verify the recorded readiness turn after setup before sending the task.
+   it. Missing or conflicting identity prevents delivery. Initial loop and
+   integration startup also retain that identity while history is unreadable
+   during setup; they must verify the recorded readiness turn after setup before
+   sending the task.
 
-Do not rerun `start`, `review`, or `loop` to get past trust. The original command
-retains the handoff and any review/loop result paths, and the execution timeout
+Do not rerun `start`, `review`, `loop`, or `integrate` to get past trust. The original
+command retains the handoff and result paths, and the execution timeout
 starts after launch/delivery completes. It neither launches a replacement nor
 replays a queued prompt. `loop --continue` is for saved loop pause boundaries;
 it does not acknowledge a startup trust dialog.
@@ -413,6 +415,10 @@ for inspection. A later pause remains sticky. `--status`, agent idleness, and
 repeating the ordinary `loop` command never continue a loop. Pause/status find
 the checkpoint through the context registry without loading credentials,
 workflow configuration, or Linear; continuation fetches current requirements.
+All three controls resolve the task checkout from implementation/review contexts.
+Retained integration (`G`) contexts keep their separate isolated checkout and
+provenance; their paths do not participate in this lookup. Missing or conflicting
+task checkout paths still stop the command.
 
 ### Routing, bounds, and results
 
@@ -773,10 +779,17 @@ or merged history, multiple PRs, or changing responses refuse publication. The
 matching PR is reused and its title/body updated if necessary. The confirmed PR
 and remote SHA are checked before reporting its URL. Immediately before every
 PR POST/PATCH, after the preceding GitHub lookups, the workflow rechecks the
-effective destination and authoritative remote base/head SHAs against the frozen
-publishing state. Drift refuses the write. Local HEAD and reviewed contents are
-checked again after that native ref lookup. These checks cannot lock GitHub
+effective destination and authoritative remote task SHA against the frozen
+publishing state. Task-ref or identity drift refuses the write. Local HEAD and
+reviewed contents are checked again after that native ref lookup. These checks cannot lock GitHub
 against unrelated changes between the final observation and the API write.
+The remote base must match the reviewed base before a new push. Once the exact
+published task SHA is confirmed, later main advancement does not make publication
+uncertain or prevent completing/retrying that frozen PR operation. The PR may
+subsequently need integration; v1 does not rewrite published history. Uncertainty
+concerns unconfirmed push/ref/PR outcomes, not base freshness. The server's ref
+update during a non-force push is the concurrency boundary for the task branch;
+it does not atomically compare main or encompass PR API operations.
 GitHub owner/repository
 casing is equivalent, including in the reported PR URL. URL scheme, host, path,
 PR number, head/base branch names and head SHA remain strictly validated.
@@ -848,6 +861,215 @@ without echoing captured command output. Normal Git signing and authentication
 configuration stays in effect. Non-interactive callers must provide already
 usable credentials/signing access or handle a native failure; the workflow never
 supplies credentials to a prompt or weakens authentication.
+
+## Task integrate
+
+```sh
+task integrate DEV-20
+task integrate DEV-20 --agent codex --model gpt-6-astra --mode high
+task integrate DEV-20 --timeout 1800
+```
+
+Use this explicit recovery command when an unpublished, clean-reviewed task has
+uncommitted implementation changes and the base has advanced into a conflict.
+`task pr` remains the deterministic first attempt and never invokes an integration
+agent. `integrate` independently repeats all prerequisites and the disposable
+replay; no earlier failed `pr` or conflict journal is required. A conflict-free
+probe directs the caller back to `pr`. Setup errors do not count as conflicts.
+
+The single execution role resolves from `[agent]`; `--agent`, `--model`, and
+`--mode` override those fields independently. Explicit resolved model and mode
+are required before mutation or launch. `[reviewer]` and the implementation
+context's saved settings do not select this agent. The default completion timeout
+is 1800 seconds, starting after confirmed handoff delivery.
+
+V1 requires reviewed task HEAD to equal the reviewed base: staged, unstaged,
+deleted, and non-ignored untracked changes are materialized from the exact clean
+acceptance using a private index. Committed task histories, pending/uncertain
+publication evidence, any remote task branch or PR history, a previous integration
+record, and ambiguous source identity require inspection/manual recovery. Index
+flags, submodules, filter/mode transformations, ignored obstructions, and unsafe
+checkout preflights retain the publisher's existing refusals. Neither this command
+nor its agent uses stash or rebases the real dirty worktree.
+The existing workspace's recorded slice is included in the handoff and retained
+in integration provenance, as in task start/review. When a slice is recorded,
+only that slice is integrated; other issue requirements remain context. Ambiguous
+slice scope requires `human_decision`. Scope drift refuses installation, including
+continuation of a proven installation through `task pr`.
+
+The configured remote and authoritative base/task refs are checked, all PR
+history participates, and the clean permanent checkout may fast-forward to the
+verified latest base, as in `pr`. The real task branch, index, and files remain
+unchanged during the disposable probe and agent pass. After an actual deterministic
+conflict, the workflow reproduces it in a durable machine-local repository under
+`~/.agentic-workflows/integrations/<pass-id>/checkout`. It has its own object
+storage, no configured remote, and workflow-pinned source/base refs. The workflow
+quits the isolated rebase sequencer while retaining the conflicted index/files;
+the agent resolves with ordinary file edits, creation, and deletion. It does not
+stage or remove files through Git, write Git metadata, or create commits. Unmerged
+index entries remain during the agent pass; staging belongs to the controller.
+
+A fresh `DEV-20-G1` context binds that checkout and a separate pane, preserving
+the original implementation context. The handoff includes current Linear
+requirements, exact accepted source fingerprint and identity, updated base,
+and conflicted index entries. Prompt delivery and provider verification use the
+existing adapters and immutable session guards. A bounded private record in the
+real task's Git metadata claims delivery before the prompt is sent. It also records
+the completion file's location, outside every checkout in a private
+`task-integration-<pass-id>-*` directory under Python's temporary root (normally
+`/tmp`, or `TMPDIR`). This uses the documented Codex profile's existing temporary
+write access without adding writable roots or granting Git metadata writes.
+Neither the checkout nor the completion directory is automatically removed on
+return or interruption. The record is not a review acceptance or authorization
+to publish. A temporary root inside a source or isolated checkout is refused.
+
+The agent may edit and validate only the isolated checkout and write its result
+outside it. It must not commit, change history/configuration, push, create/update
+PRs, merge, or modify Linear. Product, architecture, scope, design, or semantic
+ambiguity must produce `human_decision` with evidence. Completion is structured:
+`completed`, `human_decision`, `blocked`, or `failed`, bound to the pass, source
+fingerprint, and base SHA, with a summary and observed validation checks. Successful
+completion requires at least one passed validation check and no failed checks.
+
+Only a verified idle/completed session with valid successful output can proceed.
+The workflow first proves unchanged isolated history/configuration and index,
+then stages the edited files and deletions itself. The staged result must pass
+`git diff --cached --check`, including conflict-marker and whitespace checks.
+It then proves no unmerged paths or unfinished operation, stable file content,
+and a lossless resulting tree. Failed, blocked, or uncertain agent completions
+never authorize staging.
+It imports only the proven tree/blob objects and repeats checkout preflight,
+source/acceptance/identity checks, and latest base/remote/PR checks. Removing
+textual conflict markers alone is insufficient. These checks and the subsequent
+independent review complement the integration agent's reported validation.
+
+Before touching the task, the complete integration proof and installation plan
+are durably saved. The existing publication record then revokes old clean
+acceptance and intent and saves the rebase journal. The normal installer creates
+workflow-owned local commit history, honoring normal signing, and uses a private
+index, exclusive real-index lock, repeated local proof/source checks, and compare-and-swap
+branch update. The command stops after local installation; it never publishes or
+marks the Linear issue complete. A fresh independent `task review` of the installed
+state against the frozen base SHA B, including the frozen public title/body, is
+mandatory before `task pr` can publish. Review preserves B even if main has
+advanced. Resuming a reviewer is still an independent pass against that exact state.
+
+Initial installation and `task pr` recovery use one required installation guard.
+It pins the proven integration record separately from evolving commit/result
+bookkeeping and rechecks the live task identity, recorded scope, proven source,
+frozen base SHA, tree/history, and durable provenance immediately before file checkout,
+index replacement, branch/HEAD movement, and atomic replacement of either success
+record. Unreachable commit objects and private indexes confer no installation
+authority. Drift stops further mutations and preserves pending evidence, including any earlier guarded steps;
+the workflow neither rolls those steps back nor records a stale installation as
+successful. The guard validates local state, including the configured repository/
+remote identity, without polling remote refs or requiring an idle permanent
+checkout. The base object B remains immutable in the proof; a moving main ref
+is not part of the installation identity.
+
+`task integrate` owns local installation safety; `task pr` owns remote publication
+eligibility. Remote observations establish eligibility before the proof is frozen.
+After that, local installation and its recovery may complete against B even if
+remote/permanent main advances or a remote task branch appears. Installation never
+authorizes publication or overwrites a remote ref. `task pr` can recover a pending
+local plan without remote Git/PR lookups or GitHub credentials and then stops for
+review.
+After review, it checks current remote refs/history: newer main requires the
+existing deterministic unpublished integration and another review, or explicit
+conflict recovery within the supported v1 shape. An unexpected remote task ref
+is retained as publication evidence and refused under the normal publishing rules.
+Repeated remote reads cannot synchronize GitHub state with local file mutations.
+
+`integrate`, `review`, and `pr` hold the same task-level lock. After controller
+interruption releases that lock, the retained integration claim also gates later
+review/publication. Human escalation, failed/malformed output, timeout, uncertain
+delivery, or failed source/base/publication eligibility before proof installs
+nothing. During installation, local drift stops further mutation and retains any
+journaled intermediate state; external ref movement does not invalidate the proof.
+The checkout and context are retained, and rerunning `integrate` refuses
+to replay a prompt. Missing controller state alongside known integration contexts
+also refuses; it is never treated as permission for a fresh launch.
+
+For an unrecoverable uncertain Codex attempt with no recorded provider session,
+an explicit human recovery action can abandon that exact context:
+
+```sh
+task contexts DEV-30 --all
+task integrate DEV-30 --abandon DEV-30-G1
+task integrate DEV-30
+```
+
+`--abandon` launches nothing and does not install or infer a result. It only
+supports an `uncertain` G context with `unknown` resumability, no recorded session identity,
+no completion/output or installation proof, unchanged isolated Git history, and
+remaining unmerged paths. The exact task/checkout/context identities must match.
+Agent/model/mode/timeout overrides cannot accompany abandonment.
+
+Absence of a recorded session or an idle status alone is insufficient. The
+original Herdr pane must be absent or contain its exact idle shell; a moved or
+replaced terminal refuses. Readable local Linux process evidence must confirm no
+execution using that checkout, including background children of the retained
+shell. Run this recovery on the same host/PID namespace as Herdr; invisible host
+processes cannot prove absence. Ordinarily Codex must report no current or archived
+sessions for the checkout across providers and supported source types.
+Provider/process failures, incomplete results, known sessions, live execution,
+or identity drift refuse abandonment.
+Other agents/platforms and more complex recovery cases remain manual inspection.
+
+An old pre-sandbox-fix attempt may instead have an unrecorded Codex conversation
+that completed only the native handoff-readiness exchange. Herdr can report that
+Codex process as `idle` while it is still running in the foreground. Abandonment
+refuses and identifies the exact pane, terminal, and process IDs. Inspect and quit
+Codex yourself in that pane, keeping the original shell/pane and evidence, then
+repeat the same `--abandon` command. The workflow sends no terminal input and never
+terminates or resumes that conversation for you.
+
+Only legacy claims lacking the newer output/scope/index fields support this
+exception, and the original shell must remain observable. After proving the
+process has stopped, the controller requires exactly one unarchived CLI session
+for the isolated checkout, no archived sessions, no fork or parent, exactly one completed full
+turn containing the canonical readiness prompt and final `READY`, and an empty
+durable input queue. It repeats the history/queue observations and process check.
+Any task input, extra turn/item, tool activity, incomplete/paginated history,
+pending delivery, or identity change refuses. A visible `READY` alone proves
+nothing. The discovered provider identity, complete readiness turn, and empty
+queue evidence are archived with G1; its startup history is retained but never
+used to resume integration. G2 still requires a separate explicit command.
+
+Under the task lock, the controller durably records the explicit abandonment and
+an archive in private Git metadata before retiring G1 with its identity fields
+intact. `task contexts --all` retains it as `abandoned`. Its checkout, conflict
+index/files, output directory, original attempt evidence, and abandonment proof
+are kept; nothing is deleted and review/publication authorization is unchanged.
+If interrupted before archival/retirement finishes, normal commands still refuse;
+repeat the exact `--abandon` action explicitly to recheck absence and finish.
+Missing or conflicting provenance never authorizes a retry.
+
+Only a separate normal `task integrate` after completed abandonment may allocate
+G2. It repeats current acceptance, source/base, remote/publication, and deterministic
+conflict checks, using a fresh checkout/context and leaving G1's evidence intact.
+Successful installation still revokes the old review and requires a fresh
+independent review. The abandoned checkout is never a source of an installable
+result.
+
+Once both the integration proof and revoked-acceptance rebase journal are durable,
+a pending installation can continue through `task pr` using its existing proven
+source/target recovery states and saved commit IDs. That invocation finishes
+installation and demands review; it cannot publish. A crash between proof storage
+and authorization revocation, or ambiguous partial file updates, requires manual
+inspection. The original index survives a failed checkout/index replacement;
+recovery never infers an arbitrary partial installation. New source, base, remote,
+or identity drift refuses continuation. Older integration proofs without recorded
+slice scope require inspection before installation can continue.
+
+There is no automatic cleanup or resume of integration checkouts or completion
+directories in v1, including after success. Inspect `task contexts DEV-20 --all`,
+the retained pane/checkout, completion output, and private provenance before manual
+reconciliation. Lost output is never permission to replay a prompt. Preserve
+valuable resolutions
+and establish that the agent has stopped before any manual cleanup. Do not delete
+controller or approval records to bypass a refusal. Complex or published histories
+remain manual recovery; force-push and merge-commit rewriting are not supported.
 
 ## Task cleanup
 

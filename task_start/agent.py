@@ -14,9 +14,10 @@ from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from . import AgentNotReady, TaskError
-from .codex_rpc import CodexRPC
+from .codex_rpc import CodexRPC, validate_readiness_only
 from .config import AgentConfig
 from .linear import Issue
+from .integration_process import stopped_checkout
 from .sessions import SessionInvalid, merge_session, same_session, session_identity
 from .workspace import Workspace, run
 
@@ -104,6 +105,8 @@ class AgentAdapter(Protocol):
     def resume(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult: ...
 
     def status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
+
+    def verify_abandonment(self, path: Path, shell_pid: int | None, *, allow_readiness=False) -> dict: ...
 
 
 def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides, *, section: str = "agent",
@@ -214,7 +217,7 @@ class HerdrAgentAdapter:
     def observe_agent(self, execution: AgentExecution, agent: dict,
                       previous: dict | None = None, *, expected_session=None, allow_absent=False) -> dict:
         """Validate every observation and persist a newly discovered reference immediately."""
-        self.validate_agent(agent, execution.workspace, review=execution.purpose == "review", allow_absent=allow_absent)
+        self.validate_agent(agent, execution.workspace, review=execution.purpose in {"review", "integration"}, allow_absent=allow_absent)
         reference = agent.get("agent_session")
         identity = session_identity(reference, self.kind)
         established = None
@@ -245,6 +248,9 @@ class HerdrAgentAdapter:
 
     def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
         raise TaskError(f"{self.display_name} cannot safely resume this reviewer session")
+
+    def verify_abandonment(self, path: Path, shell_pid: int | None, *, allow_readiness=False) -> dict:
+        raise TaskError(f"Explicit integration abandonment is unsupported for {self.display_name}; inspect manually")
 
     # Implementation follow-ups use the same exact-session transport as DEV-20.
     # Keep the review entry points compatible with existing callers/adapters.
@@ -359,6 +365,60 @@ class CodexAdapter(HerdrAgentAdapter):
             mode = "none" if self.options.mode == "off" else self.options.mode
             args.extend(["--config", "model_reasoning_effort=" + json.dumps(mode)])
         return [*args, "--", bootstrap]
+
+    def verify_abandonment(self, path: Path, shell_pid: int | None, *, allow_readiness=False) -> dict:
+        before = stopped_checkout(path, shell_pid)
+        proof = dict(provider="codex", checkout=str(path), process=before, history="absent")
+        try:
+            with CodexRPC(path) as rpc:
+                def list_threads():
+                    threads = []
+                    for archived in (False, True):
+                        result = rpc.request("thread/list", dict(cwd=str(path), limit=1, archived=archived,
+                            modelProviders=[], sourceKinds=["cli", "vscode", "exec", "appServer", "subAgent",
+                                "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"]))
+                        if (not isinstance(result["data"], list) or result["nextCursor"] is not None
+                                or (result["data"] and (archived or not allow_readiness))):
+                            raise TaskError("Codex history may be resumable; integration abandonment refused")
+                        threads.extend(result["data"])
+                    return threads
+                threads = list_threads()
+                if threads:
+                    if len(threads) != 1 or not allow_readiness:
+                        raise TaskError("Codex history is ambiguous; integration abandonment refused")
+                    candidate = threads[0]
+                    if Path(candidate["cwd"]) != path or str(UUID(candidate["id"])) != candidate["id"]:
+                        raise ValueError("different readiness checkout/identity")
+                    def observe_startup():
+                        # Explicitly inspect the complete turn and durable queue:
+                        # absent task receipts alone cannot prove no pending delivery.
+                        thread = rpc.request("thread/read", {"threadId": candidate["id"]})["thread"]
+                        turns = rpc.request("thread/turns/list", dict(threadId=candidate["id"],
+                            sortDirection="asc", limit=2, itemsView="full"))
+                        queue = rpc.request("thread/queue/list", dict(threadId=candidate["id"], limit=1))
+                        if (thread["id"] != candidate["id"] or thread["preview"] != candidate["preview"]
+                                or not isinstance(turns["data"], list) or len(turns["data"]) != 1
+                                or turns["nextCursor"] is not None):
+                            raise ValueError("incomplete or changed readiness history")
+                        evidence = dict(thread={k: thread[k] for k in ("id", "cwd", "preview", "source",
+                                        "forkedFromId", "parentThreadId", "status")}, turn=turns["data"][0], queue=queue)
+                        validate_readiness_only(evidence, path)
+                        return evidence
+                    startup = observe_startup()
+                    if observe_startup() != startup:
+                        raise TaskError("Codex readiness history changed during abandonment checks")
+                    # A second conversation appearing during these checks is not
+                    # covered by the single readiness turn we just verified.
+                    final_threads = list_threads()
+                    if (len(final_threads) != 1
+                            or any(final_threads[0][k] != candidate[k] for k in ("id", "cwd", "preview"))):
+                        raise TaskError("Codex history identity changed during abandonment checks")
+                    proof.update(history="readiness_only", startup=startup)
+            if stopped_checkout(path, shell_pid) != before:
+                raise TaskError("Integration process identity changed during abandonment checks")
+        except (KeyError, TypeError, ValueError, AttributeError, OSError):
+            raise TaskError("Cannot prove absence of Codex history; integration abandonment refused") from None
+        return proof
 
     def verify_review_session(self, workspace: Workspace, reference: dict) -> dict:
         try:
@@ -636,7 +696,7 @@ class CodexAdapter(HerdrAgentAdapter):
         startup_identity = None
         startup_deadline = None
         try:
-            self.check_target(workspace, review=execution.purpose == "review")
+            self.check_target(workspace, review=execution.purpose in {"review", "integration"})
             self.clear_shell_input(workspace)
             # A native, single-line readiness turn survives Codex startup dialogs.
             # Its nonce binds the returned Codex thread to this precise launch.
@@ -649,7 +709,7 @@ class CodexAdapter(HerdrAgentAdapter):
             with CodexRPC(workspace.path) as rpc:
                 phase = "startup launch/runtime confirmation"
                 try:
-                    observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
+                    observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose in {"review", "integration"}))
                 except AgentNotReady as error:
                     # Persist the validated launch report before any later read
                     # can omit or conflict with its provider/terminal identity.
@@ -932,10 +992,10 @@ class PiAdapter(HerdrAgentAdapter):
         try:
             self.validate_model_mode(workspace)
             phase = "startup"
-            self.check_target(workspace, review=execution.purpose == "review")
-            args = (self.review_args() if execution.purpose == "review" or execution.policy.get("session_reporting")
+            self.check_target(workspace, review=execution.purpose in {"review", "integration"})
+            args = (self.review_args() if execution.purpose in {"review", "integration"} or execution.policy.get("session_reporting")
                     else self.launch_args())
-            observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose == "review"))
+            observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose in {"review", "integration"}))
             observed = self.confirm_target(execution, observed)
             phase = "prompt submission"
             prompted = self.command("agent", "prompt", workspace.pane_id, execution.handoff)["agent"]

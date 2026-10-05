@@ -16,6 +16,7 @@ from .contexts import ContextRegistry, HerdrContexts, context_reference
 from .github import api_credential, publication_pull, publish_pull, pull_requests, repository_name
 from .linear import Linear
 from .publication_state import PublicationStore, verify_publication_history
+from .integration_state import check_integration
 from .publication_rebase import continue_rebase, integration_plan, validate_commits, validate_record
 from .review import resolve_review_workspace
 from .review_result import publication_fingerprint, publication_metadata
@@ -110,11 +111,12 @@ def remote_heads(path, identity, base, branch):
     return result.get(refs[0]), result.get(refs[1])
 
 
-def verify_remote(path, identity, base, branch, accepted_base, allowed_heads, *, observe_head=None):
+def verify_remote(path, identity, base, branch, accepted_base, allowed_heads, *, observe_head=None,
+                  require_base=True):
     base_head, head = remote_heads(path, identity, base, branch)
     if head is not None and observe_head is not None:
         observe_head(head)
-    if base_head != accepted_base:
+    if require_base and base_head != accepted_base:
         raise TaskError("Remote base differs from the reviewed base; inspect/update the base and obtain a new review before publishing")
     if head not in allowed_heads:
         raise TaskError("Remote task branch conflicts with the reviewed/publishing commit; inspect it manually; no force-push is allowed")
@@ -270,7 +272,8 @@ def push(git, accepted, intent, identity, head, *, record_publication, defer_con
             verify_commit(git, accepted, intent, expected_head=head)
         if defer_confirmation:
             return True
-        verify_remote(git.repo, identity, base, accepted["branch"], accepted["review_state"]["base_commit"], {head}, observe_head=observed)
+        verify_remote(git.repo, identity, base, accepted["branch"], accepted["review_state"]["base_commit"], {head},
+                      observe_head=observed, require_base=False)
     verify_commit(git, accepted, intent, expected_head=head)
     return False
 
@@ -334,12 +337,27 @@ def publish(identifier):
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
     registry, identities = ContextRegistry(), HerdrContexts()
-    workspace, _, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities)
+    workspace, _, _, endpoint = resolve_review_workspace(issue, project, repo, registry, identities, local_only=True)
     with PublicationStore(workspace.path).locked() as store:
         saved = store.read()
+        integration_guard = check_integration(store, saved, registry, issue, project, repo, identities)
+        if integration_guard is not None:
+            # Finish only the durable local plan. Remote eligibility and API
+            # credentials are irrelevant until a fresh review authorizes publish.
+            try:
+                continue_rebase(Git(workspace.path), saved, store, native_git, integration_guard,
+                                verify_identity=integration_guard)
+            finally:
+                if saved["rebase"]["result"] is not None:
+                    integration_guard.finish()
+        if (saved["rebase"] is not None and saved["rebase"].get("integration_id")
+                and saved["rebase"]["result"] is not None and saved["acceptance"] is None):
+            raise TaskError("No current clean acceptance; run a new independent task review of the installed integration")
         accepted, intent = saved["acceptance"], saved["intent"]
         git = Git(workspace.path)
         permanent = Git(repo)
+        permanent.check_base(project.base_branch)
+        base = permanent.command("rev-parse", "--verify", f"refs/heads/{project.base_branch}^{{commit}}").strip()
         identity = remote_identity(permanent, project.base_branch, workspace.branch)
         verify_remote_identity(git, project.base_branch, workspace.branch, identity)
         api_credential(required=True)
@@ -403,7 +421,8 @@ def publish(identifier):
             if (rebase.get("binding") != binding or not same_remote_identity(rebase["identity"], identity)):
                 raise TaskError("Rebase provenance conflicts with task/repository identity; inspect private Git metadata")
             if rebase.get("result") is None:
-                continue_rebase(git, saved, store, native_git, lambda: verify_unpublished(rebase["base"]))
+                continue_rebase(git, saved, store, native_git, lambda: verify_unpublished(rebase["base"]),
+                                verify_identity=integration_guard)
         verify_acceptance(accepted, issue, project, repo, workspace, endpoint, registry)
         reviewed_base = accepted["review_state"]["base_commit"]
         history = saved["publication_history"]
@@ -426,7 +445,7 @@ def publish(identifier):
                     raise TaskError("Published history changed: follow-up HEAD must equal the latest published SHA; "
                                     "inspect history and keep follow-up edits uncommitted before review")
                 previous_published_head = lineage["head"]
-            if reviewed_base != lineage["base_commit"] or base != lineage["base_commit"]:
+            if reviewed_base != lineage["base_commit"] or (followup and base != lineage["base_commit"]):
                 raise TaskError("Published task base advanced or changed; automatic rebase is forbidden. "
                                 "Follow-up review requires the pinned published base; advanced-base integration needs manual review")
             # Immutable object identity and every sole-parent link are checked,
@@ -504,7 +523,8 @@ def publish(identifier):
         remote_base, remote_head = remote_heads(workspace.path, identity, project.base_branch, workspace.branch)
         if remote_head is not None:
             record_published(remote_head)
-        if remote_base != reviewed_base:
+        already_published = head is not None and remote_head == head
+        if remote_base != reviewed_base and not already_published:
             require_never_published(saved["publication_history"])
         if (remote_head is None and isinstance(saved["publication_history"], dict)
                 and saved["publication_history"]["state"] == "published"):
@@ -515,7 +535,7 @@ def publish(identifier):
         def verify_published():
             verify_commit(git, accepted, intent, expected_head=head)
             verify_remote(workspace.path, identity, project.base_branch, workspace.branch, reviewed_base, {head},
-                          observe_head=record_published)
+                          observe_head=record_published, require_base=False)
             verify_commit(git, accepted, intent, expected_head=head)
 
         def expected_pull_number():
@@ -546,7 +566,7 @@ def publish(identifier):
         if pull is not None:
             record_published(pull["head"]["sha"])
             record_pull(pull)
-        if remote_base != reviewed_base:
+        if remote_base != reviewed_base and not already_published:
             require_never_published(saved["publication_history"])
             if remote_head is not None or pull is not None:
                 raise TaskError("Base advanced but the task branch or PR is already published; automatic rebase is forbidden. Inspect history manually; no force-push is allowed")
@@ -565,7 +585,7 @@ def publish(identifier):
             saved.update(acceptance=None, intent=None, rebase=plan)
             store.write(saved)
             continue_rebase(git, saved, store, native_git, lambda: verify_unpublished(remote_base))
-        if base != reviewed_base:
+        if base != reviewed_base and not already_published:
             raise TaskError("Local base differs from the reviewed/remote base; reconcile it manually and review again")
         if saved["intent"] is None:
             saved["intent"] = intent
@@ -586,7 +606,9 @@ def publish(identifier):
             # A failed confirmation already stops this invocation. Do not repeat
             # authentication while unwinding that same failure.
             confirmation_pending = False
-            # GitHub lookups are observations, not a lock on branch/base refs.
+            # Confirm the exact published task ref; main can advance after push
+            # without making that publication uncertain. GitHub lookups are
+            # observations, not a lock on task refs or PR identity.
             # This fresh lookup also confirms any just-completed push and saves
             # positive evidence before GitHub writes. Never reuse it across an
             # API call when authorizing another write or reporting the URL.

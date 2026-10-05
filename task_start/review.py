@@ -17,22 +17,28 @@ from .linear import Linear
 from .review_result import ReviewResult, parse_verdict, publication_fingerprint
 from .publication_rebase import validate_commits, validate_record
 from .publication_state import PublicationStore, prepare_review_continuation
+from .integration_state import check_integration
 from .review_state import snapshot
 from .sessions import SessionInvalid, has_immutable_identity, merge_session, same_session
 from .workspace import Git, Herdr, Workspace
 
 
-def resolve_review_workspace(issue, project, repo, registry, identities, *, pending_implementation=None):
+def resolve_review_workspace(issue, project, repo, registry, identities, *, pending_implementation=None,
+                             local_only=False):
     git, herdr = Git(repo), Herdr(repo)
-    git.check_base(project.base_branch)
+    if local_only:
+        git.check_repository()
+    else:
+        git.check_base(project.base_branch)
     target = herdr.resolve_task(git, issue.identifier, include_remotes=False)
     if target is None or not target.open_workspace_id:
         raise TaskError("Review requires the exact existing, open Herdr task worktree")
     # Reuse existing strict checkout/repository/scope validation, allowing dirty task files.
-    git.check_cleanup_target(project.base_branch, target, issue.identifier, require_clean=False)
+    git.check_cleanup_target(project.base_branch, target, issue.identifier, require_clean=False,
+                             require_base=not local_only)
     endpoint, panes = identities.endpoint(), identities.snapshot()
     contexts = registry.list(issue.identifier)
-    if any(c["repository"] != str(repo) or c["worktree"] != str(target.path)
+    if any(c["repository"] != str(repo) or (c["role"] != "integration" and c["worktree"] != str(target.path))
            or c["endpoint"] != endpoint or c["workspace_id"] != target.open_workspace_id for c in contexts):
         raise TaskError("Issue context repository/worktree/Herdr mappings are inconsistent")
     bound = [c for c in contexts if c["state"] in {"active", "reviewing"}]
@@ -61,7 +67,7 @@ def resolve_review_workspace(issue, project, repo, registry, identities, *, pend
                           anchor["tab_id"], anchor["pane_id"], "existing task tab",
                           git.resolve_scope(target.path, target.branch, issue.identifier, None))
     herdr.retirement(target, issue.identifier, project.base_branch)  # Read-only workspace metadata validation.
-    base = git.command("rev-parse", "--verify", f"refs/heads/{project.base_branch}^{{commit}}").strip()
+    base = None if local_only else git.command("rev-parse", "--verify", f"refs/heads/{project.base_branch}^{{commit}}").strip()
     return workspace, anchor, base, endpoint
 
 
@@ -165,7 +171,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
     registry, identities = ContextRegistry(), HerdrContexts()
-    workspace, anchor, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities)
+    workspace, anchor, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities, local_only=True)
     with PublicationStore(workspace.path).locked() as store:
         return review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
                            local, resume, agent_kind, model, mode, timeout, store)
@@ -188,8 +194,18 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
     if context:
         reference = adapter.verify_review_session(workspace, reference)
     saved = store.read()
+    check_integration(store, saved, registry, issue, project, repo, identities)
     if saved["rebase"] is not None and saved["rebase"].get("result") is None:
         raise TaskError("Unpublished rebase is pending; rerun task pr to finish it before starting independent review")
+    if saved["rebase"] is not None and saved["publication_history"] is None:
+        # Review the installed basis, even if another task has advanced main.
+        # Publication independently checks whether this base is still eligible.
+        validate_record(saved["rebase"])
+        base = saved["rebase"]["base"]
+    elif base is None:
+        permanent = Git(repo)
+        permanent.check_base(project.base_branch)
+        base = permanent.command("rev-parse", "--verify", f"refs/heads/{project.base_branch}^{{commit}}").strip()
     prepare_review_continuation(saved, Git(workspace.path),
         dict(issue=issue.identifier, repository=str(repo), worktree=str(workspace.path),
              branch=workspace.branch, base_branch=project.base_branch), base)

@@ -15,6 +15,7 @@ from .linear import Linear
 from .loop import loop
 from .review import review
 from .publish import publish
+from .integrate import abandon_integration, integrate
 from .preparation import prepare_task, require_agent_instructions
 from .workspace import Git, Herdr, slice_slug
 
@@ -71,7 +72,15 @@ def parser() -> argparse.ArgumentParser:
     loop_command.add_argument("--json", action="store_true", help="Print the combined lifecycle result")
     pr_command = commands.add_parser("pr", help="Commit and publish the exact clean-reviewed task as a GitHub PR")
     pr_command.add_argument("issue", type=issue_identifier)
-    for command in (start, review_command, loop_command):
+    integration = commands.add_parser("integrate", help="Resolve unpublished integration conflicts in an isolated agent checkout",
+        description="Recover confirmed advanced-base conflicts for clean-reviewed uncommitted tasks. "
+                    "Uses [agent]; optional --agent/--model/--mode override it. Explicit resolved model and mode are required. "
+                    "Installs only a proven result, then requires fresh independent review. Never publishes.")
+    integration.add_argument("issue", type=issue_identifier)
+    add_agent_options(integration)
+    integration.add_argument("--timeout", type=int, metavar="SECONDS", help="Agent completion timeout (default 1800)")
+    integration.add_argument("--abandon", metavar="CONTEXT", help="Explicitly abandon a stopped uncertain sessionless Codex G context; retain all evidence, launch nothing")
+    for command in (start, review_command, loop_command, integration):
         command.epilog = ("If Codex pauses for recognized trust/setup, handle it in the indicated pane, "
                           "then press Enter in this original command to reconcile the same launch. "
                           "Keep this command running; do not rerun it to bypass trust. "
@@ -277,6 +286,20 @@ def main(argv: list[str] | None = None) -> int:
             return {"clean": 0, "paused": 3, "escalated": 3, "interrupted": 130}.get(result.state, 1)
         elif args.command == "pr":
             print(publish(args.issue))
+        elif args.command == "integrate":
+            def interrupted(signum, frame):
+                raise KeyboardInterrupt()
+            previous = signal.signal(signal.SIGTERM, interrupted)
+            try:
+                if args.abandon is not None:
+                    if any(v is not None for v in (args.agent_kind, args.model, args.mode, args.timeout)):
+                        raise TaskError("--abandon uses recorded identity and cannot select an agent/model/mode/timeout")
+                    print(abandon_integration(args.issue, args.abandon))
+                else:
+                    print(integrate(args.issue, agent_kind=args.agent_kind, model=args.model, mode=args.mode,
+                                    timeout=args.timeout if args.timeout is not None else 1800))
+            finally:
+                signal.signal(signal.SIGTERM, previous)
         else:
             print(start(args.issue, no_agent=args.no_agent, slice=args.slice,
                         agent_kind=args.agent_kind, model=args.model, mode=args.mode))

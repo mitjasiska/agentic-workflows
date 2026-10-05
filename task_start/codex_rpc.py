@@ -6,12 +6,44 @@ it never creates, resumes, or executes a model session itself.
 """
 
 import json
+from pathlib import Path
+import re
 from queue import Empty, Queue
 import subprocess
 from threading import Thread
 import time
+from uuid import UUID
 
 from . import TaskError
+
+
+def validate_readiness_only(proof, checkout):
+    """Strict legacy startup evidence, not an integration turn or resume permit."""
+    try:
+        thread, turn, queue = proof["thread"], proof["turn"], proof["queue"]
+        marker = re.fullmatch(r"Handoff readiness ([0-9a-f-]+)\. Do not use tools or modify files\. "
+                              r"Reply READY, then wait for the task prompt\.", thread["preview"])
+        if (not marker or str(UUID(marker[1])) != marker[1]
+                or str(UUID(thread["id"])) != thread["id"]
+                or Path(thread["cwd"]) != checkout or not checkout.is_absolute()
+                or thread["source"] != "cli" or thread["forkedFromId"] is not None
+                or thread["parentThreadId"] is not None
+                or thread["status"] not in ({"type": "idle"}, {"type": "notLoaded"})
+                or str(UUID(turn["id"])) != turn["id"] or turn["status"] != "completed"
+                or turn["error"] is not None or turn["itemsView"] != "full"
+                or not isinstance(turn["items"], list) or len(turn["items"]) != 2
+                or queue["data"] != [] or queue["nextCursor"] is not None):
+            raise ValueError("not a complete, unqueued readiness turn")
+        user, reply = turn["items"]
+        content = user["content"]
+        if (user["type"] != "userMessage" or not isinstance(content, list) or len(content) != 1
+                or content[0]["type"] != "text" or content[0]["text"] != thread["preview"]
+                or content[0].get("text_elements", []) != []
+                or reply["type"] != "agentMessage" or reply["text"] != "READY"
+                or reply["phase"] != "final_answer"):
+            raise ValueError("input or activity beyond readiness")
+    except (KeyError, ValueError, TypeError, AttributeError):
+        raise TaskError("Codex history is not provably readiness-only; integration abandonment refused") from None
 
 
 class CodexRPC:
