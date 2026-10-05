@@ -271,7 +271,7 @@ moved outside the cleaned workspace also retains its mapping
 until its closure can be confirmed. Existing Git/Linear cleanup safety checks
 still apply.
 
-Explicit canceled-task disposal is orchestrated by
+Explicit forced local-execution disposal is orchestrated by
 [`cleanup.py`](../task_start/cleanup.py), using the same exact Git/Herdr selectors,
 publication lock and context registry. It adds a bounded journal in common Git
 metadata so identity and integration provenance survive removal of the linked
@@ -294,7 +294,7 @@ filesystem checks prevent deletion across nested mount or symlink boundaries.
 Pending disposal gates
 workspace resolution and preparation; only the explicit cleanup command may
 continue its journaled removals. See
-[destructive semantics and recovery](lifecycle.md#canceled-task-disposal).
+[destructive semantics and recovery](lifecycle.md#forced-local-execution-disposal).
 
 ## Validation
 
@@ -313,13 +313,13 @@ mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
 Cleanup tests exercise actual worktree/branch removal in disposable repositories,
 narrow Python-cache disposal, exact Herdr workspace retirement, preservation on
 refusal, repeat runs, and partial-failure reporting.
-[`test_canceled_cleanup.py`](../tests/test_canceled_cleanup.py) adds dirty reviewed
-task and uncertain/abandoned integration disposal, unrelated-state preservation,
-publication and process refusals, archival ordering, interruption recovery and
-path-reuse checks. Process checks use a synthetic Linux process filesystem.
+[`test_canceled_cleanup.py`](../tests/test_canceled_cleanup.py) adds In Progress
+dirty reviewed task and uncertain/abandoned integration disposal, unrelated-state
+preservation, publication and process refusals, archival ordering, interruption
+recovery and path-reuse checks. Process checks use a synthetic Linux process filesystem.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
 
-For canceled-cleanup review, run focused cleanup and integration-recovery coverage
+For forced-cleanup review, run focused cleanup and integration-recovery coverage
 before the full offline suite:
 
 ```sh

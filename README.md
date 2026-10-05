@@ -292,16 +292,17 @@ Linear. Dirty, ambiguous, or unproven state is preserved. GitHub squash/rebase
 merges are supported when their evidence matches the local task and base. See
 [cleanup requirements and retries](docs/lifecycle.md#task-cleanup).
 
-To discard a never-published local execution, first cancel its Linear issue and
+To discard a never-published local execution without changing its Linear status,
 quit its agents, then run `task cleanup DEV-7 --force` from outside the task
-workspace. This explicitly authorizes deleting dirty task contents and retained
-integration checkouts/output, closing the proven task workspace, and retiring
-contexts while preserving bounded provenance. Live registered execution, another
-execution's resource claim, unrelated panes, publication evidence, or uncertain
-identity cause refusal. Abandoned integrations still own their retained artifacts.
-V1 protects workflow ownership; stop unmanaged processes using the files yourself. `--force` only supports
-canceled issues; it does not bypass completed-task merge checks. See
-[canceled-task disposal](docs/lifecycle.md#canceled-task-disposal).
+workspace. `--force` is explicit authorization to delete dirty task contents and
+retained integration checkouts/output, close the proven task workspace, and retire
+contexts while preserving bounded provenance and context history. Live registered
+execution, another execution's resource claim, unrelated panes, publication
+evidence, or uncertain identity cause refusal. Abandoned integrations still own
+their retained artifacts. V1 protects workflow ownership; stop unmanaged processes
+using the files yourself. Ordinary cleanup without `--force` still requires a
+completed, merged task. See
+[forced local-execution disposal](docs/lifecycle.md#forced-local-execution-disposal).
 
 ### Handle a stopped or failed command
 

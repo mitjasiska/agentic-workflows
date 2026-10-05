@@ -248,7 +248,7 @@ class ContextRegistry:
                                      (context["context_id"],)).fetchone()
                 tombstone = self.disposal_tombstone(context, timestamp)
                 if current is None or dict(current) not in (context, tombstone):
-                    raise TaskError("Context changed during canceled cleanup; mappings were retained")
+                    raise TaskError("Context changed during forced cleanup; mappings were retained")
                 db.execute("""UPDATE contexts SET state='retired', retired_at=?, terminal_id=NULL,
                     session_id=NULL, session_kind=NULL, herdr_session=NULL, resumability='unknown'
                     WHERE context_id=?""", (timestamp, context["context_id"]))

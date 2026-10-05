@@ -1064,7 +1064,7 @@ slice scope require inspection before installation can continue.
 
 There is no automatic cleanup or resume of integration checkouts or completion
 directories in v1, including after success. Explicit
-[canceled-task disposal](#canceled-task-disposal) can remove a never-published
+[forced local-execution disposal](#forced-local-execution-disposal) can remove a never-published
 execution and its retained artifacts. Otherwise inspect `task contexts DEV-20 --all`,
 the retained pane/checkout, completion output, and private provenance before manual
 reconciliation. Lost output is never permission to replay a prompt. Preserve
@@ -1159,21 +1159,20 @@ cleanup from outside the task workspace after exiting its agent/shell sessions,
 and do not modify the repository, task worktree, or Herdr workspace concurrently
 with cleanup.
 
-### Canceled-task disposal
+### Forced local-execution disposal
 
 ```sh
 task cleanup DEV-30 --force
 ```
 
-`--force` is destructive authorization to discard one **Linear-canceled,
-never-published local execution**, including modified, staged, untracked and
-ignored task files. It is rejected for completed, In Progress, Backlog, and every
-other non-canceled state. The Linear state type must be `canceled`; a human reason
-such as "superseded" does not introduce another state. Without `--force`, the
-completed-task contract above is unchanged.
+`--force` is destructive authorization to discard one selected,
+**never-published local execution**, including modified, staged, untracked and
+ignored task files. This authorization is independent of the Linear issue state:
+the issue may remain In Progress, and cleanup does not update its status. Without
+`--force`, the completed-task contract above is unchanged.
 
-Cancel the issue and quit its agents before running this command from outside
-all task/integration checkouts. Empty shells in the exact task workspace may
+Quit the execution's agents before running this command from outside all
+task/integration checkouts. Empty shells in the exact task workspace may
 remain: cleanup proves their identity and closes that workspace. An `idle` agent
 status alone is insufficient. Cleanup compares Herdr's shell argv with the local
 Linux process executable and argv, and requires a sleeping shell with its own
@@ -1309,9 +1308,9 @@ and saves a durable claim before each step:
    former location and retirement time remain; terminal/provider/session bindings
    are cleared. Registry rows are never deleted or reset.
 
-After interruption, rerun the same `--force` command while the issue remains
-canceled. A pending journal blocks other workspace lifecycle resolution rather
-than reopening or recreating execution. A claimed operation whose result is
+After interruption, rerun the same `--force` command; the Linear issue state
+remains unchanged. A pending journal blocks other workspace lifecycle resolution
+rather than reopening or recreating execution. A claimed operation whose result is
 confirmed absent can finish on retry, including a branch-only remainder after
 worktree removal. Partial artifact deletion may continue only in the original
 directory. Reused paths, changed refs, new contexts, conflicting evidence, or

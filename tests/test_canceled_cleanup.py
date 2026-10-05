@@ -1,4 +1,4 @@
-"""Canceled disposal: real disposable Git/SQLite/filesystem, fake service boundaries."""
+"""Forced local-execution disposal with real Git/SQLite/filesystem effects."""
 
 import copy
 from dataclasses import replace
@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 from uuid import uuid4
 
 from task_start import TaskError, cli
@@ -64,7 +64,7 @@ def process_mounts(proc):
     (proc / "self" / "mounts").write_bytes(b"proc " + point + b" proc rw,nosuid,nodev,noexec 0 0\n")
 
 
-class CanceledCleanupTests(unittest.TestCase):
+class ForcedCleanupTests(unittest.TestCase):
     command = completed.CleanupTests.command
     workspace_entry = completed.CleanupTests.workspace_entry
     remote_branch_lookup = staticmethod(Git.remote_branches)
@@ -74,7 +74,8 @@ class CanceledCleanupTests(unittest.TestCase):
         self.mountinfo = self.repo.parent / "mountinfo"
         self.mountinfo.write_bytes(mount_table())
         self.enterContext(patch("task_start.cleanup.MOUNTINFO", self.mountinfo))
-        self.issue = replace(self.issue, state_name="Canceled", state_type="canceled")
+        self.issue = replace(self.issue, title="Clarify agent instructions during task handoff",
+                             state_name="In Progress", state_type="started")
         self.linear.get_issue.return_value = self.issue
         self.workspace_id, self.workspace_label = "w-task", "DEV-7"
         self.panes = []
@@ -208,9 +209,12 @@ class CanceledCleanupTests(unittest.TestCase):
         self.assertEqual(self.command(self.other, "rev-parse", "HEAD"), self.other_head)
         self.assertEqual(self.journal()["state"], "complete")
 
-    def test_dirty_reviewed_task_and_uncertain_integration_are_completely_retired(self):
+    def test_in_progress_dev_30_shape_is_discarded_without_changing_linear_state(self):
         record = self.retained_integration()
         self.assertIn("discarded", cli.cleanup("DEV-7", force=True))
+        self.assertEqual((self.issue.state_name, self.issue.state_type), ("In Progress", "started"))
+        self.linear.start.assert_not_called()
+        self.assertEqual(self.linear.mock_calls, [call.get_issue("DEV-7")])
         self.assert_disposed()
         self.assertFalse(self.isolated.parent.exists())
         self.assertFalse(self.output.parent.exists())
@@ -248,16 +252,10 @@ class CanceledCleanupTests(unittest.TestCase):
             self.assertFalse(path.exists())
         self.assertEqual(len(self.journal()["integrations"]), 2)
 
-    def test_force_requires_canceled_and_no_force_still_requires_completed(self):
-        for state in ("started", "backlog", "unstarted", "completed"):
-            with self.subTest(state=state):
-                self.linear.get_issue.return_value = replace(self.issue, state_type=state)
-                with self.assertRaisesRegex(TaskError, "Canceled"):
-                    cli.cleanup("DEV-7", force=True)
-                self.assert_preserved()
-        self.linear.get_issue.return_value = self.issue
+    def test_no_force_still_requires_completed(self):
         with self.assertRaisesRegex(TaskError, "not completed"):
             cli.cleanup("DEV-7")
+        self.assert_preserved()
 
     def test_publication_evidence_refuses_before_workspace_close(self):
         saved = self.publication.read()
@@ -925,7 +923,7 @@ class CanceledCleanupTests(unittest.TestCase):
 
     def test_nested_bare_repositories_preserve_execution_before_workspace_close(self):
         for location in ("task", "integration", "integration_git", "task_git"):
-            with self.subTest(location=location), CanceledCleanupTests() as case:
+            with self.subTest(location=location), ForcedCleanupTests() as case:
                 case.retained_integration()
                 roots = dict(task=case.path, integration=case.isolated,
                              integration_git=case.isolated / ".git", task_git=case.publication.directory)
@@ -1061,7 +1059,7 @@ class CanceledCleanupTests(unittest.TestCase):
     def test_git_removal_and_branch_deletion_acknowledgement_loss_are_rerunnable(self):
         original = Git.command
         for operation in ("worktree", "update-ref"):
-            with self.subTest(operation=operation), CanceledCleanupTests() as case:
+            with self.subTest(operation=operation), ForcedCleanupTests() as case:
                 def uncertain(git, *args):
                     result = original(git, *args)
                     if (args[:3] == ("worktree", "remove", "--force") and operation == "worktree"

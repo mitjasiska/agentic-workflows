@@ -439,14 +439,14 @@ class Git:
             if execution_id is not None and str(UUID(execution_id)) != execution_id:
                 raise ValueError("invalid execution ID")
         except (ValueError, TypeError, AttributeError):
-            raise TaskError("Invalid canceled cleanup execution identity") from None
+            raise TaskError("Invalid forced cleanup execution identity") from None
         name = "state.json" if execution_id is None else f"{execution_id}.json"
         return self.retirement_file(identifier).with_suffix(".discard") / name
 
     def disposal_files(self, identifier: str) -> list[Path]:
         directory = self.disposal_file(identifier).parent
         if directory.resolve() != directory:
-            raise TaskError("Canceled cleanup metadata path is aliased")
+            raise TaskError("Forced cleanup metadata path is aliased")
         try:
             return sorted(p for p in directory.iterdir() if p.suffix == ".json")
         except FileNotFoundError:
@@ -476,7 +476,7 @@ class Git:
                         or any(c["state"] != "retired" or not c["retired_at"] for c in record["contexts"])):
                     raise ValueError("pending disposal")
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
-            raise TaskError(f"Canceled cleanup for {identifier} is pending or uncertain; "
+            raise TaskError(f"Forced cleanup for {identifier} is pending or uncertain; "
                             f"inspect and rerun task cleanup {identifier} --force before other lifecycle work") from None
 
     def load_retirement(self, identifier: str, base: str) -> HerdrRetirement | None:
