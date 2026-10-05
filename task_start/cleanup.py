@@ -1,4 +1,4 @@
-"""Canceled, unpublished execution disposal using the existing retirement model.
+"""Forced unpublished execution disposal using the existing retirement model.
 
 The common Git directory retains a bounded journal after linked-worktree metadata
 is removed. Every destructive step is claimed durably before it starts; retries
@@ -110,7 +110,7 @@ def read_mounts():
                 current = parent
         return tuple(sorted(mounts, key=lambda m: m.mount_id))
     except (OSError, ValueError, IndexError):
-        raise TaskError("Cannot read or parse Linux mount information; canceled cleanup refused") from None
+        raise TaskError("Cannot read or parse Linux mount information; forced cleanup refused") from None
 
 
 def mount_points():
@@ -163,7 +163,7 @@ class DisposalStore(PublicationStore):
         self.path = git.disposal_file(identifier, execution_id)
         self.directory = self.path.parent
         if self.directory.resolve() != self.directory:
-            raise TaskError("Canceled cleanup metadata path is aliased")
+            raise TaskError("Forced cleanup metadata path is aliased")
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if os.name != "nt":
             # The retry record must survive creation of either new parent too.
@@ -198,12 +198,12 @@ class DisposalStore(PublicationStore):
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError):
-            raise TaskError("Cannot read canceled cleanup journal; preserve it and inspect manually") from None
+            raise TaskError("Cannot read forced cleanup journal; preserve it and inspect manually") from None
 
     @ownership_operation
     def write(self, value, **kwargs):
         if len(json.dumps(value, ensure_ascii=True).encode()) > 4 * 1024 * 1024:
-            raise TaskError("Canceled cleanup exceeds bounded audit storage; nothing further was removed")
+            raise TaskError("Forced cleanup exceeds bounded audit storage; nothing further was removed")
         super().write(value, **kwargs)
 
 
@@ -244,7 +244,7 @@ def check_cached_publication(git, identifier, namespaces):
 def never_published(git, base, identifier, branch, publication=None, *, worktree=None):
     if publication is not None and (publication["publication_history"] is not None
                                     or publication["intent"] is not None):
-        raise TaskError("Publication history or intent makes canceled disposal ambiguous")
+        raise TaskError("Publication history or intent makes forced disposal ambiguous")
     if publication is not None:
         expected = dict(issue=identifier, repository=str(git.repo), worktree=str(worktree),
                         branch=branch, base_branch=base)
@@ -253,9 +253,9 @@ def never_published(git, base, identifier, branch, publication=None, *, worktree
             if evidence is not None:
                 binding = evidence.get("binding") if key == "rebase" else evidence
                 if not isinstance(binding, dict) or any(binding.get(k) != v for k, v in expected.items()):
-                    raise TaskError("Private review/integration identity differs from the canceled execution")
+                    raise TaskError("Private review/integration identity differs from the selected execution")
     if git.remote_branches(identifier):
-        raise TaskError("A live remote task branch is publication evidence; canceled disposal refused")
+        raise TaskError("A live remote task branch is publication evidence; forced disposal refused")
     checkouts = (git, Git(worktree)) if worktree is not None else (git,)
     namespaces = set()
     for checkout in checkouts:
@@ -269,7 +269,7 @@ def never_published(git, base, identifier, branch, publication=None, *, worktree
         # relationships from today's refs. Require default push naming instead,
         # refusing key presence even for empty, malformed or multivalued specs.
         if any(key.startswith("remote.") and key.endswith(".push") for key in keys):
-            raise TaskError("Configured push refspecs make publication exclusion ambiguous; canceled disposal refused")
+            raise TaskError("Configured push refspecs make publication exclusion ambiguous; forced disposal refused")
         namespaces.update(cached_publication_namespaces(checkout, keys))
     check_cached_publication(git, identifier, namespaces)
     identity = remote_identity(git, base, branch)
@@ -283,7 +283,7 @@ def never_published(git, base, identifier, branch, publication=None, *, worktree
                 if len(urls) != 1 or (repository_name(urls[0]) or "").casefold() != repository.casefold():
                     raise TaskError("Cannot exclude publication through another remote destination; disposal refused")
     if list(pull_requests(repository, branch)):
-        raise TaskError("Task PR history is publication evidence; canceled disposal refused")
+        raise TaskError("Task PR history is publication evidence; forced disposal refused")
     return identity
 
 
@@ -478,7 +478,7 @@ def integration_evidence(store, registry, binding, contexts):
 def runtime(record, herdr, identities):
     """Only the exact task workspace, exact context terminals and stopped shells."""
     if identities.endpoint() != record["endpoint"]:
-        raise TaskError("Canceled execution belongs to another Herdr endpoint")
+        raise TaskError("Selected execution belongs to another Herdr endpoint")
     contexts = record["contexts"]
     allowed = {record["path"], *(i["checkout"] for i in record["integrations"])}
     terminals = {c["terminal_id"] for c in contexts if c["terminal_id"]}
@@ -573,7 +573,7 @@ def prepare_record(issue, project, repo, git, herdr, registry, identities, targe
     roots, integrations = integration_evidence(publication, registry, binding, contexts)
     retirement = herdr.retirement(target, issue.identifier, project.base_branch)
     if git.load_retirement(issue.identifier, project.base_branch) is not None:
-        raise TaskError("Completed-task cleanup has pending retirement evidence; inspect it before canceled disposal")
+        raise TaskError("Completed-task cleanup has pending retirement evidence; inspect it before forced disposal")
     record = dict(version=2, execution_id=execution_id, state="pending", issue=issue.identifier,
                   repository=str(repo), base=project.base_branch,
                   branch=target.branch, path=str(target.path), identity=directory_identity(target.path),
@@ -694,7 +694,7 @@ def validate_record(record, issue, project, repo, registry):
                 or any(c != registry.disposal_tombstone(c, record["at"]) for c in record["contexts"])):
             raise ValueError("incomplete tombstone")
     except (KeyError, TypeError, ValueError, AttributeError):
-        raise TaskError("Canceled cleanup journal identity is invalid; inspect without deleting its evidence") from None
+        raise TaskError("Forced cleanup journal identity is invalid; inspect without deleting its evidence") from None
 
 
 def check_roots(record, git):
@@ -754,11 +754,11 @@ def verify_contexts(record, registry):
             continue
         original = saved.get(context["context_id"])
         if original is None or context not in (original, registry.disposal_tombstone(original, record["at"])):
-            raise TaskError("New or changed task context appeared during canceled cleanup")
+            raise TaskError("New or changed task context appeared during forced cleanup")
     for context in saved.values():
         if registry.get(context["context_id"]) not in (
                 context, registry.disposal_tombstone(context, record["at"])):
-            raise TaskError("Canceled task context changed during cleanup")
+            raise TaskError("Selected task context changed during forced cleanup")
     paths, mounts = resource_paths(record), read_mounts()
     terminals = {c["terminal_id"] for c in saved.values() if c["terminal_id"]}
     def conflicts(claims):
@@ -807,7 +807,7 @@ def check_task(record, git, herdr, *, closed):
              or t.get("branch") == f"refs/heads/{record['branch']}"]
     branches = git.branches(record["issue"])
     if branches not in ([], [record["branch"]]):
-        raise TaskError("Another task branch appeared; canceled cleanup refused")
+        raise TaskError("Another task branch appeared; forced cleanup refused")
     if present is None:
         if trees or record["worktree_state"] == "pending":
             raise TaskError("Task removal is uncertain; retained Git registration needs manual inspection")
@@ -830,7 +830,7 @@ def check_task(record, git, herdr, *, closed):
         ref = f"refs/heads/{record['branch']}"
         refs = git.command("for-each-ref", "--format=%(refname) %(objectname) %(symref)", ref).splitlines()
         if refs != [f"{ref} {record['head']} "] or record["branch_state"] == "removed":
-            raise TaskError("Task branch identity changed; canceled cleanup refused")
+            raise TaskError("Task branch identity changed; forced cleanup refused")
     elif record["branch_state"] == "pending":
         raise TaskError("Task branch disappeared without a disposal claim")
     return present is not None, bool(branches)
@@ -839,32 +839,32 @@ def check_task(record, git, herdr, *, closed):
 def finish(record, journal, git, herdr, registry, identities):
     def guard():
         if journal.read() != record:
-            raise TaskError("Canceled cleanup journal changed during disposal")
+            raise TaskError("Forced cleanup journal changed during disposal")
         git.check_base(record["base"])
         verify_contexts(record, registry)
         check_roots(record, git)
         observed = runtime(record, herdr, identities)
         if record["workspace_state"] == "closed":
             if observed["workspace"] or observed["panes"]:
-                raise TaskError("Canceled workspace reappeared after closure")
+                raise TaskError("Selected workspace reappeared after closure")
         elif observed != record["runtime"]:
             if record["workspace_state"] != "closing" or observed["workspace"] or observed["panes"]:
-                raise TaskError("Canceled workspace runtime changed; cleanup refused")
+                raise TaskError("Selected workspace runtime changed; cleanup refused")
         present, branch = check_task(record, git, herdr, closed=not observed["workspace"])
         saved = PublicationStore(Path(record["path"])).read() if present else None
         if saved is not None and evidence_digest(saved) != record["publication_sha256"]:
-            raise TaskError("Publication evidence changed during canceled cleanup")
+            raise TaskError("Publication evidence changed during forced cleanup")
         if present:
             evidence = [integration_tombstone(r) for r in IntegrationStore(Path(record["path"])).disposal_records()]
             if evidence != [{k: v for k, v in i.items() if k != "output_sha256"} for i in record["integrations"]]:
-                raise TaskError("Integration provenance changed during canceled cleanup")
+                raise TaskError("Integration provenance changed during forced cleanup")
         if never_published(git, record["base"], record["issue"], record["branch"], saved,
                            worktree=Path(record["path"]) if present else None) != record["remote"]:
-            raise TaskError("Remote repository identity changed during canceled cleanup")
+            raise TaskError("Remote repository identity changed during forced cleanup")
         verify_contexts(record, registry)
         check_roots(record, git)
         if check_task(record, git, herdr, closed=not observed["workspace"]) != (present, branch):
-            raise TaskError("Canceled Git target changed before removal")
+            raise TaskError("Selected Git target changed before removal")
         # Refresh all deletion roots together after the other, potentially slow
         # guards, before allowing any task or integration contents to be removed.
         check_mounts([Path(record["path"]), Path(record["git_dir"]),
@@ -872,7 +872,7 @@ def finish(record, journal, git, herdr, registry, identities):
         # OS evidence must be the last guard, after remote reads, Git commands,
         # directory walks and mount checks, immediately before the mutation.
         if runtime(record, herdr, identities) != observed:
-            raise TaskError("Canceled execution runtime changed before removal")
+            raise TaskError("Selected execution runtime changed before removal")
         return present, branch, observed
 
     present, _, observed = guard()
@@ -912,7 +912,7 @@ def finish(record, journal, git, herdr, registry, identities):
             git.command("worktree", "remove", "--force", "--", record["path"])
         present, _ = check_task(record, git, herdr, closed=True)
         if present:
-            raise TaskError("Canceled task worktree removal is uncertain")
+            raise TaskError("Selected task worktree removal is uncertain")
         record["worktree_state"] = "removed"
         journal.write(record)
     _, branch, _ = guard()
@@ -923,7 +923,7 @@ def finish(record, journal, git, herdr, registry, identities):
         if branch:
             git.command("update-ref", "--no-deref", "-d", f"refs/heads/{record['branch']}", record["head"])
         if git.branches(record["issue"]):
-            raise TaskError("Canceled task branch removal is uncertain")
+            raise TaskError("Selected task branch removal is uncertain")
         record["branch_state"] = "removed"
         journal.write(record)
     guard()
@@ -935,12 +935,10 @@ def finish(record, journal, git, herdr, registry, identities):
 
 
 @ownership_operation(exclusive=True)
-def discard_canceled(issue, project, repo):
-    if issue.state_type != "canceled":
-        raise TaskError("Destructive cleanup requires a Canceled Linear issue")
+def discard_execution(issue, project, repo):
     if any(k in os.environ for k in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
                                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")):
-        raise TaskError("Unset Git routing environment overrides before canceled cleanup")
+        raise TaskError("Unset Git routing environment overrides before forced cleanup")
     git, herdr = Git(repo), Herdr(repo)
     registry, identities = ContextRegistry(), HerdrContexts()
     git.check_base(project.base_branch)
@@ -954,12 +952,12 @@ def discard_canceled(issue, project, repo):
                 journal = DisposalStore(git, issue.identifier, None if path.name == "state.json" else path.stem)
                 record = journal.read()
                 if record is None:
-                    raise TaskError("Canceled cleanup journal disappeared; preserve the remaining evidence")
+                    raise TaskError("Forced cleanup journal disappeared; preserve the remaining evidence")
                 validate_record(record, issue, project, repo, registry)
                 journals.append((journal, record))
             pending = [(j, r) for j, r in journals if r["state"] == "pending"]
             if len(pending) > 1:
-                raise TaskError("Multiple canceled execution claims are pending; inspect without deleting evidence")
+                raise TaskError("Multiple forced-disposal execution claims are pending; inspect without deleting evidence")
             if pending:
                 journal, record = pending[0]
             else:
@@ -967,13 +965,13 @@ def discard_canceled(issue, project, repo):
                 if target is not None:
                     journal = DisposalStore(git, issue.identifier, str(uuid4()))
                     if journal.read() is not None:
-                        raise TaskError("Canceled cleanup execution identity already exists")
+                        raise TaskError("Forced cleanup execution identity already exists")
                     record = None
                 elif journals:
                     journal, record = max(journals, key=lambda item: (item[1]["at"], item[0].path.name))
                 else:
                     if selected_contexts(registry, issue.identifier) or herdr.stale_retirement(git, issue.identifier, project.base_branch):
-                        raise TaskError("Canceled execution lacks its exact Git provenance; inspect retained state manually")
+                        raise TaskError("Selected execution lacks its exact Git provenance; inspect retained state manually")
                     return f"{issue.identifier}: no local execution to discard"
             if record is None:
                 publication = PublicationStore(target.path)
@@ -1001,9 +999,9 @@ def discard_canceled(issue, project, repo):
                             f"Completed disposal provenance: {journal.path}")
                 else:
                     finish(record, journal, git, herdr, registry, identities)
-        return (f"{issue.identifier}: canceled execution discarded\nRemoved task worktree and local branch; "
+        return (f"{issue.identifier}: local execution discarded\nRemoved task worktree and local branch; "
                 "Herdr workspace and contexts retired; retained integration artifacts removed.\n"
                 f"Bounded disposal provenance: {journal.path}")
     except OSError:
-        raise TaskError(f"Canceled cleanup was interrupted by a filesystem error; preserve its journal and "
+        raise TaskError(f"Forced cleanup was interrupted by a filesystem error; preserve its journal and "
                         f"rerun task cleanup {issue.identifier} --force after inspection") from None

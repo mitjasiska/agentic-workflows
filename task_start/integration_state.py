@@ -166,7 +166,7 @@ class IntegrationStore(PublicationStore):
         records = {}
         paths = [self.path, *sorted(self.directory.glob("agentic-workflows-integration-*.json"))]
         if len(paths) > 101:
-            raise TaskError("Too many retained integrations for bounded canceled cleanup; inspect history manually")
+            raise TaskError("Too many retained integrations for bounded forced cleanup; inspect history manually")
         for path in paths:
             source = IntegrationStore(publication_store=self)
             source.path = path

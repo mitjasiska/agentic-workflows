@@ -57,7 +57,7 @@ def stopped_checkout(path, shell_pid=None, *, proc=Path("/proc")):
 def shell_executable(argv):
     """Recognize only ordinary interactive/login invocations of system shells."""
     if not isinstance(argv, list) or not argv or any(not isinstance(a, str) or not a for a in argv):
-        raise TaskError("Missing shell argv evidence; canceled cleanup refused")
+        raise TaskError("Missing shell argv evidence; forced cleanup refused")
     command = argv[0].removeprefix("-")  # Login shells commonly use argv[0] = -bash.
     name = Path(command).name
     candidates = [Path(directory) / name for directory in ("/bin", "/usr/bin")]
@@ -65,10 +65,10 @@ def shell_executable(argv):
             or command != name and Path(command) not in candidates
             or any(a not in {"--login", "--interactive", "--norc", "--noprofile"}
                    and re.fullmatch(r"-[il]+", a) is None for a in argv[1:])):
-        raise TaskError("Process argv does not prove an idle shell; canceled cleanup refused")
+        raise TaskError("Process argv does not prove an idle shell; forced cleanup refused")
     executables = {p.resolve(strict=True) for p in candidates if p.is_file()}
     if len(executables) != 1:
-        raise TaskError("System shell executable is absent or ambiguous; canceled cleanup refused")
+        raise TaskError("System shell executable is absent or ambiguous; forced cleanup refused")
     return executables.pop()
 
 
@@ -224,7 +224,7 @@ def _check_process_graph(graph, shells, closed_shells):
         child = tid in descendants and (tid not in roots or process.parent in descendants)
         session_job = tid not in shells and (process.group in roots or process.session in roots)
         if process.live and (child or session_job):
-            raise TaskError(f"Process {tid} may still use the canceled execution; quit it before cleanup")
+            raise TaskError(f"Process {tid} may still use the selected execution; quit it before cleanup")
 
 
 def stopped_execution(paths, shells, *, closed_shells=None, own_lock=None, proc=Path("/proc")):
@@ -235,12 +235,12 @@ def stopped_execution(paths, shells, *, closed_shells=None, own_lock=None, proc=
     The caller excludes workflow controllers and repeats this before deletion.
     """
     if not sys.platform.startswith("linux") or not proc.is_dir():
-        raise TaskError("Canceled cleanup requires readable local Linux process evidence")
+        raise TaskError("Forced cleanup requires readable local Linux process evidence")
     closed_shells = closed_shells or {}
     roots = set(shells) | {int(pid) for pid in closed_shells}
     try:
         if any(Path.cwd().is_relative_to(path) for path in paths):
-            raise TaskError("Run canceled cleanup from outside all execution deletion targets")
+            raise TaskError("Run forced cleanup from outside all execution deletion targets")
         if not roots:
             return {}  # Herdr proved all registered terminals absent; no known shell remains.
         _process_visibility(proc)
@@ -265,7 +265,7 @@ def stopped_execution(paths, shells, *, closed_shells=None, own_lock=None, proc=
             if pid not in graph:
                 raise TaskError("Task shell changed or is invisible; run cleanup on Herdr's host/PID namespace")
             if graph[pid].kernel:
-                raise TaskError("Task shell cannot be a kernel task; canceled cleanup refused")
+                raise TaskError("Task shell cannot be a kernel task; forced cleanup refused")
             inspect(pid, graph[pid])
         after = _process_graph(proc, roots)
         _check_process_graph(after, shells, closed_shells)
