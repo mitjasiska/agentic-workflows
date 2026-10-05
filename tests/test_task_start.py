@@ -189,6 +189,7 @@ class GitTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name).resolve()
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=self.repo / "contexts.sqlite3"))
         (self.repo / ".git").mkdir()
         self.git = Git(self.repo)
         self.answers = {
@@ -363,6 +364,8 @@ class HerdrTests(unittest.TestCase):
 
 class OrchestrationTests(unittest.TestCase):
     def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=Path(directory) / "contexts.sqlite3"))
         self.enterContext(patch("task_start.cli.load_local", return_value=LOCAL))
         # This suite tests orchestration; registry/Herdr effects have their own tests.
         self.enterContext(patch("task_start.cli.launch_registered",
@@ -514,6 +517,7 @@ class LocalGitIntegrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name).resolve()
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=root / "contexts.sqlite3"))
         self.repo, self.remote = root / "checkout", root / "upstream"
         # Isolate tests from user Git configuration, hooks, signing and identity.
         self.enterContext(patch.dict(os.environ, {

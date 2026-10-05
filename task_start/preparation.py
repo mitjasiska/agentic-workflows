@@ -3,6 +3,7 @@
 import re
 
 from . import TaskError
+from .ownership import ownership_operation
 from .workspace import branch_name
 
 
@@ -13,7 +14,9 @@ def require_agent_instructions(issue):
                         "Refine the issue in Linear before starting agent execution")
 
 
+@ownership_operation
 def prepare_task(issue, project, linear, git, herdr_factory, *, slice=None, default_only=False):
+    git.check_disposal(issue.identifier)
     git.update_base(project.base_branch)
     herdr = herdr_factory()
     selection = dict(default_only=True) if default_only else {}

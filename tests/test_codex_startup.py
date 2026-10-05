@@ -27,6 +27,7 @@ class FreshCodexStartTests(unittest.TestCase):
         self.pane = dict(pane_id="p1", tab_id="t1", workspace_id="w1", terminal_id="term1",
                          cwd=str(directory), agent=None, agent_session=None, label="Shell")
         self.registry = ContextRegistry(directory / "contexts.sqlite3")
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=self.registry.path))
         identities = Mock(spec=HerdrContexts)
         identities.endpoint.return_value = "/server.sock"
         identities.snapshot.side_effect = lambda: [copy.deepcopy(self.pane)]

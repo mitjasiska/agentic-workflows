@@ -28,6 +28,7 @@ class RegistryTests(unittest.TestCase):
         self.directory = self.enterContext(tempfile.TemporaryDirectory())
         self.path = Path(self.directory) / "runtime" / "contexts.sqlite3"
         self.registry = ContextRegistry(self.path)
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=self.path))
 
     def allocate(self, issue="DEV-20", role="implementation", **kwargs):
         return self.registry.allocate(issue, role, agent="codex", **kwargs)

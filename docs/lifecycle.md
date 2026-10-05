@@ -1063,7 +1063,9 @@ or identity drift refuses continuation. Older integration proofs without recorde
 slice scope require inspection before installation can continue.
 
 There is no automatic cleanup or resume of integration checkouts or completion
-directories in v1, including after success. Inspect `task contexts DEV-20 --all`,
+directories in v1, including after success. Explicit
+[canceled-task disposal](#canceled-task-disposal) can remove a never-published
+execution and its retained artifacts. Otherwise inspect `task contexts DEV-20 --all`,
 the retained pane/checkout, completion output, and private provenance before manual
 reconciliation. Lost output is never permission to replay a prompt. Preserve
 valuable resolutions
@@ -1156,3 +1158,165 @@ branch-only retry refuses and leaves that branch for manual inspection. Run
 cleanup from outside the task workspace after exiting its agent/shell sessions,
 and do not modify the repository, task worktree, or Herdr workspace concurrently
 with cleanup.
+
+### Canceled-task disposal
+
+```sh
+task cleanup DEV-30 --force
+```
+
+`--force` is destructive authorization to discard one **Linear-canceled,
+never-published local execution**, including modified, staged, untracked and
+ignored task files. It is rejected for completed, In Progress, Backlog, and every
+other non-canceled state. The Linear state type must be `canceled`; a human reason
+such as "superseded" does not introduce another state. Without `--force`, the
+completed-task contract above is unchanged.
+
+Cancel the issue and quit its agents before running this command from outside
+all task/integration checkouts. Empty shells in the exact task workspace may
+remain: cleanup proves their identity and closes that workspace. An `idle` agent
+status alone is insufficient. Cleanup compares Herdr's shell argv with the local
+Linux process executable and argv, and requires a sleeping shell with its own
+foreground terminal and session. Only ordinary interactive/login invocations of
+system shells under `/bin` or `/usr/bin` are supported; script/command arguments,
+missing evidence, and an exec-replaced shell PID refuse disposal.
+
+Ownership has three meanings, derived from the existing context registry,
+integration provenance and per-execution disposal journals:
+
+- **claimed**: an execution still owns a resource, even when its runtime stopped.
+- **disposing**: a pending journal reserves its exact frozen resources through
+  interruption and retry.
+- **released**: confirmed cleanup/retirement released the relevant resource;
+  retained records describe history and do not claim a later execution.
+
+Runtime retirement is separate from artifact release. In particular, an
+`abandoned` G context retains its integration checkout and provenance despite
+having a retirement timestamp. A retired G runtime also retains its artifact
+claim until an exact completed disposal covers it. Cleanup reads retained context
+history, current and archived integration records (including preparing passes
+without a G context), registered worktrees/private Git directories, and disposal
+journals in registry-known repositories. Overlapping unreleased claims from
+another execution refuse cleanup, including another issue's abandoned G context.
+Normal implementation/review retirement ends the runtime claim; existing Git
+registration and retained provenance independently continue to protect artifacts.
+
+A completed journal releases only its frozen context/resource identities, not
+all future occupants of an issue ID or path. Context ordinals, immutable disposal
+journals and bounded integration tombstones remain historical evidence. They do
+not block a later execution with new contexts and its own disposal journal.
+
+Process safety is scoped to the **registered execution**. Cleanup checks the
+exact Herdr terminals and positive shell identity, UID-independent ancestry,
+related threads, and remaining jobs in recorded shell sessions/process groups.
+It reads ancestry metadata to discover those jobs, but does not inspect unrelated
+processes' private cwd, executable, root, descriptors, mappings or mount namespace.
+Known descendants block even when their UID or working directory changed. Missing
+required ancestry, thread or shell evidence fails closed. Kernel classification
+uses Linux's `PF_KTHREAD` flag, never a name; it cannot exempt a claimed shell or
+execution descendant. Unrelated process churn does not invalidate the proof.
+These checks run again immediately before each destructive operation, and closed
+registered shells must actually exit. Historical provider conversations remain
+outside disposal. Older pending journals without recorded shell-session proof
+still require inspection; they are not silently promoted to new evidence.
+
+V1 does not prove a global absence of host references. Unmanaged editors,
+detached daemons, escaped/reparented jobs outside recorded execution families,
+containers and arbitrary external bind aliases are outside this guarantee.
+Stop unmanaged activity yourself before using force. Stronger guarantees need
+runner-owned process groups/cgroups, durable membership or leases, and controlled
+filesystem access; repeated host-wide snapshots cannot provide those guarantees.
+
+It refuses live agents, unrelated panes, moved or replaced terminals, another
+Herdr endpoint, inaccessible process evidence, and other registry contexts
+claiming the workspace or disposable paths. Run on the same host/PID namespace
+as Herdr. The command does not send terminal input, quit
+agents, or resume provider sessions. Historical provider conversations remain
+outside this disposal operation.
+
+The permanent checkout must be clean and on the configured base. Exact Git
+registration, task scope, branch, checkout and stable Herdr workspace identity
+must agree. Multiple branches/worktrees/slices, unsafe or aliased paths, nested
+repositories (including bare repositories), mounts, and identity drift refuse
+disposal. Cleanup reads Linux
+`/proc/self/mountinfo` before traversal and rechecks all deletion trees before
+removal, including linked Git metadata and retained integration/output trees.
+Mount boundaries at or below any deletion root refuse disposal, including
+same-filesystem directory and file bind mounts. Mount metadata also resolves overlap between registered workflow resource
+claims exposed through different mount views; it is not used to enumerate host
+process references through arbitrary external aliases. Cleanup rechecks direct
+mount boundaries before deletion. Unreadable or malformed mount information
+refuses cleanup. Dirty task files
+are allowed only on this explicit path. Live remote task refs, retained task tracking
+refs/configuration, any GitHub PR history (including open or closed PRs), or private
+publication history/intent also refuse. Cached refs are resolved against complete
+remote names (including slashes) and effective fetch configuration in both
+checkouts. Only name-preserving `refs/heads/*:refs/remotes/<remote>/*` fetch
+mappings, optionally prefixed with `+`, are accepted automatically. Custom,
+negative, empty, or malformed fetch mappings require manual inspection; orphaned
+or overlapping cached namespaces also refuse disposal. Effective branch `remote`, `merge`, and
+`pushRemote` settings are checked in both the permanent and exact task checkout,
+including worktree-local configuration and conditional includes. Any effective
+`remote.*.push` setting also refuses disposal, including empty or multivalued
+settings: custom push refspecs can publish under another name, and current refs
+cannot establish historical mapping identity. Remote/PR checks
+require access and a GitHub repository with unambiguous remote identity; they never
+fetch, publish, delete remote branches, or change Linear. Missing or conflicting integration
+provenance refuses deletion of its retained artifacts.
+
+The command supports a dirty reviewed worktree with implementation/review
+contexts, an uncertain integration context and its isolated checkout, including
+legacy claims without an external completion directory. It also includes earlier
+explicitly abandoned integration attempts when their archives still agree.
+Stale context workspace IDs are accepted only when those workspaces and terminals
+are absent and their issue/repository/checkout/endpoint identities agree. Retained
+integration checkouts must live in their exact workflow-owned pass directories;
+external completion directories must match the recorded pass and contain only
+the completion output. Unrelated execution state is left intact.
+
+Before deletion, a bounded, atomically replaced and fsynced journal in the common
+Git directory (`agentic-workflows-cleanup/DEV-30.discard/<execution-id>.json`)
+records the exact selectors and provenance. Each disposal claim has a unique
+execution ID and journal. Completed journals, including legacy `state.json`
+tombstones, remain unchanged when a later execution of the same issue is cleaned
+up, even if it reuses the branch or checkout path. Integration tombstones retain
+pass/context identity, source/base identity, disposition and hashes of original
+provenance, installation/completion/abandonment evidence, and any retained completion file.
+They do not preserve the full conflicted files, result reports, or checkout.
+The journal is limited to 4 MiB and at most 101 integration record inputs;
+exceeding those bounds refuses automatic disposal. Review/loop/private task
+metadata disappears with the task's linked Git directory.
+
+Cleanup takes an exclusive machine-local ownership lock beside the context
+registry. Workflow controllers, preparation, context mutations and integration
+provenance writes take its shared side. Other controllers may run concurrently,
+but cleanup refuses while a controller holds the gate; claim mutations refuse
+while cleanup owns it. Locks release on controller exit. Pending journals continue
+to reserve resources afterward: allocation, rebinding and provenance writes cannot
+acquire overlapping reservations. Context inspection remains read-only.
+
+Cleanup also holds one disposal lock shared by all journals for the issue and the
+existing task publication lock while the task exists. It revalidates ownership,
+paths/mounts and registered runtime immediately before destructive operations,
+and saves a durable claim before each step:
+
+1. Close and confirm absence of the exact Herdr workspace and its stopped shells.
+2. Remove the archived integrations' isolated checkout directories and recorded
+   disposable completion directories.
+3. Revalidate and forcibly remove the exact task worktree, then delete only the
+   recorded local branch ref with an atomic comparison to its saved SHA.
+4. Retire the frozen context rows transactionally. Ordinals, allocation identity,
+   former location and retirement time remain; terminal/provider/session bindings
+   are cleared. Registry rows are never deleted or reset.
+
+After interruption, rerun the same `--force` command while the issue remains
+canceled. A pending journal blocks other workspace lifecycle resolution rather
+than reopening or recreating execution. A claimed operation whose result is
+confirmed absent can finish on retry, including a branch-only remainder after
+worktree removal. Partial artifact deletion may continue only in the original
+directory. Reused paths, changed refs, new contexts, conflicting evidence, or
+uncertain worktree registration stop for inspection. Do not prune registrations,
+delete journals, or reset contexts to bypass a refusal. A successful retry leaves
+no active task worktree, local task branch, workspace, context, or retained
+integration checkout; its bounded tombstone remains for audit. Published-task
+abandonment and general historical garbage collection remain out of scope.

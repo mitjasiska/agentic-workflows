@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 from . import TaskError
+from .ownership import ownership_operation
 from . import publish as publication
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
@@ -288,9 +289,16 @@ def check_git_environment():
 
 def abandon_integration(identifier, context_id):
     """Explicitly abandon only an unproven, sessionless, stopped Codex attempt."""
+    # Reject invalid inputs without creating lock state or loading configuration.
+    # All execution observation and mutation stays inside the ownership gate.
     if not re.fullmatch(re.escape(identifier) + r"-G[1-9][0-9]*", context_id):
         raise TaskError("--abandon requires this issue's exact integration context ID, such as DEV-30-G1")
     check_git_environment()
+    return _abandon_integration(identifier, context_id)
+
+
+@ownership_operation
+def _abandon_integration(identifier, context_id):
     local = load_local()
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
@@ -352,6 +360,7 @@ def abandon_integration(identifier, context_id):
                 f"Run task integrate {identifier} explicitly for a fresh attempt.")
 
 
+@ownership_operation
 def integrate(identifier, *, agent_kind=None, model=None, mode=None, timeout=1800):
     if timeout <= 0:
         raise TaskError("Integration timeout must be positive")
@@ -372,7 +381,8 @@ def integrate(identifier, *, agent_kind=None, model=None, mode=None, timeout=180
         previous = state_store.read()
         if previous is not None and previous["state"] == "abandoned":
             state_store.check_abandoned(previous, registry, identifier)
-        elif previous is not None or any(c["role"] == "integration" for c in registry.list(identifier, include_retired=True)):
+        elif previous is not None or any(c["role"] == "integration" and c["state"] != "retired"
+                                         for c in registry.list(identifier, include_retired=True)):
             raise TaskError("Integration already has durable evidence; inspect its context and checkout. "
                             "No replay is allowed; a proven pending installation continues through task pr. "
                             "For a sessionless stopped uncertain Codex attempt, inspect task integrate --help for --abandon")

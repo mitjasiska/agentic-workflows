@@ -222,8 +222,11 @@ The machine-local registry is `~/.agentic-workflows/contexts.sqlite3`, separate 
 project files and Linear. Python's SQLite support supplies atomic transactions and
 cross-process allocation locking without a service or dependency. The allocation
 commits before labeling or launching; failed and interrupted attempts consume their
-ordinal. Retired rows are small tombstones: they keep identity, allocation time,
+ordinal. Runtime retirement and artifact release are distinct. Ordinary retired rows
+keep identity, allocation time,
 retirement time and former location, but discard provider and terminal handles.
+Abandoned integration rows retain their artifact bindings; even a retired G
+runtime owns its retained checkout until exact disposal releases those artifacts.
 Cleanup never resets ordinals. Deleting this database is a destructive registry
 reset that discards allocation history; normal operations never do that.
 
@@ -268,6 +271,31 @@ moved outside the cleaned workspace also retains its mapping
 until its closure can be confirmed. Existing Git/Linear cleanup safety checks
 still apply.
 
+Explicit canceled-task disposal is orchestrated by
+[`cleanup.py`](../task_start/cleanup.py), using the same exact Git/Herdr selectors,
+publication lock and context registry. It adds a bounded journal in common Git
+metadata so identity and integration provenance survive removal of the linked
+worktree's private directory. Frozen context rows are retired with a transactional
+comparison, including abandoned integration contexts. Completed disposal journals
+release only the exact frozen resources and contexts they covered. Cleanup reads
+retained history and current/archived provenance to distinguish claimed resources,
+pending disposal reservations and released history. Private Git metadata and
+foreign pending journals participate in overlap checks.
+
+[`ownership.py`](../task_start/ownership.py) supplies a shared/exclusive machine-local
+OS lock beside the registry. Controllers and claim mutations share it; cleanup
+holds it exclusively through final retirement. Loop argument validation precedes
+lock acquisition; valid loop operations, including checkpoint controls, remain
+guarded before reading workflow state. Context admission and provenance
+writes also reject durable pending reservations after a crashed cleanup releases
+its OS lock. This is a cooperating-workflow ownership boundary, not a host-wide
+process/reference lease. Process checks cover registered shells and their families;
+filesystem checks prevent deletion across nested mount or symlink boundaries.
+Pending disposal gates
+workspace resolution and preparation; only the explicit cleanup command may
+continue its journaled removals. See
+[destructive semantics and recovery](lifecycle.md#canceled-task-disposal).
+
 ## Validation
 
 ```sh
@@ -285,7 +313,20 @@ mutable titles, ambiguity, slices, squash-merge history and stale tracking refs.
 Cleanup tests exercise actual worktree/branch removal in disposable repositories,
 narrow Python-cache disposal, exact Herdr workspace retirement, preservation on
 refusal, repeat runs, and partial-failure reporting.
+[`test_canceled_cleanup.py`](../tests/test_canceled_cleanup.py) adds dirty reviewed
+task and uncertain/abandoned integration disposal, unrelated-state preservation,
+publication and process refusals, archival ordering, interruption recovery and
+path-reuse checks. Process checks use a synthetic Linux process filesystem.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
+
+For canceled-cleanup review, run focused cleanup and integration-recovery coverage
+before the full offline suite:
+
+```sh
+python3.12 -m unittest discover -s tests -p 'test*cleanup.py' -v
+python3.12 -m unittest discover -s tests -p 'test_integration_abandon.py' -v
+python3.12 -m unittest discover -s tests -v
+```
 
 Loop coverage uses real disposable Git worktrees, context registries, and private
 checkpoint databases with controlled agent/config/Linear boundaries. It covers

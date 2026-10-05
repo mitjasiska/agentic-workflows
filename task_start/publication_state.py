@@ -8,6 +8,7 @@ import re
 import tempfile
 
 from . import TaskError
+from .ownership import ownership_gate
 from .review_result import unique_object
 from .workspace import Git
 
@@ -108,6 +109,12 @@ class PublicationStore:
 
     @contextmanager
     def locked(self):
+        with ownership_gate():
+            with self._locked():
+                yield self
+
+    @contextmanager
+    def _locked(self):
         """An OS lock survives neither process exit nor interruption; no stale claims."""
         path = self.directory / "agentic-workflows-publication.lock"
         try:

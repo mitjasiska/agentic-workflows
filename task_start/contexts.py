@@ -1,6 +1,6 @@
 """Machine-local context identities. No task text or semantic run reports live here."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
@@ -11,6 +11,7 @@ import sqlite3
 
 from . import TaskError
 from .sessions import merge_session, same_session
+from .ownership import ownership_gate, ownership_operation
 from .workspace import run
 
 
@@ -23,7 +24,7 @@ def now() -> str:
 
 
 class ContextRegistry:
-    """SQLite serializes writers across CLI processes; retained rows are tombstones.
+    """SQLite serializes writers; retired runtimes can still own retained artifacts.
 
     Allocation commits before any external launch. No API deletes rows, and retired
     rows retain their ordinal while dropping provider/terminal handles. Identity,
@@ -36,6 +37,12 @@ class ContextRegistry:
 
     @contextmanager
     def connection(self, *, write: bool = False):
+        with ownership_gate(registry=self.path) if write else nullcontext():
+            with self._connection(write=write) as db:
+                yield db
+
+    @contextmanager
+    def _connection(self, *, write: bool = False):
         db = None
         try:
             if write:
@@ -68,6 +75,10 @@ class ContextRegistry:
                         db.execute("INSERT INTO contexts SELECT * FROM contexts_v1")
                         db.execute("DROP TABLE contexts_v1")
                     db.execute("PRAGMA user_version = 2")
+                    # Admission can refuse a pending disposal. Keep a valid empty
+                    # schema (or completed migration) even when that claim rolls back.
+                    db.commit()
+                    db.execute("BEGIN IMMEDIATE")
                 elif version != 2:
                     raise TaskError("Unsupported workflow context registry version")
             else:
@@ -86,6 +97,16 @@ class ContextRegistry:
             if db is not None:
                 db.close()  # Rolls back any incomplete transaction.
 
+    @contextmanager
+    def claim_connection(self, repository, worktree, *, endpoint=None, workspace_id=None, terminal_id=None):
+        from .cleanup import check_unreserved
+        with ownership_gate(registry=self.path):
+            with self.connection(write=True) as db:
+                contexts = [dict(row) for row in db.execute("SELECT * FROM contexts")]
+                check_unreserved(self, repository, worktree, endpoint=endpoint,
+                                 workspace_id=workspace_id, terminal_id=terminal_id, contexts=contexts)
+                yield db
+
     def allocate(self, issue: str, role: str, *, agent: str, model: str | None = None,
                  mode: str | None = None, repository: str | None = None,
                  worktree: str | None = None, endpoint: str | None = None,
@@ -95,7 +116,8 @@ class ContextRegistry:
             raise TaskError("Context allocation requires the canonical issue identifier")
         if role not in {"implementation", "review", "integration"}:
             raise TaskError("Context role must be implementation, review, or integration")
-        with self.connection(write=True) as db:
+        with self.claim_connection(repository, worktree, endpoint=endpoint,
+                                   workspace_id=workspace_id, terminal_id=terminal_id) as db:
             pending = db.execute("""SELECT context_id FROM contexts WHERE issue=? AND role=?
                 AND repository IS ? AND worktree IS ? AND state='awaiting_user'""",
                 (issue, role, repository, worktree)).fetchone()
@@ -123,7 +145,9 @@ class ContextRegistry:
         allowed = {"state", "session_id", "session_kind", "herdr_session", "resumability"}
         if not values or values.keys() - allowed:
             raise TaskError("Invalid workflow context update")
-        with self.connection(write=True) as db:
+        context = self.get(context_id)
+        with self.claim_connection(context["repository"], context["worktree"], endpoint=context["endpoint"],
+                                   workspace_id=context["workspace_id"], terminal_id=context["terminal_id"]) as db:
             result = db.execute("UPDATE contexts SET " + ", ".join(f"{key}=?" for key in values)
                                 + " WHERE context_id=? AND retired_at IS NULL",
                                 (*values.values(), context_id))
@@ -153,7 +177,8 @@ class ContextRegistry:
 
     def claim_review(self, context: dict) -> None:
         """Serialize passes in one reviewer, without a second identity store."""
-        with self.connection(write=True) as db:
+        with self.claim_connection(context["repository"], context["worktree"], endpoint=context["endpoint"],
+                                   workspace_id=context["workspace_id"], terminal_id=context["terminal_id"]) as db:
             current = db.execute("SELECT * FROM contexts WHERE context_id=?",
                                  (context["context_id"],)).fetchone()
             if (current is None or dict(current) != context or context["role"] != "review"
@@ -168,7 +193,8 @@ class ContextRegistry:
         A replacement requires missing-pane/provider evidence and a claimed pass.
         The compare-and-set prevents another pass or cleanup from changing the binding.
         """
-        with self.connection(write=True) as db:
+        with self.claim_connection(context["repository"], context["worktree"], endpoint=context["endpoint"],
+                                   workspace_id=pane["workspace_id"], terminal_id=pane["terminal_id"]) as db:
             current = db.execute("SELECT * FROM contexts WHERE context_id=?",
                                  (context["context_id"],)).fetchone()
             relocated = pane["terminal_id"] == context["terminal_id"]
@@ -203,6 +229,30 @@ class ContextRegistry:
                 AND workspace_id IS ? AND retired_at IS NULL""",
                        (now(), issue, str(repository), str(worktree), endpoint, workspace_id))
 
+    @staticmethod
+    def disposal_tombstone(context: dict, timestamp: str) -> dict:
+        return dict(context, state="retired", retired_at=timestamp, terminal_id=None,
+                    session_id=None, session_kind=None, herdr_session=None, resumability="unknown")
+
+    def retire_execution(self, contexts: "list[dict]", timestamp: str) -> None:
+        """Atomically retire the frozen execution, including abandoned G contexts.
+
+        Exact rows or their exact resulting tombstones are the only retry states.
+        No predicate can accidentally retire a newly allocated context.
+        """
+        if not contexts:
+            return
+        with self.connection(write=True) as db:
+            for context in contexts:
+                current = db.execute("SELECT * FROM contexts WHERE context_id=?",
+                                     (context["context_id"],)).fetchone()
+                tombstone = self.disposal_tombstone(context, timestamp)
+                if current is None or dict(current) not in (context, tombstone):
+                    raise TaskError("Context changed during canceled cleanup; mappings were retained")
+                db.execute("""UPDATE contexts SET state='retired', retired_at=?, terminal_id=NULL,
+                    session_id=NULL, session_kind=NULL, herdr_session=NULL, resumability='unknown'
+                    WHERE context_id=?""", (timestamp, context["context_id"]))
+
 
 class HerdrContexts:
     """Read Herdr-owned facts and name panes using the installed 0.9.1 API."""
@@ -222,7 +272,8 @@ class HerdrContexts:
             payload = json.loads(run(["herdr", group, operation, *args]))
             result = payload["result"]
             expected = {("api", "snapshot"): "session_snapshot", ("pane", "get"): "pane_info",
-                        ("pane", "rename"): "pane_info", ("pane", "split"): "pane_info"}
+                        ("pane", "rename"): "pane_info", ("pane", "split"): "pane_info",
+                        ("pane", "process-info"): "pane_process_info"}
             if payload.get("error") or result["type"] != expected[group, operation]:
                 raise ValueError("unexpected response")
             return result
@@ -378,6 +429,7 @@ def pending_launch(execution, context_id, registry, herdr):
     return pane
 
 
+@ownership_operation
 def launch_registered(adapter, execution, *, registry: ContextRegistry | None = None,
                       herdr: HerdrContexts | None = None, handoff_factory=None):
     """Register a fresh launch; existing agents are never resumed or relabeled here."""
@@ -386,6 +438,7 @@ def launch_registered(adapter, execution, *, registry: ContextRegistry | None = 
     return launch_allocated(adapter, execution, context_id, registry, herdr, handoff_factory=handoff_factory)
 
 
+@ownership_operation
 def launch_allocated(adapter, execution, context_id, registry, herdr, *, handoff_factory=None,
                      persist_observer=None):
     """Deliver once to an allocation owned by the caller (and its durable claim)."""

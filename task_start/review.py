@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from . import TaskError
+from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import now, ContextRegistry, HerdrContexts, context_observer, context_reference, launch_registered, reconcile
@@ -158,6 +159,7 @@ def finalize_reviewer(context_id, workspace, adapter, registry, identities):
     return note
 
 
+@ownership_operation
 def review(identifier: str, *, resume: str | None = None, agent_kind: str | None = None,
            model: str | None = None, mode: str | None = None, timeout: float = 1800) -> ReviewResult:
     if timeout <= 0:

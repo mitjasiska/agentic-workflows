@@ -6,6 +6,7 @@ import signal
 import sys
 
 from . import TaskError
+from .ownership import ownership_operation
 from .agent import (AgentExecution, AgentOverrides, adapter_for,
                     codex_repository_policy, resolve_agent_options)
 from .config import load_local, load_projects, repository_path, resolve_project
@@ -34,8 +35,16 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("issue", type=issue_identifier)
     start.add_argument("--slice", type=parse_slice, help="Select an explicit implementation slice (branch suffix)")
     add_agent_options(start, include_no_agent=True)
-    cleanup_command = commands.add_parser("cleanup", help="Remove a completed, merged task worktree and local branch safely")
+    cleanup_command = commands.add_parser("cleanup",
+        help="Remove a completed, merged task, or discard a canceled local execution with --force",
+        description="Normally requires a completed issue and proven merge. --force instead authorizes destructive "
+                    "disposal of a canceled, never-published execution, including dirty task contents. "
+                    "Quit its agents first and run outside its checkouts; exact identity and stopped-process "
+                    "proof for registered execution are required. Other executions retain their resource claims; "
+                    "unmanaged host references are outside the V1 guarantee. Rerun --force to finish a partial disposal.")
     cleanup_command.add_argument("issue", type=issue_identifier)
+    cleanup_command.add_argument("--force", action="store_true",
+        help="Destructively discard a Linear-canceled, never-published local execution, including dirty files and retained integration artifacts")
     contexts = commands.add_parser("contexts", help="Inspect machine-local workflow contexts (read-only)")
     contexts.add_argument("issue", nargs="?", type=issue_identifier)
     contexts.add_argument("--all", action="store_true", help="Include retired contexts")
@@ -110,6 +119,7 @@ def parse_slice(value: str) -> str:
         raise argparse.ArgumentTypeError(str(error)) from None
 
 
+@ownership_operation
 def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
           agent_kind: str | None = None, model: str | None = None,
           mode: str | None = None) -> str:
@@ -145,11 +155,17 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
             f"Worktree: {workspace.path}\nHerdr:  {workspace.action}\nLinear: In Progress\nAgent:  {status}")
 
 
-def cleanup(identifier: str) -> str:
+@ownership_operation(exclusive=True)
+def cleanup(identifier: str, *, force: bool = False) -> str:
     local = load_local(no_agent=True)
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
+    if force:
+        if issue.state_type != "canceled":
+            raise TaskError(f"--force requires a Canceled issue (Linear status: {issue.state_name}); nothing was removed")
+        from .cleanup import discard_canceled
+        return discard_canceled(issue, project, repo)
     if issue.state_type != "completed":
         raise TaskError(f"{identifier} is not completed (Linear status: {issue.state_name}); nothing was removed")
     git, herdr = Git(repo), Herdr(repo)
@@ -259,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "cleanup":
-            print(cleanup(args.issue))
+            print(cleanup(args.issue, force=args.force))
         elif args.command == "contexts":
             print(inspect_contexts(args.issue, include_retired=args.all))
         elif args.command == "review":
