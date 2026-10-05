@@ -11,6 +11,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 from . import TaskError
+from .ownership import ownership_operation
 from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, context_reference
 from .github import api_credential, publication_pull, publish_pull, pull_requests, repository_name
@@ -329,6 +330,7 @@ def advance_base(git, permanent, identity, base_branch, branch, reviewed_base, r
         raise TaskError("Permanent base did not reach the verified upstream; inspect it before retrying")
 
 
+@ownership_operation
 def publish(identifier):
     if any(k in os.environ for k in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
         raise TaskError("Unset Git repository/index routing environment overrides before task pr")

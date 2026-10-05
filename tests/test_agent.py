@@ -895,6 +895,8 @@ class ControlledTaskStartAcceptanceTests(unittest.TestCase):
     """Drive the same mocked workflow boundary through both real adapters."""
 
     def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=Path(directory) / "contexts.sqlite3"))
         self.enterContext(patch("task_start.cli.launch_registered",
                                 side_effect=lambda agent, execution: agent.launch(execution)))
         self.enterContext(patch("task_start.cli.load_local", return_value=LOCAL))

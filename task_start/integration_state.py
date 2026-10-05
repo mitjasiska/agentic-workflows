@@ -6,6 +6,7 @@ Explicit abandonment archives the complete attempt before a new claim may replac
 """
 
 from copy import deepcopy
+from hashlib import sha256
 import json
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 from uuid import UUID
 
 from . import TaskError
+from .ownership import ownership_operation
 from .codex_rpc import validate_readiness_only
 from .implementation_pass import parse_implementation
 from .publication_state import PublicationStore
@@ -115,7 +117,14 @@ class IntegrationStore(PublicationStore):
         except (OSError, ValueError, TypeError, KeyError, AttributeError, UnicodeError, RecursionError):
             raise TaskError("Cannot read integration provenance; inspect private Git metadata and retained checkout. No replay is safe") from None
 
+    @ownership_operation
     def write(self, value, *, before_replace=None):
+        from .cleanup import check_unreserved
+        from .contexts import ContextRegistry
+        binding = value.get("binding", {})
+        registry = ContextRegistry()
+        for path in (binding.get("worktree"), value.get("checkout"), value.get("output"), str(self.directory)):
+            check_unreserved(registry, binding.get("repository"), path)
         if len(json.dumps(value, ensure_ascii=True).encode()) > 1024 * 1024:
             raise TaskError("Integration evidence exceeds its bounded record; inspect the retained checkout manually")
         if before_replace is None:
@@ -137,7 +146,8 @@ class IntegrationStore(PublicationStore):
         """All previous G ordinals need explicit, durable, completed abandonment."""
         if IntegrationStore(Path(record["binding"]["worktree"])).directory != self.directory:
             raise TaskError("Abandoned integration belongs to a different task checkout; no retry is safe")
-        contexts = [c for c in registry.list(issue, include_retired=True) if c["role"] == "integration"]
+        contexts = [c for c in registry.list(issue, include_retired=True)
+                    if c["role"] == "integration" and c["state"] != "retired"]
         if abandoned_context(record) not in contexts:
             raise TaskError("Integration abandonment is incomplete; repeat the explicit --abandon action after inspection")
         self.archive(record)
@@ -150,6 +160,45 @@ class IntegrationStore(PublicationStore):
             if (prior is None or prior["state"] != "abandoned" or abandoned_context(prior) != context
                     or prior["binding"] != record["binding"]):
                 raise TaskError("Integration history lacks matching abandonment provenance; inspect it manually")
+
+    def disposal_records(self):
+        """Read current and archived attempts before their Git directory disappears."""
+        records = {}
+        paths = [self.path, *sorted(self.directory.glob("agentic-workflows-integration-*.json"))]
+        if len(paths) > 101:
+            raise TaskError("Too many retained integrations for bounded canceled cleanup; inspect history manually")
+        for path in paths:
+            source = IntegrationStore(publication_store=self)
+            source.path = path
+            record = source.read()
+            if record is None:
+                if path != self.path:
+                    raise TaskError("Integration archive disappeared during cleanup inspection")
+                continue
+            if path != self.path and (record["state"] != "abandoned"
+                    or path.name != f"agentic-workflows-integration-{abandoned_context(record)['context_id']}.json"):
+                raise TaskError("Integration archive identity changed; disposal refused")
+            previous = records.setdefault(record["pass_id"], record)
+            if previous != record:
+                raise TaskError("Conflicting retained integration evidence; disposal refused")
+        return list(records.values())
+
+
+def evidence_digest(value):
+    return sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+def integration_tombstone(record):
+    """Bounded provenance, without retaining reports, conflicted files or handles."""
+    return dict(pass_id=record["pass_id"], state=record["state"], binding=record["binding"],
+                checkout=record["checkout"], output=record.get("output"), base=record["base"],
+                context_id=(record.get("context") or {}).get("context_id"),
+                source_fingerprint=record["source"].get("fingerprint"),
+                source_head=record["source"].get("head"), options=record["options"],
+                slice=record.get("slice"), slice_recorded="slice" in record,
+                record_sha256=evidence_digest(record), plan_sha256=evidence_digest(record["plan"]),
+                completion_sha256=evidence_digest(record.get("completion")),
+                abandonment_sha256=evidence_digest(record.get("abandonment")))
 
 
 def abandoned_context(record):
@@ -261,7 +310,8 @@ def check_integration(store, saved, registry, issue, project, repo, identities):
     """Gate review/publication; return a live identity guard for pending installs."""
     integration = IntegrationStore(publication_store=store)
     record = integration.read()
-    contexts = [c for c in registry.list(issue.identifier, include_retired=True) if c["role"] == "integration"]
+    contexts = [c for c in registry.list(issue.identifier, include_retired=True)
+                if c["role"] == "integration" and c["state"] != "retired"]
     if record is None:
         if contexts or (saved["rebase"] is not None and saved["rebase"].get("integration_id")):
             raise TaskError("Integration controller state is missing; inspect the isolated context. No replay or installation is inferred")

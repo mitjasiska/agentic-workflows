@@ -1247,10 +1247,12 @@ class CleanupInputTests(unittest.TestCase):
         self.assertEqual(shlex.split("cd " + command), ["cd", str(repo)])
         self.assertIn("  task cleanup DEV-7", message)
 
-    def test_cleanup_has_only_issue_argument(self):
+    def test_cleanup_supports_explicit_force_and_rejects_unrelated_options(self):
         args = cli.parser().parse_args(["cleanup", "dev-7"])
-        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7"))
-        for extra in ("--force", "--slice", "--no-agent", "--agent"):
+        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=False))
+        args = cli.parser().parse_args(["cleanup", "dev-7", "--force"])
+        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=True))
+        for extra in ("--slice", "--no-agent", "--agent", "--unknown", "-D"):
             with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args(["cleanup", "DEV-7", extra])
 

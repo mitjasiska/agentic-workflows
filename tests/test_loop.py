@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -812,6 +813,10 @@ class LoopIntegrationTests(unittest.TestCase):
 
 
 class LoopContractTests(unittest.TestCase):
+    def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=Path(directory) / "contexts.sqlite3"))
+
     def test_controls_refuse_missing_or_ambiguous_task_context_paths(self):
         integration = dict(role="integration", worktree="/isolated")
         for contexts in ([integration],
@@ -851,7 +856,8 @@ class LoopContractTests(unittest.TestCase):
 
     def test_loop_controls_reject_both_roles_before_loading_config_or_checkpoint(self):
         with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
-                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")):
+                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")), \
+                patch("task_start.ownership.ownership_gate", side_effect=AssertionError("No ownership acquisition")):
             for control in ("--continue", "--status", "--pause-after-current"):
                 for prefix in ("i", "r"):
                     for option, value in (("agent", "codex"), ("model", "model"), ("mode", "high")):
@@ -863,11 +869,27 @@ class LoopContractTests(unittest.TestCase):
 
     def test_from_review_cannot_override_existing_loop_controls(self):
         with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
-                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")):
+                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")), \
+                patch("task_start.ownership.ownership_gate", side_effect=AssertionError("No ownership acquisition")):
             for flag in ("--continue", "--status", "--pause-after-current"):
                 with self.subTest(flag=flag), patch("sys.stderr", new_callable=io.StringIO) as error:
                     self.assertEqual(cli.main(["loop", "DEV-7", flag, "--from-review"]), 1)
                     self.assertIn("--from-review only starts a new loop", error.getvalue())
+
+    def test_invalid_actions_limits_and_initial_selection_refuse_before_ownership(self):
+        invalid = [(dict(action="unknown"), "Unknown loop control action"),
+                   (dict(max_reviews=0), "Loop requires"), (dict(max_passes=41), "Loop requires"),
+                   (dict(timeout=float("nan")), "Loop requires"),
+                   (dict(from_review=True, impl_model="model"), "--i-.* options require")]
+        invalid.extend((dict(action=action, **{option: 1}), "preserve recorded settings")
+                       for action in ("status", "pause", "continue")
+                       for option in ("max_reviews", "max_passes", "timeout"))
+        with patch("task_start.loop.control_store", side_effect=AssertionError("No checkpoint access")), \
+                patch("task_start.loop.load_local", side_effect=AssertionError("No config access")), \
+                patch("task_start.ownership.ownership_gate", side_effect=AssertionError("No ownership acquisition")):
+            for options, message in invalid:
+                with self.subTest(options=options), self.assertRaisesRegex(TaskError, message):
+                    loop("DEV-7", **options)
 
     def test_routing_result_rejects_duplicate_ids_unknown_categories_and_missing_ids(self):
         for items in ([finding(), finding()], [dict(finding(), category="scope")],

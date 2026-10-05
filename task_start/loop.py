@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from . import TaskError
+from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch
@@ -356,6 +357,27 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
         raise TaskError("--from-review only starts a new loop; controls preserve the saved boundary")
     if action not in {"run", "new"} and any(v is not None for v in overrides):
         raise TaskError("Loop controls preserve recorded settings/limits and do not accept selection overrides")
+    if action in {"run", "new"}:
+        max_reviews = 3 if max_reviews is None else max_reviews
+        max_passes = 6 if max_passes is None else max_passes
+        timeout = 1800 if timeout is None else timeout
+        if (type(max_reviews) is not int or not 1 <= max_reviews <= 20
+                or type(max_passes) is not int or not 1 <= max_passes <= 40
+                or not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400):
+            raise TaskError("Loop requires 1..20 reviews, 1..40 passes, and a positive timeout up to 86400 seconds")
+        if from_review and any(v is not None for v in implementation_overrides):
+            raise TaskError("--i-* options require a from-scratch loop, not --from-review")
+    # Argument-only refusals create no ownership/checkpoint state. All runtime
+    # observation and mutation, including control resolution, remain guarded.
+    return _loop(identifier, action=action, agent_kind=agent_kind, model=model, mode=mode,
+                 max_reviews=max_reviews, max_passes=max_passes, timeout=timeout,
+                 from_review=from_review, on_pass_result=on_pass_result,
+                 impl_agent_kind=impl_agent_kind, impl_model=impl_model, impl_mode=impl_mode)
+
+
+@ownership_operation
+def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passes, timeout,
+          from_review, on_pass_result, impl_agent_kind, impl_model, impl_mode):
     if action in {"pause", "status", "continue"}:
         store, path = control_store(identifier)
         if action == "pause":
@@ -365,15 +387,7 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
         with PublicationStore(path).locked() as publication:
             state = store.continue_paused()
             return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)
-    max_reviews = 3 if max_reviews is None else max_reviews
-    max_passes = 6 if max_passes is None else max_passes
-    timeout = 1800 if timeout is None else timeout
-    if (type(max_reviews) is not int or not 1 <= max_reviews <= 20
-            or type(max_passes) is not int or not 1 <= max_passes <= 40
-            or not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400):
-        raise TaskError("Loop requires 1..20 reviews, 1..40 passes, and a positive timeout up to 86400 seconds")
-    if from_review and any(v is not None for v in implementation_overrides):
-        raise TaskError("--i-* options require a from-scratch loop, not --from-review")
+    implementation_overrides = (impl_agent_kind, impl_model, impl_mode)
     env = environment(identifier, allow_bootstrap=not from_review)
     options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode),
                                     section="reviewer", agent_flag="--r-agent")

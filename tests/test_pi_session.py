@@ -58,6 +58,10 @@ class PiSessionDiscoveryTests(unittest.TestCase):
             options = AgentOptions("pi", "model", "high")
             adapter = Pi(options)
             registry = ContextRegistry(Path(directory) / "contexts.sqlite3")
+            # Registry claims inspect Git ownership evidence before admitting a
+            # runtime binding, so the probe's checkout must be a real repository.
+            subprocess.run(["git", "-C", data["cwd"], "init", "--quiet", "--template=", "--initial-branch=main"],
+                           check=True, capture_output=True)
             context_id = registry.allocate("DEV-7", "review", agent="pi", model="model", mode="high",
                 repository=data["cwd"], worktree=data["cwd"], endpoint="/server.sock", workspace_id="w1",
                 tab_id="t1", pane_id="review-pane", terminal_id="terminal")

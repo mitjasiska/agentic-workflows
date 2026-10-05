@@ -7,9 +7,11 @@ import shlex
 import stat
 import subprocess
 import unicodedata
+from uuid import UUID
 
 from . import AgentNotReady, TaskError
 from .github import MergedPull, check_history, merged_pull, repository_name
+from .review_result import unique_object
 
 
 def branch_name(identifier: str, title: str) -> str:
@@ -432,6 +434,51 @@ class Git:
             raise TaskError("Git did not identify its private metadata directory")
         return common / "agentic-workflows-cleanup" / f"{identifier}.json"
 
+    def disposal_file(self, identifier: str, execution_id: str | None = None) -> Path:
+        try:
+            if execution_id is not None and str(UUID(execution_id)) != execution_id:
+                raise ValueError("invalid execution ID")
+        except (ValueError, TypeError, AttributeError):
+            raise TaskError("Invalid canceled cleanup execution identity") from None
+        name = "state.json" if execution_id is None else f"{execution_id}.json"
+        return self.retirement_file(identifier).with_suffix(".discard") / name
+
+    def disposal_files(self, identifier: str) -> list[Path]:
+        directory = self.disposal_file(identifier).parent
+        if directory.resolve() != directory:
+            raise TaskError("Canceled cleanup metadata path is aliased")
+        try:
+            return sorted(p for p in directory.iterdir() if p.suffix == ".json")
+        except FileNotFoundError:
+            return []
+
+    def check_disposal(self, identifier: str) -> None:
+        """Interrupted disposal must never become permission to recreate execution."""
+        try:
+            for path in self.disposal_files(identifier):
+                if path.resolve() != path or path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+                    raise ValueError("invalid disposal record")
+                record = json.loads(path.read_text(), object_pairs_hook=unique_object)
+                if record["version"] == 1:
+                    if path.name != "state.json":
+                        raise ValueError("invalid legacy disposal identity")
+                elif record["version"] == 2:
+                    if (not isinstance(record["execution_id"], str)
+                            or path != self.disposal_file(identifier, record["execution_id"])):
+                        raise ValueError("invalid disposal identity")
+                else:
+                    raise ValueError("invalid disposal version")
+                if (record["issue"] != identifier
+                        or record["repository"] != str(self.repo) or record["state"] != "complete"
+                        or record["workspace_state"] != "closed" or record["runtime"] is not None
+                        or any(record[k] != "removed" for k in ("worktree_state", "branch_state"))
+                        or any(r["state"] != "removed" for r in record["roots"])
+                        or any(c["state"] != "retired" or not c["retired_at"] for c in record["contexts"])):
+                    raise ValueError("pending disposal")
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            raise TaskError(f"Canceled cleanup for {identifier} is pending or uncertain; "
+                            f"inspect and rerun task cleanup {identifier} --force before other lifecycle work") from None
+
     def load_retirement(self, identifier: str, base: str) -> HerdrRetirement | None:
         record = self.retirement_file(identifier)
         try:
@@ -832,8 +879,11 @@ class Herdr:
         return True
 
     def resolve_task(self, git: Git, identifier: str, *, branch: str | None = None,
-                     slice: str | None = None, include_remotes: bool = True) -> TaskWorktree | None:
+                     slice: str | None = None, include_remotes: bool = True,
+                     disposing: bool = False) -> TaskWorktree | None:
         """Select existing state without opening, creating or changing a workspace."""
+        if not disposing:
+            git.check_disposal(identifier)
         label = identifier if slice is None else f"{identifier} / {slice}"
 
         def selected(name: str) -> bool:

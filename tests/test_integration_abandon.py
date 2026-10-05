@@ -1,6 +1,7 @@
 """Explicit abandonment of a sessionless stale G context; no implicit replay."""
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
@@ -16,6 +17,7 @@ from task_start.contexts import inspect_contexts
 from task_start.integrate import abandon_integration, abandonment_runtime, integrate
 from task_start.integration_process import stopped_checkout
 from task_start.integration_state import IntegrationStore
+from task_start.ownership import ownership_gate
 from task_start.publish import publish
 from task_start.review import review
 import test_integrate as integration
@@ -347,6 +349,11 @@ class AbandonmentTests(unittest.TestCase):
 
 
 class RecoveryContractTests(unittest.TestCase):
+    def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.registry_path = Path(directory) / "workflow" / "contexts.sqlite3"
+        self.enterContext(patch("task_start.contexts.registry_path", return_value=self.registry_path))
+
     def test_runtime_observation_requires_integer_process_identity(self):
         context = dict(endpoint="/server.sock", pane_id="p1", terminal_id="t1", tab_id="tab1",
                        workspace_id="w1", agent="codex", worktree="/isolated")
@@ -366,10 +373,29 @@ class RecoveryContractTests(unittest.TestCase):
                     abandonment_runtime(context, identities, adapter)
 
     def test_git_routing_overrides_refuse_before_loading_configuration(self):
-        with patch.dict(os.environ, {"GIT_DIR": "/another/repository"}), \
+        for name in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: "/another/repository"}), \
+                    patch("task_start.integrate.load_local", side_effect=AssertionError("No config")), \
+                    self.assertRaisesRegex(TaskError, "Git routing"):
+                abandon_integration("DEV-7", "DEV-7-G1")
+        self.assertFalse(self.registry_path.parent.exists(), "Invalid routing must not create lock state")
+
+    def test_invalid_abandonment_selector_refuses_before_lock_or_configuration(self):
+        for selector in ("DEV-8-G1", "DEV-7-I1", "DEV-7-G0", "../DEV-7-G1"):
+            with self.subTest(selector=selector), \
+                    patch("task_start.integrate.load_local", side_effect=AssertionError("No config")), \
+                    self.assertRaisesRegex(TaskError, "exact integration context ID"):
+                abandon_integration("DEV-7", selector)
+        self.assertFalse(self.registry_path.parent.exists(), "Invalid arguments must not create lock state")
+
+    def test_valid_abandonment_requires_ownership_before_loading_configuration(self):
+        with patch.dict(os.environ, {}, clear=True), ownership_gate(exclusive=True), \
                 patch("task_start.integrate.load_local", side_effect=AssertionError("No config")), \
-                self.assertRaisesRegex(TaskError, "Git routing"):
-            abandon_integration("DEV-7", "DEV-7-G1")
+                ThreadPoolExecutor(max_workers=1) as pool:
+            attempt = pool.submit(abandon_integration, "DEV-7", "DEV-7-G1")
+            with self.assertRaisesRegex(TaskError, "ownership is busy"):
+                attempt.result()
 
 
 class LegacyReadinessProofTests(unittest.TestCase):
