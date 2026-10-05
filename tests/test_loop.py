@@ -812,6 +812,19 @@ class LoopIntegrationTests(unittest.TestCase):
 
 
 class LoopContractTests(unittest.TestCase):
+    def test_controls_refuse_missing_or_ambiguous_task_context_paths(self):
+        integration = dict(role="integration", worktree="/isolated")
+        for contexts in ([integration],
+                         [dict(role="implementation", worktree="/task"),
+                          dict(role="review", worktree="/other-task"), integration]):
+            for action in ("status", "pause", "continue"):
+                with self.subTest(contexts=contexts, action=action), \
+                        patch("task_start.loop.ContextRegistry") as registry, \
+                        patch("task_start.loop.LoopStore", side_effect=AssertionError("No checkpoint access")):
+                    registry.return_value.list.return_value = contexts
+                    with self.assertRaisesRegex(TaskError, "exactly one registered task checkout"):
+                        loop("DEV-7", action=action)
+
     def test_cli_accepts_only_role_explicit_loop_selection_flags(self):
         args = cli.parser().parse_args([
             "loop", "DEV-7", "--i-agent", "pi", "--i-model", "implementation", "--i-mode", "low",

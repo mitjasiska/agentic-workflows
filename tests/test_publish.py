@@ -283,7 +283,7 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(len(self.operations("commit")), 1)
         self.assertEqual(len(self.operations("push")), 1)
 
-    def test_pr_lookup_failure_and_remote_drift_report_both_without_repeating_authentication(self):
+    def test_pr_lookup_failure_with_advanced_base_preserves_confirmed_push(self):
         self.prepare()
         def failed_lookup(path, branch, **kwargs):
             if self.operations("push"):
@@ -291,10 +291,67 @@ class PublishingTests(unittest.TestCase):
                 raise TaskError("GitHub HTTP 503: service failure")
             return self.api(path, branch, **kwargs)
         with patch("task_start.github.request", side_effect=failed_lookup):
-            with self.assertRaisesRegex(TaskError, "HTTP 503.*confirmation also failed.*Remote base differs"):
+            with self.assertRaisesRegex(TaskError, "HTTP 503: service failure$"):
                 publish("DEV-7")
         self.assertEqual(len(self.operations("ls-remote")), 3)
         self.assertEqual(self.store.read()["publication_history"]["state"], "published")
+        self.assertFalse(self.pulls)
+
+    def test_base_advancement_after_push_does_not_make_publication_uncertain(self):
+        self.prepare()
+        advanced = None
+        def advance_after_push(path, operation, *args, **kwargs):
+            nonlocal advanced
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "push":
+                advanced = self.advance_remote()
+                self.command(self.repo, "fetch", "origin", "main")
+                self.command(self.repo, "merge", "--ff-only", advanced)
+            return result
+        self.native.side_effect = advance_after_push
+        url = publish("DEV-7")
+        head = self.assert_published()
+        history = self.store.read()["publication_history"]
+        self.assertEqual(history["base_commit"], self.base)
+        self.assertNotEqual(advanced, self.base)
+        self.assertEqual(history["state"], "published")
+        self.assertEqual(history["cycles"][-1]["state"], "complete")
+        self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(self.assert_published(), head)
+        self.assertEqual(len(self.operations("push")), 1)
+        self.assertFalse(self.operations("commit-tree"))
+
+    def test_lost_push_acknowledgement_can_confirm_exact_ref_despite_new_base(self):
+        self.prepare()
+        def lose_ack(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "push":
+                self.advance_remote()
+                raise TaskError("push acknowledgement lost")
+            return result
+        self.native.side_effect = lose_ack
+        with self.assertRaisesRegex(TaskError, "acknowledgement lost"):
+            publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["state"], "pending")
+        self.native.side_effect = None
+        publish("DEV-7")
+        self.assert_published()
+        history = self.store.read()["publication_history"]
+        self.assertEqual(history["state"], "published")
+        self.assertEqual(history["cycles"][-1]["state"], "complete")
+        self.assertEqual(len(self.operations("push")), 1)
+
+    def test_pr_lookup_failure_and_task_ref_drift_preserve_failure(self):
+        self.prepare()
+        def failed_lookup(path, branch, **kwargs):
+            if self.operations("push"):
+                self.command(self.remote, "update-ref", "-d", f"refs/heads/{self.branch}")
+                raise TaskError("GitHub HTTP 503: service failure")
+            return self.api(path, branch, **kwargs)
+        with patch("task_start.github.request", side_effect=failed_lookup):
+            with self.assertRaisesRegex(TaskError, "HTTP 503.*confirmation also failed.*Remote task branch conflicts"):
+                publish("DEV-7")
+        self.assertEqual(self.store.read()["publication_history"]["state"], "pending")
         self.assertFalse(self.pulls)
 
     def test_published_retry_detects_remote_deletion_after_preflight_without_repairing_or_writing_pr(self):
@@ -379,13 +436,13 @@ class PublishingTests(unittest.TestCase):
     def test_pr_create_rechecks_task_branch_after_lookup(self):
         self.assert_remote_drift_before_pr_write("head", update=False)
 
-    def test_pr_create_rechecks_base_after_lookup(self):
+    def test_pr_create_allows_base_advancement_after_push(self):
         self.assert_remote_drift_before_pr_write("base", update=False)
 
     def test_pr_update_rechecks_task_branch_after_lookup(self):
         self.assert_remote_drift_before_pr_write("head", update=True)
 
-    def test_pr_update_rechecks_base_after_lookup(self):
+    def test_pr_update_allows_base_advancement_after_push(self):
         self.assert_remote_drift_before_pr_write("base", update=True)
 
     def test_pr_write_rechecks_effective_destination_after_lookup(self):
@@ -418,8 +475,17 @@ class PublishingTests(unittest.TestCase):
                 return publish_pull(*args, **kwargs)
         with patch("task_start.publish.publish_pull", side_effect=guarded_pr), \
                 patch("sys.stdout", new=io.StringIO()) as output, patch("sys.stderr", new=io.StringIO()) as errors:
-            self.assertEqual(cli.main(["pr", "DEV-7"]), 1)
+            self.assertEqual(cli.main(["pr", "DEV-7"]), 0 if drift == "base" else 1)
         self.assertTrue(changed)
+        if drift == "base":
+            self.assertIn(self.pulls[0]["html_url"], output.getvalue())
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(len([c for c in self.calls if c[0] in {"POST", "PATCH"}]), len(prior_writes) + 1)
+            history = self.store.read()["publication_history"]
+            self.assertEqual(history["state"], "published")
+            self.assertEqual(history["cycles"][-1]["state"], "complete")
+            self.assert_published()
+            return
         self.assertEqual(output.getvalue(), "")
         self.assertRegex(errors.getvalue(), "Remote task branch conflicts|Remote base differs|destination differs")
         self.assertEqual([call for call in self.calls if call[0] in {"POST", "PATCH"}], prior_writes)
@@ -1210,13 +1276,12 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(self.assert_published(), head)
         self.assertEqual(len(self.operations("commit")), 1)
 
-    def test_published_branch_or_pr_forbids_automatic_rebase(self):
+    def test_confirmed_publication_retry_allows_new_base_without_rebase(self):
         self.prepare()
-        publish("DEV-7")
+        url = publish("DEV-7")
         before = snapshot(self.path, self.base, self.branch)
         self.advance_remote()
-        with self.assertRaisesRegex(TaskError, "already published"):
-            publish("DEV-7")
+        self.assertEqual(publish("DEV-7"), url)
         self.assertEqual(snapshot(self.path, self.base, self.branch), before)
         # A surviving PR also prevents rewriting if its remote branch vanished.
         self.pulls[0]["follow_remote"] = False
@@ -1225,6 +1290,7 @@ class PublishingTests(unittest.TestCase):
             publish("DEV-7")
         self.assertEqual(snapshot(self.path, self.base, self.branch), before)
         self.assertFalse(self.operations("fetch"))
+        self.assertFalse(self.operations("commit-tree"))
         self.assertEqual(len(self.operations("push")), 1)
 
     def test_rebase_install_interruption_recovers_without_duplicate_commits(self):
@@ -1774,6 +1840,26 @@ class PublishingTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "drifted"):
             publish("DEV-7")
         self.assertEqual(len(self.operations("commit")), 1)
+
+    def test_followup_push_confirmation_ignores_later_base_advancement(self):
+        self.prepare()
+        publish("DEV-7")
+        self.followup_review()
+        def advance_after_push(path, operation, *args, **kwargs):
+            result = native_git(path, operation, *args, **kwargs)
+            if operation == "push":
+                self.advance_remote()
+            return result
+        self.native.side_effect = advance_after_push
+        url = publish("DEV-7")
+        history = self.store.read()["publication_history"]
+        self.assertEqual(len(history["cycles"]), 2)
+        self.assertTrue(all(c["state"] == "complete" for c in history["cycles"]))
+        self.assertEqual(history["base_commit"], self.base)
+        self.assertEqual(self.command(self.remote, "rev-parse", self.branch), history["head"])
+        self.assertEqual(publish("DEV-7"), url)
+        self.assertEqual(len(self.operations("push")), 2)
+        self.assertFalse(self.operations("commit-tree"))
 
     def test_followup_base_advance_fails_closed_without_rewriting_or_fetching(self):
         self.prepare()

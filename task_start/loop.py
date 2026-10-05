@@ -331,7 +331,10 @@ def drive(store, state, runtime, *, on_pass_result=None):
 def control_store(identifier):
     """Pause/status/continue locate exact private state without Linear or local config."""
     contexts = ContextRegistry().list(identifier)
-    paths = {c["worktree"] for c in contexts if c["worktree"]}
+    # Integration contexts retain a separate checkout for recovery/provenance.
+    # Only implementation/review contexts identify the task's loop checkpoint.
+    paths = {c["worktree"] for c in contexts
+             if c["role"] in {"implementation", "review"} and c["worktree"]}
     if len(paths) != 1:
         raise TaskError("Loop control requires exactly one registered task checkout")
     path = Path(paths.pop())

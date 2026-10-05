@@ -61,6 +61,23 @@ and private acceptance/intent persistence in
 [`publication_state.py`](../task_start/publication_state.py). See the
 [publishing contract](lifecycle.md#task-pr). External API boundaries are
 [`linear.py`](../task_start/linear.py) and [`github.py`](../task_start/github.py).
+Explicit conflict recovery lives in [`integrate.py`](../task_start/integrate.py)
+and its bounded delivery/proof record in
+[`integration_state.py`](../task_start/integration_state.py). It reuses the same
+deterministic replay, snapshots, task lock, rebase journal, and guarded installer.
+Its durable checkout has separate refs, files, index, and object storage; only
+proven tree/blob objects return to the source repository. Agents edit files while
+the conflict index stays unchanged; the controller stages only verified successful
+completion. The output directory is retained under the temporary root so the
+documented Codex workspace-write profile needs no extra permissions. Recorded slice
+scope is carried into the handoff. Initial installation and recovery share the
+same frozen-provenance guard, required at every checkout/index/ref mutation and
+atomic success-record replacement. It protects the local binding, scope, source,
+base object, and proven tree/history without requiring moving base/task refs to
+stay unchanged. Fresh review uses that installed base; `task pr` separately checks
+remote publication eligibility. Confirming a pushed task SHA and PR remains valid
+when main subsequently advances. See
+[integration lifecycle and recovery](lifecycle.md#task-integrate).
 
 ## Handoff transport
 
@@ -93,11 +110,11 @@ exact argv. It never retries `agent start` after a failure or uncertain response
 If a validated non-ready launch report contains a provider session, the adapter
 persists that identity before further startup inspection. Later omissions or
 conflicting reports cannot erase or replace it, including during trust recovery.
-Initial loop launches retain that identity in the same context guard immediately,
-without requiring readable provider history at the first runtime observation.
-The loop adopts the verified session binding only after the Codex adapter confirms
-the recorded readiness turn within its reconciliation budget; completion verifies
-provider history again.
+Initial loop and integration launches retain that identity in the same context
+guard immediately, without requiring readable provider history at the first
+runtime observation. The caller adopts the verified session binding only after
+the Codex adapter confirms the recorded readiness turn within its reconciliation
+budget; completion verifies provider history again.
 Session discovery and recorded-turn confirmation below poll observation only;
 delayed visibility never repeats launch or queues another handoff. Errors identify
 the failed phase; a session that has not been observed is not assumed absent.
@@ -171,9 +188,9 @@ project trust, or model errors remain visible in the pane.
 ## Workflow context identities
 
 Each new implementation launch receives a visible pane label such as `DEV-20-I1`.
-The identifier is the canonical Linear issue ID, followed by `I` (implementation)
-or `R` (review) and a monotonic ordinal. These identify agent contexts, not Git
-worktrees: contexts can share a checkout. `task review` consumes the same allocation,
+The identifier is the canonical Linear issue ID, followed by `I` (implementation),
+`R` (review), or `G` (integration), and a monotonic ordinal. These identify agent
+contexts, not Git worktrees: contexts can share a checkout. `task review` consumes the same allocation,
 session identity, and pane-labeling primitives for independent reviewers.
 
 Inspect contexts without loading workflow configuration or contacting Linear:
@@ -193,6 +210,11 @@ establish resumability: Pi references remain `unknown` without persistence evide
 while Codex's receipt API confirms a persisted readiness turn before reporting
 `yes`. `task review --resume` rechecks provider history; registry evidence does not
 guarantee that the provider will retain that history indefinitely.
+Integration contexts bind a distinct durable checkout in a separate pane of the
+task's Herdr workspace. Implementation identity is never rebound. Registry schema
+version 2 adds the explicit integration role through a transactional migration
+that preserves existing rows and ordinals; read-only inspection accepts versions
+1 and 2 without migrating them.
 
 ### Registry allocation and lifecycle observations
 

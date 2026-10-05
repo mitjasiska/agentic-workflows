@@ -115,6 +115,12 @@ keep their recorded settings and reject `--i-*`. Generic `--agent`, `--model`, a
 `--mode` remain available on `task start` and `task review`, but are not accepted by
 `task loop`. See [loop lifecycle](lifecycle.md#task-loop) for startup and controls.
 
+`task integrate DEV-7` also resolves its single execution role from `[agent]`.
+Optional `--agent`, `--model`, and `--mode` override those fields independently;
+model and mode must both be explicit before integration mutation or launch.
+It always creates a fresh integration context; it does not inherit or change the
+implementation context's settings. See [integration recovery](lifecycle.md#task-integrate).
+
 ## Codex permissions for trusted repositories
 
 Agentic Workflows does not relax Codex permissions globally. With no repository
@@ -168,6 +174,13 @@ operations—are behavioral instructions, not hard sandbox rules. Implementation
 and review commands may use the same trusted-repository profile; they stay
 separate through fresh sessions, `AgentExecution.purpose`, and purpose-specific
 handoffs, not through separate permission profiles.
+
+Integration uses this same profile. Its agent only edits files in the isolated
+checkout and writes structured completion in a retained private directory under
+Python's temporary root (normally `/tmp`, or `TMPDIR`). The controller owns all
+staging and Git metadata writes after verified completion. No additional sandbox
+roots, approval override, or broader profile are required; see
+[integration recovery](lifecycle.md#task-integrate).
 
 This is deliberately a small Codex-only setup. Pi enforcement, cross-agent
 capability mapping, stronger credential isolation, containers or external

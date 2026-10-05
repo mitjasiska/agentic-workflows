@@ -21,6 +21,21 @@ from .workspace import run
 REVIEW_REQUIRED = "Task rebased onto the updated base; run a new independent task review before rerunning task pr. Nothing was pushed."
 
 
+class IntegrationConflict(TaskError):
+    """A deterministic replay stopped with actual unmerged paths."""
+
+
+def replay(command, base, old_base):
+    try:
+        command("rebase", "--onto", base, old_base, "--no-rebase-merges",
+                "--no-autosquash", "--no-autostash", "--no-update-refs", "--reapply-cherry-picks",
+                "--empty=keep", "--keep-empty", "--no-fork-point", "--no-verify", "--strategy=ort")
+    except TaskError:
+        error = IntegrationConflict if command("ls-files", "--unmerged", "-z") else TaskError
+        raise error("Disposable rebase conflicts or cannot be completed safely; task branch, index and files are unchanged. "
+                    "Use task integrate for reviewed uncommitted conflicts, or resolve/rebase manually and review again") from None
+
+
 def validate_record(rebase):
     if publication_fingerprint(rebase.get("publication")) != rebase.get("publication_fingerprint"):
         raise TaskError("Frozen publication metadata changed; inspect rebase provenance before retrying")
@@ -95,7 +110,7 @@ def checkout_index(git, source, target):
         yield command, index
 
 
-def install_checkout(git, source, target, verify_source):
+def install_checkout(git, source, target, verify_source, *, verify_identity=None):
     with checkout_index(git, source, target) as (command, prepared):
         index = Path(git.command("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
         lock = index.with_name(index.name + ".lock")
@@ -112,6 +127,8 @@ def install_checkout(git, source, target, verify_source):
                 # Git updates files and the private index. Publish that complete
                 # index atomically only after checkout succeeds; never expose a
                 # staged source tree in the real index on setup/checkout failure.
+                if verify_identity is not None:
+                    verify_identity()
                 try:
                     command("read-tree", "-m", "-u", source, target)
                 except TaskError:
@@ -121,6 +138,8 @@ def install_checkout(git, source, target, verify_source):
                     shutil.copyfileobj(source_index, output)
                 output.flush()
                 os.fsync(output.fileno())
+            if verify_identity is not None:
+                verify_identity()
             os.replace(lock, index)
         except OSError:
             raise TaskError("Rebase checkout/index installation was not confirmed; inspect task files/index "
@@ -167,13 +186,7 @@ def _integration_plan(git, accepted, intent, base):
         except TaskError:
             raise TaskError("Disposable rebase setup failed; task branch, index and files are unchanged. "
                             "Inspect Git object access and checkout settings before retrying") from None
-        try:
-            command("rebase", "--onto", base, old["base_commit"], "--no-rebase-merges",
-                    "--no-autosquash", "--no-autostash", "--no-update-refs", "--reapply-cherry-picks",
-                    "--empty=keep", "--keep-empty", "--no-fork-point", "--no-verify", "--strategy=ort")
-        except TaskError:
-            raise TaskError("Disposable rebase conflicts or cannot be completed safely; task branch, index and files are unchanged. "
-                            "Resolve/rebase manually, then run a new independent review") from None
+        replay(command, base, old["base_commit"])
         steps = []
         for commit in command("rev-list", "--reverse", f"{base}..HEAD").splitlines():
             steps.append(dict(tree=command("rev-parse", f"{commit}^{{tree}}").strip(),
@@ -210,29 +223,43 @@ def validate_commits(git, rebase):
     return parent if rebase["commits"] else None
 
 
-def continue_rebase(git, saved, store, native, verify_unpublished):
+def installation_state(git, rebase):
+    """Prove only the frozen source or a journaled installation intermediate."""
+    source = rebase["source"]
+    if any(entry and not entry.startswith("H ") for entry in git.command("ls-files", "-v", "-z").split("\0")):
+        raise TaskError("Task index flags changed during rebase; inspect it manually")
+    current = snapshot(git.repo, source["base_commit"], source["branch"])
+    head = validate_commits(git, rebase)
+    source_matches = (current.head == source["head"] and current.content == source["content"]
+                      and current.index in {source["index"], rebase["source_index"]})
+    if rebase.get("integration_id"):
+        # Agent-assisted installation never stages its materialized source
+        # into the real index. An unchanged source must still be EXACTLY the
+        # accepted snapshot; only the proven target permits crash recovery.
+        source_matches = current.as_dict() == source
+    target_matches = (len(rebase["commits"]) == len(rebase["steps"])
+                      and current.content == rebase["content"]
+                      and ((current.index == rebase["index"] and current.head in {source["head"], head})
+                           or (current.head == source["head"]
+                               and current.index in ({source["index"]} if rebase.get("integration_id")
+                                                     else {source["index"], rebase["source_index"]}))))
+    if not source_matches and not target_matches:
+        raise TaskError("Task changed during pending rebase; inspect branch/index/files manually before retrying")
+    # Checkout may have completed before the atomic index replacement.
+    return current, target_matches and current.index == rebase["index"]
+
+
+def continue_rebase(git, saved, store, native, verify_installation, *, verify_identity=None):
     rebase = saved["rebase"]
+    if rebase.get("integration_id") and not callable(verify_identity):
+        raise TaskError("Integration installation requires a live identity/scope guard; inspect pending evidence")
     source = rebase["source"]
 
     def state():
-        if any(entry and not entry.startswith("H ") for entry in git.command("ls-files", "-v", "-z").split("\0")):
-            raise TaskError("Task index flags changed during rebase; inspect it manually")
-        current = snapshot(git.repo, source["base_commit"], source["branch"])
-        head = validate_commits(git, rebase)
-        source_matches = (current.head == source["head"] and current.content == source["content"]
-                          and current.index in {source["index"], rebase["source_index"]})
-        target_matches = (len(rebase["commits"]) == len(rebase["steps"])
-                          and current.content == rebase["content"]
-                          and ((current.index == rebase["index"] and current.head in {source["head"], head})
-                               or (current.head == source["head"]
-                                   and current.index in {source["index"], rebase["source_index"]})))
-        if not source_matches and not target_matches:
-            raise TaskError("Task changed during pending rebase; inspect branch/index/files manually before retrying")
-        # Checkout may have completed before the atomic index replacement.
-        return current, target_matches and current.index == rebase["index"]
+        return installation_state(git, rebase)
 
     state()
-    verify_unpublished()
+    verify_installation()
     while len(rebase["commits"]) < len(rebase["steps"]):
         step = rebase["steps"][len(rebase["commits"])]
         parent = rebase["commits"][-1] if rebase["commits"] else rebase["base"]
@@ -251,27 +278,35 @@ def continue_rebase(git, saved, store, native, verify_unpublished):
         validate_commits(git, rebase)
         store.write(saved)
         state()
-    # No real mutation until the entire signed chain is durable and the branch
-    # is still unpublished. A crash after checkout/before update-ref is provable
+    # No real mutation until the entire signed chain is durable and the local
+    # installation basis still matches. A crash before update-ref is provable
     # from the two allowed trees/indexes and the compare-and-swap branch update.
-    verify_unpublished()
+    verify_installation()
     current, at_target = state()
     head = rebase["commits"][-1]
     if not at_target:
         check_ignored_obstructions(git, rebase["tree"])
         checkout_source = rebase["tree"] if current.content == rebase["content"] else rebase["source_tree"]
         def verify_source():
+            verify_installation()
             if state()[0] != current:
                 raise TaskError("Task changed during rebase checkout preparation; inspect it before retrying")
-        install_checkout(git, checkout_source, rebase["tree"], verify_source)
+        install_checkout(git, checkout_source, rebase["tree"], verify_source, verify_identity=verify_identity)
         _, at_target = state()
         if not at_target:
             raise TaskError("Rebased checkout differs from the planned tree; inspect filters/files manually")
     if current.head != head:
+        if verify_identity is not None:
+            verify_identity()
         git.command("update-ref", f"refs/heads/{source['branch']}", head, source["head"])
     state()
     if git.command("status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none").strip():
         raise TaskError("Rebased checkout is not clean; inspect it before obtaining a fresh review")
-    rebase["result"] = snapshot(git.repo, rebase["base"], source["branch"]).as_dict()
-    store.write(saved)
+    result = snapshot(git.repo, rebase["base"], source["branch"]).as_dict()
+    completed = dict(saved, rebase=dict(rebase, result=result))
+    if verify_identity is None:
+        store.write(completed)
+    else:
+        store.write(completed, before_replace=verify_identity)
+    rebase["result"] = result
     raise TaskError(REVIEW_REQUIRED)

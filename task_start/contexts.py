@@ -50,10 +50,12 @@ class ContextRegistry:
                 db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
                 db.execute("BEGIN IMMEDIATE")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version == 0:
+                if version in {0, 1}:
+                    if version == 1:
+                        db.execute("ALTER TABLE contexts RENAME TO contexts_v1")
                     db.execute("""CREATE TABLE contexts (
                         context_id TEXT PRIMARY KEY, issue TEXT NOT NULL,
-                        role TEXT NOT NULL CHECK(role IN ('implementation', 'review')),
+                        role TEXT NOT NULL CHECK(role IN ('implementation', 'review', 'integration')),
                         ordinal INTEGER NOT NULL, agent TEXT NOT NULL, model TEXT, mode TEXT,
                         repository TEXT, worktree TEXT, endpoint TEXT, workspace_id TEXT,
                         tab_id TEXT, pane_id TEXT, terminal_id TEXT, session_id TEXT,
@@ -62,13 +64,16 @@ class ContextRegistry:
                         state TEXT NOT NULL DEFAULT 'launching',
                         allocated_at TEXT NOT NULL, retired_at TEXT,
                         UNIQUE(issue, role, ordinal))""")
-                    db.execute("PRAGMA user_version = 1")
-                elif version != 1:
+                    if version == 1:
+                        db.execute("INSERT INTO contexts SELECT * FROM contexts_v1")
+                        db.execute("DROP TABLE contexts_v1")
+                    db.execute("PRAGMA user_version = 2")
+                elif version != 2:
                     raise TaskError("Unsupported workflow context registry version")
             else:
                 # mode=ro neither creates the file nor migrates/repairs the registry.
                 db = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
-                if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                if db.execute("PRAGMA user_version").fetchone()[0] not in {1, 2}:
                     raise TaskError("Unsupported workflow context registry version")
             db.row_factory = sqlite3.Row
             yield db
@@ -88,8 +93,8 @@ class ContextRegistry:
                  pane_id: str | None = None, terminal_id: str | None = None) -> str:
         if not re.fullmatch(r"[A-Z][A-Z0-9]*-[1-9][0-9]*", issue):
             raise TaskError("Context allocation requires the canonical issue identifier")
-        if role not in {"implementation", "review"}:
-            raise TaskError("Context role must be implementation or review")
+        if role not in {"implementation", "review", "integration"}:
+            raise TaskError("Context role must be implementation, review, or integration")
         with self.connection(write=True) as db:
             pending = db.execute("""SELECT context_id FROM contexts WHERE issue=? AND role=?
                 AND repository IS ? AND worktree IS ? AND state='awaiting_user'""",
@@ -105,7 +110,8 @@ class ContextRegistry:
                                     "inspect it before retrying or cleaning up")
             ordinal = db.execute("SELECT COALESCE(MAX(ordinal), 0)+1 FROM contexts WHERE issue=? AND role=?",
                                  (issue, role)).fetchone()[0]
-            context_id = f"{issue}-{'I' if role == 'implementation' else 'R'}{ordinal}"
+            prefix = {"implementation": "I", "review": "R", "integration": "G"}[role]
+            context_id = f"{issue}-{prefix}{ordinal}"
             db.execute("""INSERT INTO contexts (context_id, issue, role, ordinal, agent, model, mode,
                 repository, worktree, endpoint, workspace_id, tab_id, pane_id, terminal_id, allocated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -174,6 +180,17 @@ class ContextRegistry:
                 raise TaskError("Reviewer binding changed; replacement pane was not registered")
             db.execute("UPDATE contexts SET pane_id=?, terminal_id=?, tab_id=? WHERE context_id=?",
                        (pane["pane_id"], pane["terminal_id"], pane["tab_id"], context["context_id"]))
+
+    def abandon_integration(self, context: dict, timestamp: str) -> None:
+        """CAS-retire one proven stopped attempt without erasing identity evidence."""
+        with self.connection(write=True) as db:
+            current = db.execute("SELECT * FROM contexts WHERE context_id=?", (context["context_id"],)).fetchone()
+            if (current is None or dict(current) != context or context["role"] != "integration"
+                    or context["state"] != "uncertain" or context["retired_at"]
+                    or context["resumability"] != "unknown" or context_reference(context) is not None):
+                raise TaskError("Integration context changed; abandonment was not applied")
+            db.execute("UPDATE contexts SET state='abandoned', retired_at=? WHERE context_id=?",
+                       (timestamp, context["context_id"]))
 
     def retire(self, issue: str, repository: Path, worktree: Path, *,
                endpoint: str, workspace_id: str | None) -> None:
@@ -324,7 +341,7 @@ def allocate_launch(execution, registry, herdr):
     workspace = execution.workspace
     endpoint = herdr.endpoint()
     panes = herdr.snapshot()
-    if execution.purpose != "review" and any(p.get("agent") == execution.options.kind and p["workspace_id"] == workspace.workspace_id
+    if execution.purpose == "implementation" and any(p.get("agent") == execution.options.kind and p["workspace_id"] == workspace.workspace_id
            for p in panes):
         raise TaskError("An implementation agent already occupies this workspace; inspect/continue it "
                         "or use --no-agent. Its context identity was preserved")
@@ -460,7 +477,7 @@ def inspect_contexts(issue: str | None = None, *, include_retired: bool = False,
     if not contexts:
         return "No known workflow contexts."
     endpoint, panes, error = None, [], None
-    if any(c["state"] != "retired" for c in contexts):
+    if any(not c["retired_at"] for c in contexts):
         try:
             endpoint, panes = herdr.endpoint(), herdr.snapshot()
         except TaskError as exc:
@@ -468,7 +485,7 @@ def inspect_contexts(issue: str | None = None, *, include_retired: bool = False,
     lines = ["CONTEXT | ISSUE | ROLE | AGENT | MODEL / MODE | STATE / LIVE | RESUMABILITY | HERDR | NOTES"]
     for context in contexts:
         live = None
-        if context["state"] == "retired":
+        if context["retired_at"]:
             notes = [f"allocated {context['allocated_at']}; retired {context['retired_at']}"]
         elif error:
             notes = [f"unknown/stale: {error}"]

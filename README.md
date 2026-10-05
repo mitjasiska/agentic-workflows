@@ -238,6 +238,21 @@ independent review of the rebased result and preserved PR title/body. After that
 review, rerun `pr` to publish the same rebased commit with that metadata.
 Already published branches are never automatically rebased.
 
+For a conflict while the reviewed implementation is still uncommitted, run
+`task integrate DEV-7`. It uses `[agent]` (optionally overridden with `--agent`,
+`--model`, and `--mode`) and requires an explicit resolved model and mode. The
+agent resolves and validates in a retained isolated checkout. A proven result is
+installed locally against its frozen base and requires a fresh `task review DEV-7`.
+Local installation can finish if main advances; `task pr` separately checks whether
+the reviewed result is still eligible for publication. Later main advancement does
+not make an already confirmed push uncertain.
+Human decisions or uncertain execution stop for inspection without installation.
+For a stopped uncertain Codex attempt with no recorded session or task result, explicit
+`task integrate DEV-7 --abandon DEV-7-G1` can retain its evidence and permit a
+separate fresh attempt after strict process/session absence checks.
+See [isolated integration recovery](docs/lifecycle.md#task-integrate) for supported
+states and interruption handling.
+
 For feedback on a published PR, leave the additional edits uncommitted, run a
 new `task review DEV-7`, then `task pr DEV-7`. Each cycle appends one reviewed
 commit and updates the same PR. Finish any interrupted publication with `pr`

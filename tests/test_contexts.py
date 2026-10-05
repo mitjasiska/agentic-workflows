@@ -39,6 +39,22 @@ class RegistryTests(unittest.TestCase):
         self.registry = ContextRegistry(self.path)
         self.assertEqual(self.allocate(), "DEV-20-I2")
         self.assertEqual(self.allocate(role="review"), "DEV-20-R2")
+        self.assertEqual(self.allocate(role="integration"), "DEV-20-G1")
+
+    def test_v1_migration_preserves_existing_contexts_and_ordinals(self):
+        first = self.allocate()
+        original = self.registry.get(first)
+        with sqlite3.connect(self.path) as db:
+            sql = db.execute("SELECT sql FROM sqlite_master WHERE name='contexts'").fetchone()[0]
+            db.execute("ALTER TABLE contexts RENAME TO newer_contexts")
+            db.execute(sql.replace(", 'integration'", ""))
+            db.execute("INSERT INTO contexts SELECT * FROM newer_contexts")
+            db.execute("DROP TABLE newer_contexts")
+            db.execute("PRAGMA user_version=1")
+        self.assertEqual(self.registry.get(first), original)  # Read-only access never migrates.
+        self.assertEqual(self.allocate(role="integration"), "DEV-20-G1")
+        self.assertEqual(self.registry.get(first), original)
+        self.assertEqual(self.allocate(), "DEV-20-I2")
 
     def test_concurrent_processes_allocate_once_each_including_initial_schema(self):
         with multiprocessing.get_context("spawn").Pool(6) as pool:

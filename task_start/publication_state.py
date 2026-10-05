@@ -150,7 +150,8 @@ class PublicationStore:
         except (OSError, ValueError, UnicodeError):
             raise TaskError("Cannot read publication evidence; inspect private Git metadata, never manufacture acceptance") from None
 
-    def write(self, value):
+    def write(self, value, *, before_replace=None):
+        """Persist atomically, checking any guard after serialization/fsync."""
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(dir=self.directory, mode="w", encoding="utf-8", delete=False) as output:
@@ -158,6 +159,8 @@ class PublicationStore:
                 json.dump(value, output, ensure_ascii=True, sort_keys=True)
                 output.flush()
                 os.fsync(output.fileno())
+            if before_replace is not None:
+                before_replace()
             os.replace(temporary, self.path)
             if os.name != "nt":
                 fd = os.open(self.directory, os.O_RDONLY)
