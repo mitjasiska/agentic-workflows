@@ -29,12 +29,19 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class IssueStructureConfig:
+    mode: str = "warn"
+    block_name: str = "Agent instructions"
+
+
+@dataclass(frozen=True)
 class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
     agent: AgentConfig | None = None
     codex_repository_profiles: Mapping[str, str] = field(default_factory=dict)
     reviewer: AgentConfig | None = None
+    issue_structure: IssueStructureConfig = field(default_factory=IssueStructureConfig)
 
 
 def read_toml(path: Path) -> dict:
@@ -60,6 +67,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
     api_key = required_text(data.get("linear"), "api_key")
     if any(char.isspace() for char in api_key):
         raise TaskError("Linear api_key must not contain whitespace")
+    structure = (IssueStructureConfig() if no_agent
+                 else issue_structure_config(data["linear"].get("issue_structure", {})))
     try:
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
@@ -67,9 +76,21 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         agent = None if no_agent else agent_config(data.get("agent"))
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
         reviewer = None if no_agent else agent_config(data.get("reviewer"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer)
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
+
+
+def issue_structure_config(data: dict) -> IssueStructureConfig:
+    if not isinstance(data, dict) or set(data) - {"mode", "block_name"}:
+        raise TaskError("linear.issue_structure must be a table supporting only mode and block_name")
+    mode = data.get("mode", "warn")
+    if not isinstance(mode, str) or mode.strip() not in {"required", "warn", "ignore"}:
+        raise TaskError("linear.issue_structure.mode must be required, warn, or ignore")
+    name = data.get("block_name", "Agent instructions")
+    if not isinstance(name, str) or not name.strip() or not name.isprintable():
+        raise TaskError("linear.issue_structure.block_name must be nonempty printable text on one line")
+    return IssueStructureConfig(mode.strip(), name.strip())
 
 
 def agent_config(data: dict | None) -> AgentConfig | None:

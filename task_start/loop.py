@@ -17,7 +17,7 @@ from .implementation_pass import binding, implementation_pass, implementation_ta
 from .linear import Linear
 from .loop_state import LoopStore, PauseRequested
 from .publication_state import PublicationStore, prepare_review_continuation
-from .preparation import prepare_task, require_agent_instructions
+from .preparation import check_issue_structure, prepare_task
 from .review import resolve_review_workspace, resolve_reviewer, review_pass
 from .review_state import snapshot
 from .workspace import Git, Herdr
@@ -45,7 +45,7 @@ def environment(identifier, *, allow_bootstrap=False, pending_implementation=Non
 
 
 def bootstrap(env, options):
-    require_agent_instructions(env.issue)
+    check_issue_structure(env.issue, env.local.issue_structure)
     adapter_for(options).check_available()
     env.workspace = prepare_task(env.issue, env.project, Linear(env.local.api_key), Git(env.repo),
                                  lambda: Herdr(env.repo), default_only=True)

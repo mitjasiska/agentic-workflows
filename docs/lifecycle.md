@@ -41,11 +41,21 @@ committing, pushing, merging, or opening a PR. The Python workflow owns the Line
 lookup; the execution agent is told not to contact Linear or read its credentials.
 No task description file is written into the worktree.
 
-Before any Git update, worktree creation/reuse, Linear status change, or context
-allocation/agent launch, agent-backed starts require a recognizable collapsed
-`Agent instructions` section in the current issue description. Missing guidance
-refuses the start and asks the human to refine the issue in Linear. This checks
-section presence only; it does not validate its contents or publication labels.
+The complete Linear issue is the task source of truth, with user-defined structure.
+Requested scope, acceptance criteria, constraints, and task-specific implementation
+guidance apply wherever they appear. The separate workflow-owned implementation
+instructions remain authoritative for lifecycle and safety behavior regardless of
+issue formatting.
+
+Agent-backed starts and from-scratch loops share the
+[issue structure policy](configuration.md#linear-issue-structure). The default
+`warn` mode prints a non-blocking warning if the configured collapsed marker
+(default `Agent instructions`) is absent; `ignore` skips the check. Only explicit
+`required` mode rejects absence, before any Git update, worktree creation/reuse,
+Linear status change, or context allocation/agent launch. This checks only the
+configured marker's presence; it does not parse, extract, or privilege its contents,
+require other headings, or validate publication labels. The complete description
+is passed unchanged in all three modes.
 
 `task start ISSUE --no-agent` performs the same workspace preparation and Linear
 transition without starting an agent. It does not require an `Agent instructions`
@@ -321,9 +331,9 @@ task loop DEV-20 --continue
 ```
 
 With no implementation context or context history, `task loop ISSUE` prepares
-and runs the initial implementation itself. It shares `task start`'s agent-ready
-preflight, project/base resolution, base update, default workspace create/reuse,
-and Linear `In Progress` transition. Both implementation and reviewer selections
+and runs the initial implementation itself. It shares `task start`'s configurable
+issue structure preflight, project/base resolution, base update, default workspace
+create/reuse, and Linear `In Progress` transition. Both implementation and reviewer selections
 are validated before preparation mutates Git, Herdr, or Linear. Preparation
 failure prevents the Linear update; a failed Linear update leaves the prepared
 workspace but allocates no context and launches no agent.

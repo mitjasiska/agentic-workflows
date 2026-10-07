@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from task_start import TaskError, cli
 from task_start.agent import AgentOptions, Codex, LaunchResult, Pi, adapter_for
+from task_start.config import IssueStructureConfig, load_local
 from task_start.contexts import ContextRegistry, context_reference
+from task_start.handoff import implementation_handoff
 from task_start.loop import loop
 from task_start.loop_state import LoopStore
 from task_start.workspace import Git, Herdr
@@ -221,6 +223,7 @@ class BootstrapLoopTests(unittest.TestCase):
         return result
 
     def test_untouched_issue_initial_handoff_then_fresh_review(self):
+        self.local = replace(self.local, issue_structure=IssueStructureConfig('required'))
         result = self.run_loop()
         self.assertEqual(result.state, 'clean', result.render())
         self.assertEqual(self.preparation, ['base', 'create', 'linear'])
@@ -236,6 +239,55 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual([r['phase'] for r in state['records']], ['initial_implementation', 'review'])
         self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD'), self.before)
         self.assertNotIn(fixture.ISSUE.description, self.store.path.read_bytes().decode(errors='ignore'))
+
+    def assert_structure_handoff(self, description, *, warning):
+        issue = replace(fixture.ISSUE, description=description)
+        self.linear.get_issue.return_value = issue
+        with patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            result = self.run_loop()
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(self.preparation, ['base', 'create', 'linear'])
+        if warning:
+            self.assertIn('warning: Linear issue DEV-7', stderr.getvalue())
+            self.assertIn(repr(self.local.issue_structure.block_name), stderr.getvalue())
+            self.assertIn('Continuing agent execution', stderr.getvalue())
+            self.assertEqual(stderr.getvalue().count('warning:'), 1)
+        else:
+            self.assertEqual(stderr.getvalue(), '')
+        execution = self.launches[0]
+        shared_handoff = implementation_handoff(issue, execution.workspace)
+        self.assertTrue(execution.handoff.startswith(shared_handoff))
+        self.assertIn(f'Task:\n{description}\n\nWorkflow-owned implementation instructions:', shared_handoff)
+        self.assertIn('Users may organize the issue description however they choose', shared_handoff)
+        self.assertEqual(execution.issue.description, description)
+
+    def test_default_warn_accepts_ordinary_issue_and_preserves_full_description(self):
+        self.assert_structure_handoff('Build ingestion.\r\n  Constraints α anywhere.\r\n', warning=True)
+
+    def test_ignore_accepts_empty_issue_without_inspecting_structure(self):
+        self.local = replace(self.local, issue_structure=IssueStructureConfig('ignore'))
+        self.assert_structure_handoff('', warning=False)
+
+    def test_custom_required_block_preserves_complete_description(self):
+        self.local = replace(self.local, issue_structure=IssueStructureConfig('required', 'Build notes (α)'))
+        self.assert_structure_handoff('Requirements first.\r\n>>> Build notes (α) \t\r\nGuidance\r\n>>>\r\nMore constraints.',
+                                      warning=False)
+
+    def test_custom_warn_does_not_treat_default_block_as_configured_block(self):
+        self.local = replace(self.local, issue_structure=IssueStructureConfig('warn', 'Build notes'))
+        self.assert_structure_handoff(fixture.ISSUE.description, warning=True)
+
+    def test_invalid_structure_configuration_fails_before_preparation(self):
+        with patch('task_start.config.read_toml', return_value=dict(projects_root='/projects',
+                linear=dict(api_key='test-placeholder', issue_structure=dict(mode='ignore', block_name='')))), \
+                patch('task_start.loop.load_local', side_effect=load_local):
+            with self.assertRaisesRegex(TaskError, 'linear.issue_structure.block_name'):
+                self.run_loop()
+        self.linear.get_issue.assert_not_called()
+        self.assertEqual(self.preparation, [])
+        self.linear.start.assert_not_called()
+        self.assertEqual(self.registry.list(), [])
+        self.assertFalse(self.path.exists())
 
     def codex_transport(self):
         self.local = replace(self.local, agent=fixture.AgentConfig('codex', 'initial-codex', 'high'))
@@ -594,8 +646,11 @@ class BootstrapLoopTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskError, 'unavailable'):
                 self.run_loop()
         self.linear.get_issue.return_value = replace(fixture.ISSUE, description='No guidance')
-        with self.assertRaisesRegex(TaskError, 'Agent instructions'):
-            self.run_loop()
+        for name in ('Agent instructions', 'Build notes'):
+            with self.subTest(block_name=name):
+                self.local = replace(original, issue_structure=IssueStructureConfig('required', name))
+                with self.assertRaisesRegex(TaskError, f'{name}.*mode=required'):
+                    self.run_loop()
         self.assertEqual(self.preparation, [])
         self.linear.start.assert_not_called()
         self.assertEqual(self.registry.list(), [])

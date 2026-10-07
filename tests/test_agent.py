@@ -156,7 +156,7 @@ class PromptTests(unittest.TestCase):
         prompt = implementation_handoff(issue, workspace)
         self.assertIn(f"Implement Linear issue {issue.identifier}.", prompt)
         self.assertIn(f"Title:\n{issue.title}\n", prompt)
-        self.assertIn(f"Task:\n{issue.description}\n\nInstructions:", prompt)
+        self.assertIn(f"Task:\n{issue.description}\n\nWorkflow-owned implementation instructions:", prompt)
         self.assertIn(IMPLEMENTATION_INSTRUCTIONS, prompt)
         self.assertIn(str(workspace.path), prompt)
         self.assertIn(workspace.branch, prompt)
@@ -536,7 +536,7 @@ class AgentTests(unittest.TestCase):
             self.run_launch()
         queued = [c.args[1]["input"][0]["text"] for c in self.rpc.request.call_args_list if c.args[0] == "thread/queue/add"]
         self.assertEqual(queued, [self.prompt])
-        self.assertIn(f"Task:\n{self.issue.description}\n\nInstructions:", queued[0])
+        self.assertIn(f"Task:\n{self.issue.description}\n\nWorkflow-owned implementation instructions:", queued[0])
         self.assertIn("Slice: importer\nImplement only this slice", queued[0])
 
     def test_malformed_responses_fail_cleanly(self):

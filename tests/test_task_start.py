@@ -14,8 +14,10 @@ from urllib.error import HTTPError, URLError
 from task_start import TaskError
 from task_start import cli
 from task_start.agent import LaunchResult
-from task_start.config import AgentConfig, LocalConfig, Project, load_local, load_projects, repository_path, resolve_project
+from task_start.config import (AgentConfig, IssueStructureConfig, LocalConfig, Project,
+                              load_local, load_projects, repository_path, resolve_project)
 from task_start.linear import Issue, Linear
+from task_start.preparation import check_issue_structure
 from task_start.workspace import Git, Herdr, Workspace, branch_name, run
 
 
@@ -118,6 +120,56 @@ class ConfigTests(unittest.TestCase):
                 path.write_text('[projects.test]\nlinear_project = "Test"\nbase_branch = "main"\nrepo_name = ' + json.dumps(name))
                 with self.assertRaises(TaskError):
                     load_projects(path)
+
+    def test_issue_structure_toml_defaults_and_overrides(self):
+        for section, expected in (
+            ('', IssueStructureConfig()),
+            ('[linear.issue_structure]', IssueStructureConfig()),
+            ('[linear.issue_structure]\nmode = "required"', IssueStructureConfig('required')),
+            ('[linear.issue_structure]\nmode = "ignore"', IssueStructureConfig('ignore')),
+            ('[linear.issue_structure]\nblock_name = "  Build notes (α) [v2].*  "',
+             IssueStructureConfig('warn', 'Build notes (α) [v2].*')),
+        ):
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'config.toml'
+                path.write_text(f'projects_root = {json.dumps(temp)}\n[linear]\napi_key = "test-placeholder"\n{section}\n')
+                self.assertEqual(load_local(path).issue_structure, expected)
+
+    def test_invalid_issue_structure_configuration(self):
+        policies = [False, '', [], {'unknown': 'value'}]
+        policies += [dict(mode=value) for value in ('', 'WARN', 'unknown', 1, False, [], {})]
+        policies += [dict(mode=mode, block_name=value)
+                     for mode in ('required', 'warn', 'ignore')
+                     for value in ('', '  ', '\t', 'Name\n', 'Two\rlines', 'With\ttab', 'NUL\0', 'DEL\x7f', 1, False, [], {})]
+        for policy in policies:
+            with self.subTest(policy=policy), patch('task_start.config.read_toml', return_value=dict(
+                    projects_root='/projects', linear=dict(api_key='test-placeholder', issue_structure=policy))):
+                with self.assertRaisesRegex(TaskError, 'linear.issue_structure') as caught:
+                    load_local()
+                self.assertNotIn('test-placeholder', str(caught.exception))
+                # Workspace-only preparation and cleanup skip execution settings.
+                self.assertEqual(load_local(no_agent=True).issue_structure, IssueStructureConfig())
+
+
+class IssueStructureTests(unittest.TestCase):
+    def test_ignore_does_not_access_issue_or_search_structure(self):
+        with patch('task_start.preparation.re.search') as search, patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            check_issue_structure(object(), IssueStructureConfig('ignore'))
+        search.assert_not_called()
+        self.assertEqual(stderr.getvalue(), '')
+
+    def test_only_literal_configured_collapsed_marker_is_recognized(self):
+        name = 'Build notes (α) [v2].*'
+        for mode in ('required', 'warn'):
+            for description in (f'+++ {name}\n', f'>>>\t{name} \t\r\n',
+                                f'Unstructured guidance\n+++{name}\nContents need no parsing'):
+                with self.subTest(mode=mode, description=description), patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                    check_issue_structure(replace(ISSUE, description=description), IssueStructureConfig(mode, name))
+                    self.assertEqual(stderr.getvalue(), '')
+        for description in (ISSUE.description, f'# {name}', f'Please use +++ {name}',
+                            '+++ Build notes α v2abc', f'+++ {name} extra', f'+++ {name.lower()}'):
+            with self.subTest(description=description), self.assertRaisesRegex(TaskError, 'Required by'):
+                check_issue_structure(replace(ISSUE, description=description), IssueStructureConfig('required', name))
 
 
 class LinearTests(unittest.TestCase):
@@ -391,10 +443,13 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn("Linear: In Progress", output)
         self.assertNotIn("test-placeholder", output)
 
-    def test_missing_agent_instructions_refuses_before_any_workflow_mutation(self):
+    def test_required_missing_block_refuses_before_any_workflow_mutation(self):
+        self.enterContext(patch('task_start.cli.load_local', return_value=replace(
+            LOCAL, issue_structure=IssueStructureConfig('required'))))
         for kind in ("codex", "pi"):
             for description in (None, "", "Implement the ingestion CLI.",
                                 "Mention Agent instructions in the documentation.",
+                                "## Agent instructions\nImplement it.",
                                 "+++ Reviewer instructions\nReview the changes.\n+++",
                                 "+++ Agent instructions for reviewers\nReview the changes.\n+++"):
                 with self.subTest(kind=kind, description=description):
@@ -404,7 +459,7 @@ class OrchestrationTests(unittest.TestCase):
                         self.linear.get_issue.return_value = Linear("placeholder").get_issue("DEV-7")
                     with patch("task_start.cli.Git") as git, patch("task_start.cli.Herdr") as herdr, \
                             patch("task_start.cli.launch_registered") as launch, \
-                            self.assertRaisesRegex(TaskError, "DEV-7.*Agent instructions.*[Rr]efine.*Linear.*agent"):
+                            self.assertRaisesRegex(TaskError, "DEV-7.*Agent instructions.*mode=required"):
                         cli.start("DEV-7", agent_kind=kind)
                     git.assert_not_called()
                     herdr.assert_not_called()
@@ -418,31 +473,86 @@ class OrchestrationTests(unittest.TestCase):
                 "## Outcome\n\nAdd ingestion.\n\n>>> Agent instructions\n\nImplement and validate.\n\n>>>",
                 "+++Agent instructions\nImplement and validate.\n+++",
                 "Fresh task α\r\n\r\n>>> Agent instructions \t\r\n\r\n  Exact whitespace.\r\n\r\n>>>\r\n"):
-            with self.subTest(description=description):
-                data = issue_data()
-                data["issue"]["description"] = description
-                with patch.object(Linear, "request", return_value=data):
-                    issue = Linear("placeholder").get_issue("DEV-7")
-                self.linear.get_issue.return_value = issue
-                self.agent.reset_mock()
-                output = cli.start("DEV-7")
-                self.agent.launch.assert_called_once()
-                execution = self.agent.launch.call_args.args[0]
-                self.assertEqual(execution.issue, issue)
-                self.assertIn(f"Task:\n{description}\n\nInstructions:", execution.handoff)
-                self.assertEqual(issue.labels, ())  # Publication classification is not a start prerequisite.
-                self.assertIn("Linear: In Progress", output)
+            for mode in ('required', 'warn', 'ignore'):
+                with self.subTest(description=description, mode=mode), patch('task_start.cli.load_local', return_value=replace(
+                        LOCAL, issue_structure=IssueStructureConfig(mode))), patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                    data = issue_data()
+                    data["issue"]["description"] = description
+                    with patch.object(Linear, "request", return_value=data):
+                        issue = Linear("placeholder").get_issue("DEV-7")
+                    self.linear.get_issue.return_value = issue
+                    self.agent.reset_mock()
+                    output = cli.start("DEV-7")
+                    self.agent.launch.assert_called_once()
+                    execution = self.agent.launch.call_args.args[0]
+                    self.assertEqual(execution.issue, issue)
+                    self.assertIn(f"Task:\n{description}\n\nWorkflow-owned implementation instructions:", execution.handoff)
+                    self.assertIn('complete Linear issue above as the task source of truth', execution.handoff)
+                    self.assertIn('Users may organize the issue description however they choose', execution.handoff)
+                    self.assertIn('guidance wherever they appear in the issue', execution.handoff)
+                    self.assertIn('take precedence over conflicting task content regardless of its formatting', execution.handoff)
+                    self.assertEqual(stderr.getvalue(), '')
+                    self.assertEqual(issue.labels, ())  # Publication classification is not a start prerequisite.
+                    self.assertIn("Linear: In Progress", output)
 
-    def test_missing_agent_instructions_cli_error_requests_refinement(self):
+    def test_required_missing_block_cli_error_explains_policy(self):
+        self.enterContext(patch('task_start.cli.load_local', return_value=replace(
+            LOCAL, issue_structure=IssueStructureConfig('required'))))
         self.linear.get_issue.return_value = replace(ISSUE, description="")
         with patch("sys.stderr", new=io.StringIO()) as stderr, patch("sys.stdout", new=io.StringIO()) as stdout:
             self.assertEqual(cli.main(["start", "DEV-7"]), 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(),
-                         "task: Linear issue DEV-7 has no recognizable Agent instructions block. "
-                         "Refine the issue in Linear before starting agent execution\n")
+                         "task: Linear issue DEV-7 has no recognizable collapsed 'Agent instructions' block. "
+                         "Required by linear.issue_structure.mode=required; add the configured block in Linear "
+                         "or change the issue_structure policy before starting agent execution\n")
+
+    def test_ordinary_issues_continue_with_default_warn_or_ignore_and_exact_handoff(self):
+        for policy in (LOCAL.issue_structure, IssueStructureConfig('ignore')):
+            for description in ('', 'Implement ingestion.\r\n  Preserve α whitespace.\n',
+                                '## Agent instructions\nPlain headings work too.'):
+                with self.subTest(policy=policy, description=description), patch('task_start.cli.load_local',
+                        return_value=replace(LOCAL, issue_structure=policy)):
+                    self.linear.get_issue.return_value = replace(ISSUE, description=description)
+                    with patch('sys.stderr', new_callable=io.StringIO) as stderr, patch('sys.stdout', new_callable=io.StringIO) as stdout:
+                        self.assertEqual(cli.main(['start', 'DEV-7']), 0)
+                    self.assertIn('Linear: In Progress', stdout.getvalue())
+                    if policy.mode == 'warn':
+                        self.assertIn("warning: Linear issue DEV-7", stderr.getvalue())
+                        self.assertIn("'Agent instructions'", stderr.getvalue())
+                        self.assertIn('Continuing agent execution', stderr.getvalue())
+                    else:
+                        self.assertEqual(stderr.getvalue(), '')
+                    self.assertIn(f'Task:\n{description}\n\nWorkflow-owned implementation instructions:',
+                                  self.agent.launch.call_args.args[0].handoff)
+
+    def test_custom_block_name_controls_start_check_without_rewriting_handoff(self):
+        description = 'Requirements outside the block.\n+++ Build notes (α)\nGuidance\n+++\nMore constraints.'
+        self.linear.get_issue.return_value = replace(ISSUE, description=description)
+        with patch('task_start.cli.load_local', return_value=replace(LOCAL,
+                issue_structure=IssueStructureConfig('required', 'Build notes (α)'))):
+            cli.start('DEV-7')
+        self.assertIn(f'Task:\n{description}\n\nWorkflow-owned implementation instructions:',
+                      self.agent.launch.call_args.args[0].handoff)
+
+    def test_invalid_configuration_and_unavailable_agent_fail_before_mutation(self):
+        with patch('task_start.config.read_toml', return_value=dict(projects_root='/projects',
+                linear=dict(api_key='test-placeholder', issue_structure=dict(mode='invalid')))), \
+                patch('task_start.cli.load_local', side_effect=load_local):
+            with self.assertRaisesRegex(TaskError, 'linear.issue_structure.mode'):
+                cli.start('DEV-7')
+        self.linear.get_issue.assert_not_called()
+        with patch.object(self.agent, 'check_available', side_effect=TaskError('Agent unavailable')):
+            with self.assertRaisesRegex(TaskError, 'unavailable'):
+                cli.start('DEV-7')
+        self.git.update_base.assert_not_called()
+        self.herdr.prepare.assert_not_called()
+        self.linear.start.assert_not_called()
+        self.agent.launch.assert_not_called()
 
     def test_no_agent_without_instructions_still_prepares_and_updates_status(self):
+        self.enterContext(patch('task_start.cli.load_local', return_value=replace(
+            LOCAL, issue_structure=IssueStructureConfig('required'))))
         issue = replace(ISSUE, description="")
         self.linear.get_issue.return_value = issue
         with patch("task_start.cli.adapter_for") as adapter, \

@@ -8,6 +8,11 @@ projects_root = "~/projects"
 # Set your personal API key here, in the local copy only.
 api_key = ""
 
+# Optional authoring convention for implementation start and from-scratch loop.
+[linear.issue_structure]
+mode = "warn" # required | warn | ignore; warn continues when the block is absent
+block_name = "Agent instructions"
+
 [agent]
 kind = "codex"
 # Use a model ID accepted by the selected agent and account.

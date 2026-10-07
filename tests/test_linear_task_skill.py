@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -7,6 +8,13 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
+
+from task_start.config import IssueStructureConfig
+from task_start.handoff import implementation_handoff
+from task_start.linear import Issue
+from task_start.preparation import check_issue_structure
+from task_start.workspace import Workspace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -231,6 +239,18 @@ class LinearTaskSkillTests(unittest.TestCase):
         self.assertIn("- Intended workflow labels: `Feature`", description)
         self.assertIn("- Change type: `feat`", description)
         self.assertIn(settings.stop_condition, description)
+
+    def test_generated_issue_remains_valid_full_task_context_in_every_mode(self):
+        description = self.prepare(self.settings())["issue"]["description"]
+        issue = Issue('issue-id', 'DEV-7', 'Example task', 'Example Project', 'todo', 'Todo', 'started',
+                      description=description)
+        workspace = Workspace('dev-7-task', Path('/task'), 'w1', 't1', 'p1', 'prepared')
+        for mode in ('required', 'warn', 'ignore'):
+            with self.subTest(mode=mode), patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                check_issue_structure(issue, IssueStructureConfig(mode))
+                self.assertEqual(stderr.getvalue(), '')
+                self.assertIn(f'Task:\n{description}\n\nWorkflow-owned implementation instructions:',
+                              implementation_handoff(issue, workspace))
 
     def test_each_primary_category_has_one_label_and_its_change_type(self):
         settings = self.settings()

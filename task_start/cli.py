@@ -17,7 +17,7 @@ from .loop import loop
 from .review import review
 from .publish import publish
 from .integrate import abandon_integration, integrate
-from .preparation import prepare_task, require_agent_instructions
+from .preparation import check_issue_structure, prepare_task
 from .workspace import Git, Herdr, slice_slug
 
 
@@ -140,7 +140,7 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
     linear = Linear(local.api_key)
     issue = linear.get_issue(identifier)
     if not no_agent:
-        require_agent_instructions(issue)
+        check_issue_structure(issue, local.issue_structure)
     project = resolve_project(projects, issue.project)
     repo = repository_path(local, project)
     workspace = prepare_task(issue, project, linear, Git(repo), lambda: Herdr(repo), slice=slice)
