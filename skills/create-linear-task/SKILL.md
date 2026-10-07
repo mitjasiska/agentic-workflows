@@ -7,6 +7,8 @@ description: Create or refine a Linear development issue from a rough idea, with
 
 Create one independently understandable, implementable, testable, reviewable, and mergeable issue. Do not split small work merely to give each activity its own issue. Split only when outcomes can genuinely be implemented and reviewed independently; if that decision changes scope materially, ask first.
 
+This optional skill produces a recommended, opinionated authoring convention. Its sections and collapsed `Agent instructions` block are not prerequisites for using Agentic Workflows Lite. Users may organize issues however they choose: execution receives the complete description unchanged and follows task-specific requirements and guidance wherever they appear. The runtime defaults to a non-blocking warning when its configured block is absent; users may choose `ignore` or explicitly opt into `required` for one named block. That presence check gives block contents no additional authority over other task text or workflow-owned lifecycle and safety instructions. Keep this skill's generated `Agent instructions` name unchanged even when runtime validation uses a custom name.
+
 ## Establish context and target
 
 1. Inspect the relevant repository instructions and enough existing implementation to make the issue actionable. Do not turn investigation into implementation.
@@ -25,7 +27,7 @@ Do not create, rename, or delete teams, projects, or labels. Do not read credent
 
 ## Write and classify the issue
 
-Use a concise, human-readable title that can produce a descriptive branch name. Draft only the human sections that materially help:
+Use a concise, human-readable title that can produce a descriptive branch name. For this skill's output, draft only the human sections that materially help:
 
 - `Context / why` is optional; explain why the work exists, not its execution plan.
 - `Scope / outcome` is required and must stand on its own.

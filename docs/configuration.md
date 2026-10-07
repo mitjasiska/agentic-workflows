@@ -2,7 +2,7 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md)
 
-Installation, project mapping, agent selection, repository permission profiles,
+Installation, project mapping, issue structure, agent selection, repository permission profiles,
 and GitHub API credentials for the `task` CLI.
 
 ## Installation and project mapping
@@ -55,6 +55,48 @@ kind = "codex"
 model = "gpt-6-astra"
 mode = "high"
 ```
+
+## Linear issue structure
+
+Linear descriptions are user-defined. The optional
+[`create-linear-task` skill](../skills/create-linear-task/SKILL.md) recommends an
+opinionated structure; using that skill or its template is not required by Lite.
+Configure the single collapsed-block convention in the existing machine-local TOML:
+
+```toml
+[linear.issue_structure]
+mode = "warn" # required | warn | ignore
+block_name = "Agent instructions"
+```
+
+Both fields and the table are optional, with the defaults shown above.
+`task start` with an agent and from-scratch `task loop` share this policy:
+
+| Mode | Missing configured block |
+| --- | --- |
+| `warn` (default) | Print a non-blocking warning to stderr and continue. |
+| `required` | Fail before Git updates, workspace preparation, Linear status changes, or context allocation/agent launch. |
+| `ignore` | Skip the structural check entirely. |
+
+The check recognizes only a line beginning with `+++` or `>>>`, followed by the
+configured block name, matched literally and case-sensitively. Spaces/tabs around
+the name in the marker and CRLF line endings are accepted. It checks marker
+presence only, without parsing block contents or requiring any other heading,
+closing delimiter, or template. For example, `block_name = "Implementation notes"`
+recognizes `+++ Implementation notes` rather than the default name.
+
+Unsupported modes, a non-table policy, unknown policy fields, and non-string,
+empty, multiline, or nonprintable block names are configuration errors, including
+in `ignore` mode. Surrounding spaces in configured names are trimmed.
+Workspace-only preparation (`task start --no-agent`) and cleanup skip these
+execution settings, just as they skip agent selection.
+
+In every mode, the complete current description reaches the implementation agent
+unchanged. Scope, acceptance criteria, constraints, and task-specific guidance may
+appear anywhere; a collapsed block gives its contents no additional authority.
+Separate workflow-owned instructions govern lifecycle and safety behavior.
+The skill continues to generate its default `Agent instructions` block even if
+you configure another name for runtime validation.
 
 ## Agent and reviewer selection
 

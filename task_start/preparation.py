@@ -1,17 +1,26 @@
 """Shared task-start preparation, deliberately separate from agent delivery."""
 
 import re
+import sys
 
 from . import TaskError
+from .config import IssueStructureConfig
 from .ownership import ownership_operation
 from .workspace import branch_name
 
 
-def require_agent_instructions(issue):
-    # Recognize the collapsed section header only; leave the description intact.
-    if not re.search(r"(?m)^(?:\+\+\+|>>>)[ \t]*Agent instructions[ \t]*\r?$", issue.description):
-        raise TaskError(f"Linear issue {issue.identifier} has no recognizable Agent instructions block. "
-                        "Refine the issue in Linear before starting agent execution")
+def check_issue_structure(issue, policy: IssueStructureConfig):
+    if policy.mode == "ignore":
+        return
+    # Recognize only the configured collapsed marker; leave all task text intact.
+    marker = rf"(?m)^(?:\+\+\+|>>>)[ \t]*{re.escape(policy.block_name)}[ \t]*\r?$"
+    if re.search(marker, issue.description):
+        return
+    message = f"Linear issue {issue.identifier} has no recognizable collapsed {policy.block_name!r} block. "
+    if policy.mode == "required":
+        raise TaskError(message + "Required by linear.issue_structure.mode=required; "
+                        "add the configured block in Linear or change the issue_structure policy before starting agent execution")
+    print("task: warning: " + message + "Continuing agent execution (linear.issue_structure.mode=warn).", file=sys.stderr)
 
 
 @ownership_operation

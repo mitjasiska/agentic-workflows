@@ -75,7 +75,14 @@ Start with a Linear issue, or use the
 [`create-linear-task` skill](skills/create-linear-task/SKILL.md) to turn a rough
 idea into one. It supports implementation, research, and experiment tasks, keeping
 the human specification visible and execution guidance in a collapsed
-`Agent instructions` section. Task creation is separate from the `task` CLI.
+`Agent instructions` section. This is the optional skill's recommended, opinionated
+authoring convention. You can organize Linear issues however your team prefers;
+the complete description supplies task context. Task creation is separate from the `task` CLI.
+
+By default, `task start` and from-scratch `task loop` warn and continue when that
+block is absent. Configure one block name and a `required`, `warn`, or `ignore`
+policy in [Linear issue structure settings](docs/configuration.md#linear-issue-structure).
+Only an explicit `required` policy makes the configured block a prerequisite.
 
 The standalone skill is validated with Codex; other skill hosts have not been
 verified. Use it from this repository, or install the whole directory:
@@ -166,7 +173,7 @@ resume requirements.
 
 ### Automate implementation, fixes, and review
 
-Start an agent-ready issue with one command:
+Start implementation and review of a Linear issue with one command:
 
 ```sh
 task loop DEV-7
