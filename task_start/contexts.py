@@ -428,8 +428,9 @@ def pending_launch(execution, context_id, registry, herdr, *, require_idle=False
             or any(p.get("agent") for p in panes if p["workspace_id"] == workspace.workspace_id)):
         raise TaskError("Reserved implementation shell is missing, occupied, or changed; no launch is safe")
     if require_idle:
-        # Recovery needs positive absence evidence, not a missing/partial agent
-        # report. Keep the original context and terminal; never discover sessions.
+        # Herdr may omit agent/session and report unknown for ordinary shells.
+        # Metadata only rules out conflicts; every related pane still needs the
+        # positive shell/process proof below. Never discover or adopt sessions.
         if (any(context[k] is not None for k in ("session_id", "session_kind", "herdr_session"))
                 or context["resumability"] != "unknown"):
             raise TaskError("Reserved implementation has provider/session or uncertain runtime evidence")
@@ -440,9 +441,8 @@ def pending_launch(execution, context_id, registry, herdr, *, require_idle=False
                     and not any(isinstance(p, str) and Path(p).is_absolute()
                                 and Path(p).resolve().is_relative_to(workspace.path) for p in paths)):
                 continue
-            if (any(k not in current for k in ("agent", "agent_session", "agent_status"))
-                    or current["agent"] is not None or current["agent_session"] is not None
-                    or current["agent_status"] not in (None, "idle", "done")):
+            if (current.get("agent") is not None or current.get("agent_session") is not None
+                    or current.get("agent_status") not in (None, "unknown", "idle", "done")):
                 raise TaskError(f"Pane {current['pane_id']} has provider/session or uncertain runtime evidence")
             related.append(current)
         others = [c for c in registry.list() if c["context_id"] != context_id]
