@@ -35,6 +35,11 @@ class IssueStructureConfig:
 
 
 @dataclass(frozen=True)
+class ReviewValidationConfig:
+    strategy: str = "focused_first"
+
+
+@dataclass(frozen=True)
 class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
@@ -42,6 +47,7 @@ class LocalConfig:
     codex_repository_profiles: Mapping[str, str] = field(default_factory=dict)
     reviewer: AgentConfig | None = None
     issue_structure: IssueStructureConfig = field(default_factory=IssueStructureConfig)
+    review_validation: ReviewValidationConfig = field(default_factory=ReviewValidationConfig)
 
 
 def read_toml(path: Path) -> dict:
@@ -69,6 +75,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         raise TaskError("Linear api_key must not contain whitespace")
     structure = (IssueStructureConfig() if no_agent
                  else issue_structure_config(data["linear"].get("issue_structure", {})))
+    validation = (ReviewValidationConfig() if no_agent
+                  else review_validation_config(data.get("review", {})))
     try:
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
@@ -76,7 +84,7 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         agent = None if no_agent else agent_config(data.get("agent"))
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
         reviewer = None if no_agent else agent_config(data.get("reviewer"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure)
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 
@@ -91,6 +99,18 @@ def issue_structure_config(data: dict) -> IssueStructureConfig:
     if not isinstance(name, str) or not name.strip() or not name.isprintable():
         raise TaskError("linear.issue_structure.block_name must be nonempty printable text on one line")
     return IssueStructureConfig(mode.strip(), name.strip())
+
+
+def review_validation_config(data: dict) -> ReviewValidationConfig:
+    if not isinstance(data, dict) or set(data) - {"validation"}:
+        raise TaskError("review must be a table supporting only validation")
+    validation = data.get("validation", {})
+    if not isinstance(validation, dict) or set(validation) - {"strategy"}:
+        raise TaskError("review.validation must be a table supporting only strategy")
+    strategy = validation.get("strategy", "focused_first")
+    if not isinstance(strategy, str) or strategy.strip() not in {"focused_first", "exhaustive"}:
+        raise TaskError("review.validation.strategy must be focused_first or exhaustive")
+    return ReviewValidationConfig(strategy.strip())
 
 
 def agent_config(data: dict | None) -> AgentConfig | None:

@@ -158,6 +158,12 @@ workspace; a workspace prepared only with `--no-agent` is not sufficient. Review
 does not advance the base or change Linear. Keep the checkout stable during a
 pass: observed changes invalidate the result.
 
+Validation guidance defaults to focused tests and complete findings batches,
+deferring expensive full-suite checks on findings passes. Otherwise-clean reviews
+still require final testing specified by the issue and repository. Configure
+[`review.validation.strategy`](docs/configuration.md#review-validation) as
+`exhaustive` to request full validation on every pass.
+
 After addressing findings yourself or in the implementation session, choose a
 fresh review for a new independent assessment, or `--resume` with an exact review
 context ID for a follow-up in that reviewer's conversation. Resume retains the

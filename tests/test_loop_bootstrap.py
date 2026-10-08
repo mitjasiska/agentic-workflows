@@ -289,6 +289,18 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual(self.registry.list(), [])
         self.assertFalse(self.path.exists())
 
+    def test_invalid_validation_configuration_fails_before_preparation(self):
+        with patch('task_start.config.read_toml', return_value=dict(projects_root='/projects',
+                linear=dict(api_key='test-placeholder'), review=dict(validation=dict(strategy='invalid')))), \
+                patch('task_start.loop.load_local', side_effect=load_local):
+            with self.assertRaisesRegex(TaskError, 'review.validation.strategy'):
+                self.run_loop()
+        self.linear.get_issue.assert_not_called()
+        self.assertEqual(self.preparation, [])
+        self.linear.start.assert_not_called()
+        self.assertEqual(self.registry.list(), [])
+        self.assertFalse(self.path.exists())
+
     def codex_transport(self):
         self.local = replace(self.local, agent=fixture.AgentConfig('codex', 'initial-codex', 'high'))
         self.enterContext(patch('task_start.implementation_pass.adapter_for', side_effect=Codex))
@@ -561,6 +573,12 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertIn('Continue in YOUR existing', self.impl_prompts[1])
         self.assertIn('"finding_id": "F1"', self.prompts[1])
         self.assertEqual(self.recreated, [False])
+
+        for prompt in self.prompts:
+            self.assertIn('REVIEW VALIDATION POLICY: focused_first', prompt)
+        for prompt in self.impl_prompts:
+            self.assertIn('test-first / red-green-refactor', prompt)
+            self.assertIn('fix the complete batch and rerun relevant tests', prompt)
 
     def test_existing_default_workspace_is_reused_and_work_preserved(self):
         self.prepared_workspace()

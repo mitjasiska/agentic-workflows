@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from task_start import TaskError, cli
 from task_start.agent import HerdrAgentAdapter
+from task_start.config import ReviewValidationConfig
 from task_start.implementation_pass import parse_implementation
 from task_start.loop import loop
 from task_start.loop_state import LoopStore
@@ -213,6 +214,19 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertEqual([r["phase"] for r in after["records"]], ["review", "fixes", "rereview"])
         self.assertEqual([r["context_id"] for r in after["records"]],
                          ["DEV-7-R1", self.implementation, "DEV-7-R1"])
+        for prompt in self.prompts:
+            self.assertIn('REVIEW VALIDATION POLICY: focused_first', prompt)
+
+    def test_exhaustive_policy_reaches_loop_review_and_rereview(self):
+        self.local = replace(self.local, review_validation=ReviewValidationConfig('exhaustive'))
+        self.review_results = [findings(finding()), {}]
+        result = self.run_loop(from_review=True)
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(len(self.prompts), 2)
+        for prompt in self.prompts:
+            self.assertIn('REVIEW VALIDATION POLICY: exhaustive', prompt)
+            self.assertIn('full validation on every review pass, even with actionable findings', prompt)
+        self.assertIn('YOUR existing conversation', self.prompts[1])
 
     def test_from_review_initial_pause_status_and_continue_preserve_boundary(self):
         paused = self.pause_before_first_review()

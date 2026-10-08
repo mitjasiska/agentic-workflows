@@ -36,7 +36,12 @@ then starts the selected adapter in the returned pane and sends the same workflo
 owned handoff: current identifier, title, exact description, resolved checkout,
 branch, optional slice, and standard implementation instructions. Both agents
 are told to read repository instructions, inspect before editing, implement the
-requested scope, run relevant validation, and stop for independent review without
+requested scope, prefer test-first / red-green-refactor for testable behavior and
+fixes where practical, and use focused tests (including new or changed tests) plus
+inexpensive syntax/lint/diff checks during implementation. TDD is optional for docs,
+UI/visual work, research, and other unsuitable tasks. Expensive full suites are not
+the default during iteration; explicit issue/repository requirements still govern
+final validation. Agents stop for independent review without
 committing, pushing, merging, or opening a PR. The Python workflow owns the Linear
 lookup; the execution agent is told not to contact Linear or read its credentials.
 No task description file is written into the worktree.
@@ -214,6 +219,40 @@ and labels it with that exact context ID. It never prepares another worktree or
 inherits implementation or previous reviewer conversation. Codex and Pi use the
 shared execution adapters and repository permission profiles. Those permission
 capabilities do not authorize task writes during review.
+
+### Validation guidance
+
+Fresh reviews and same-reviewer re-reviews share the
+[review validation strategy](configuration.md#review-validation), defaulting to
+`focused_first`. Reviewers inspect the full diff and requirements, assess test
+quality (meaningful assertions and missing edge cases), and collect a complete
+batch of substantive actionable findings. They continue inspecting after a defect
+and run targeted tests needed to investigate potential problems.
+
+On a findings pass, `focused_first` skips expensive full-suite validation before
+reporting the batch; checks explicitly required on every pass still apply.
+The implementer fixes the batch and reruns relevant tests, then the same reviewer
+rechecks fixes and regressions (`task review --resume` or the loop's automatic
+re-review). `exhaustive` requests full validation even on findings passes, with
+the same inspection and batching obligations.
+
+When otherwise clean, reviewers run all final validation required by the Linear
+issue and repository policy, including a full suite when required. Explicit
+requirements such as "all tests must pass" are never weakened. Enforced, evidenced
+CI may serve as a separately identified final merge gate where those requirements
+permit it; reviewers cannot assume CI exists or silently substitute it for checks.
+
+Tests must not mutate tracked or untracked Git-visible task state. If a check
+cannot run safely, reviewers record `not_run` and explain why; restoring test
+mutations afterward does not make the test safe. Existing `checks` entries report
+commands, observed results, failures, skipped checks and reasons, and evidence for
+any separate CI gate. An unrun check cannot be reported as passed, and missing
+required final validation without a permitted, evidenced gate cannot be claimed
+as a clean review.
+
+This is prompt guidance, not controller-enforced proof of command execution. The
+existing result/publication acceptance and Git snapshot safety contracts remain
+unchanged.
 
 ### Workspace resolution and pinned state
 

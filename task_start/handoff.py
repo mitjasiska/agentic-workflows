@@ -1,6 +1,7 @@
 """Purpose-specific semantic handoffs constructed by workflow commands."""
 
 from . import TaskError
+from .config import ReviewValidationConfig
 from .linear import Issue
 from .review_result import publication_fingerprint, publication_summary_limit
 from .workspace import Workspace
@@ -14,7 +15,11 @@ IMPLEMENTATION_INSTRUCTIONS = """- Treat the complete Linear issue above as the 
 - Read AGENTS.md and other repository instructions first.
 - Inspect the existing implementation before changing anything.
 - Implement only the requested scope.
-- Run relevant tests and practical validation.
+- Prefer test-first / red-green-refactor where practical for testable behavior and fixes; this is a preference, not mandatory for docs, UI/visual work, research, or other unsuitable tasks.
+- Use focused tests throughout implementation, including new or changed tests, plus inexpensive syntax/lint/diff checks as applicable. Do not run an expensive full suite by default during iteration.
+- Explicit Linear issue and repository validation requirements remain authoritative; complete required final validation before reporting ready for review.
+- When review findings are supplied, fix the complete batch and rerun relevant tests before the same reviewer rechecks fixes and regressions.
+- Report exactly what was run, skipped, or failed and why; use the existing checks fields when a structured result is requested. Never report an unrun check as passed.
 - Do not commit, push, merge, or open a PR.
 - Do not use sudo or destructive Git operations.
 - Stop when the implementation is ready for independent review.
@@ -22,6 +27,35 @@ IMPLEMENTATION_INSTRUCTIONS = """- Treat the complete Linear issue above as the 
 - Do not connect to Linear, re-fetch this issue, or read Linear credentials or the local workflow config.
 - Do not write the Linear task description into the repository.
 """
+
+
+REVIEW_VALIDATION_INSTRUCTIONS = """Inspect the full diff and requirements, and assess test quality, including
+meaningful assertions and missing edge cases. Collect a complete batch of substantive actionable findings.
+Do not stop at the first defect. Run targeted tests needed to investigate potential problems.
+The implementer fixes the batch and reruns relevant tests; the same reviewer rechecks fixes and regressions.
+Explicit Linear issue and repository validation requirements remain authoritative under either strategy,
+including requirements such as "all tests must pass"; this guidance never weakens them.
+When otherwise clean, run all final validation required by the Linear issue and repository policy,
+including a full suite when required. Enforced, evidenced CI may serve as a separately identified final merge gate
+where permitted by those requirements. Never assume CI exists or substitute unevidenced CI for required checks.
+Validation must not mutate tracked or untracked Git-visible task state. Do not run unsafe tests and then
+restore their changes; if a check cannot run safely, record it as not_run with the reason.
+Use the existing checks fields to record exactly what was run, skipped, or failed and why, including commands,
+observed results, and evidence for any separate CI gate. Never report an unrun check as passed.
+If required final validation cannot be completed safely and no permitted, evidenced merge gate covers it,
+report the limitation and do not claim a clean review.
+"""
+
+REVIEW_VALIDATION_STRATEGIES = {
+    "focused_first": """Start with focused validation on both initial review and same-reviewer re-review.
+Once actionable findings are gathered, skip expensive full-suite validation and report the complete batch.
+Continue inspecting for other defects and running targeted investigative tests before reporting;
+finding a defect does not end the full-diff review. Checks explicitly required on every pass still apply.
+""",
+    "exhaustive": """Run full validation on every review pass, even with actionable findings.
+Continue full-diff inspection and collect the complete findings batch before reporting.
+""",
+}
 
 
 def implementation_handoff(issue: Issue, workspace: Workspace) -> str:
@@ -75,7 +109,8 @@ def integration_handoff(issue, record, output):
 
 
 def review_handoff(issue, repository, workspace, base, state, context_id, pass_kind,
-                   options, pass_id, result_path, *, frozen_publication=None, loop_feedback=None) -> str:
+                   options, pass_id, result_path, *, frozen_publication=None, loop_feedback=None,
+                   validation=ReviewValidationConfig()) -> str:
     metadata = dict(issue=issue.identifier, title=issue.title, project=issue.project,
                     repository=str(repository), worktree=str(workspace.path), task_branch=workspace.branch,
                     base_branch=base, pinned_state=state.as_dict(), context_id=context_id,
@@ -104,6 +139,8 @@ If a slice is recorded, assess that slice and explain any remaining overall requ
 Git-visible drift observed at launch, polling, or final checkpoints permanently
 invalidates this pass, even if later restored; do not try to repair it.
 """
+    instructions += (f"\nREVIEW VALIDATION POLICY: {validation.strategy}\n"
+                     + REVIEW_VALIDATION_INSTRUCTIONS + REVIEW_VALIDATION_STRATEGIES[validation.strategy])
     focus = ("This is a fresh independent review. Do not inherit or retrieve implementation or prior reviewer chat."
              if pass_kind == "fresh" else
              "This is a focused re-review in YOUR existing conversation. Recheck earlier findings against the "
