@@ -262,7 +262,8 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                     pass_observer(allocated, pass_id)
                 return review_handoff(issue, repo, workspace, project.base_branch, before,
                                       context_id, pass_kind, options, pass_id, output, frozen_publication=frozen,
-                                      loop_feedback=loop_feedback, validation=local.review_validation)
+                                      loop_feedback=loop_feedback, validation=local.review_validation,
+                                      scope=local.implementation_scope)
 
             if before_handoff:
                 before_handoff()

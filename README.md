@@ -124,6 +124,12 @@ Set `enabled = false` under `[implementation.task_assessment]` to skip it; the s
 issue-structure policy and workflow safety checks still apply. See
 [readiness configuration and recovery](docs/configuration.md#implementation-task-readiness).
 
+Implementation and independent review default to `strict` scope discipline: prefer
+the smallest coherent solution, including necessary tests, documentation, and
+safety fixes. Set `policy = "balanced"` under `[implementation.scope]` to permit
+justified small adjacent improvements. Both are behavioral guidance without
+diff-size or file-count limits. See [scope configuration](docs/configuration.md#implementation-scope-discipline).
+
 Use `--no-agent` to prepare or focus the workspace without launching an agent.
 It still updates Linear and works without an agent installation or `[agent]`
 configuration. It cannot be combined with agent selection flags. If an agent is

@@ -45,6 +45,11 @@ class TaskAssessmentConfig:
 
 
 @dataclass(frozen=True)
+class ImplementationScopeConfig:
+    policy: str = "strict"
+
+
+@dataclass(frozen=True)
 class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
@@ -54,6 +59,7 @@ class LocalConfig:
     issue_structure: IssueStructureConfig = field(default_factory=IssueStructureConfig)
     review_validation: ReviewValidationConfig = field(default_factory=ReviewValidationConfig)
     task_assessment: TaskAssessmentConfig = field(default_factory=TaskAssessmentConfig)
+    implementation_scope: ImplementationScopeConfig = field(default_factory=ImplementationScopeConfig)
 
 
 def read_toml(path: Path) -> dict:
@@ -83,8 +89,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
                  else issue_structure_config(data["linear"].get("issue_structure", {})))
     validation = (ReviewValidationConfig() if no_agent
                   else review_validation_config(data.get("review", {})))
-    assessment = (TaskAssessmentConfig() if no_agent
-                  else task_assessment_config(data.get("implementation", {})))
+    assessment, scope = ((TaskAssessmentConfig(), ImplementationScopeConfig()) if no_agent
+                         else implementation_config(data.get("implementation", {})))
     try:
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
@@ -92,7 +98,7 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         agent = None if no_agent else agent_config(data.get("agent"))
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
         reviewer = None if no_agent else agent_config(data.get("reviewer"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation, assessment)
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation, assessment, scope)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 
@@ -121,16 +127,22 @@ def review_validation_config(data: dict) -> ReviewValidationConfig:
     return ReviewValidationConfig(strategy.strip())
 
 
-def task_assessment_config(data: dict) -> TaskAssessmentConfig:
-    if not isinstance(data, dict) or set(data) - {"task_assessment"}:
-        raise TaskError("implementation must be a table supporting only task_assessment")
+def implementation_config(data: dict) -> tuple[TaskAssessmentConfig, ImplementationScopeConfig]:
+    if not isinstance(data, dict) or set(data) - {"task_assessment", "scope"}:
+        raise TaskError("implementation must be a table supporting only task_assessment and scope")
     assessment = data.get("task_assessment", {})
     if not isinstance(assessment, dict) or set(assessment) - {"enabled"}:
         raise TaskError("implementation.task_assessment must be a table supporting only enabled")
     enabled = assessment.get("enabled", True)
     if type(enabled) is not bool:
         raise TaskError("implementation.task_assessment.enabled must be a boolean")
-    return TaskAssessmentConfig(enabled)
+    scope = data.get("scope", {})
+    if not isinstance(scope, dict) or set(scope) - {"policy"}:
+        raise TaskError("implementation.scope must be a table supporting only policy")
+    policy = scope.get("policy", "strict")
+    if not isinstance(policy, str) or policy.strip() not in {"strict", "balanced"}:
+        raise TaskError("implementation.scope.policy must be strict or balanced")
+    return TaskAssessmentConfig(enabled), ImplementationScopeConfig(policy.strip())
 
 
 def agent_config(data: dict | None) -> AgentConfig | None:
