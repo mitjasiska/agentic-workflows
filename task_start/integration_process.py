@@ -1,4 +1,4 @@
-"""Read-only local process evidence for explicit execution retirement."""
+"""Read-only local process evidence for startup recovery and execution retirement."""
 
 from dataclasses import dataclass
 import os
@@ -70,6 +70,25 @@ def shell_executable(argv):
     if len(executables) != 1:
         raise TaskError("System shell executable is absent or ambiguous; forced cleanup refused")
     return executables.pop()
+
+
+def verify_shell_process(pid, argv, *, proc=Path("/proc")):
+    """Verify the reported shell itself; an exec-replaced PID is not a shell.
+
+    Read only this selected process, not unrelated host processes. Herdr argv and
+    local executable/cmdline must agree, including ordinary interactive options.
+    """
+    try:
+        executable = shell_executable(argv)
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("invalid shell PID")
+        entry = proc / str(pid)
+        if (not os.path.samefile(entry / "exe", executable)
+                or (entry / "cmdline").read_bytes() != os.fsencode("\0".join(argv) + "\0")):
+            raise ValueError("shell process changed")
+    except (TaskError, OSError, ValueError):
+        raise TaskError("Shell executable/argv is missing, changed, or not an interactive shell; "
+                        "recovery requires readable process evidence on Herdr's host") from None
 
 
 # Linux include/linux/sched.h; exported as unsigned decimal stat field 9.

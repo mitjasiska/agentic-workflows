@@ -1,21 +1,27 @@
 """Initial loop launches with real disposable Git/checkpoint/registry boundaries."""
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+import copy
 import io
 import json
 import re
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from task_start import TaskError, cli
 from task_start.agent import AgentOptions, Codex, LaunchResult, Pi, adapter_for
 from task_start.config import IssueStructureConfig, load_local
 from task_start.contexts import ContextRegistry, context_reference
 from task_start.handoff import implementation_handoff
-from task_start.loop import loop
+from task_start.integration_process import verify_shell_process
+from task_start.loop import loop, LoopRuntime
 from task_start.loop_state import LoopStore
+from task_start.linear import Linear
 from task_start.workspace import Git, Herdr
 from test_loop import ImplementationAdapter, finding, findings
 import test_loop as loop_fixture
@@ -141,10 +147,18 @@ class InitialAdapter(ImplementationAdapter):
 
 class BootstrapLoopTests(unittest.TestCase):
     command = loop_fixture.LoopIntegrationTests.command
-    pane_command = loop_fixture.LoopIntegrationTests.pane_command
     run_loop = loop_fixture.LoopIntegrationTests.run_loop
     pause = loop_fixture.LoopIntegrationTests.pause
     continue_loop = loop_fixture.LoopIntegrationTests.continue_loop
+
+    def pane_command(self, group, operation, *args):
+        if (group, operation) == ('pane', 'process-info'):
+            self.assertEqual(args[0], '--pane')
+            pane_id = args[1]
+            pid = {'p1': 123, 'p2': 124}[pane_id]
+            return dict(process_info=dict(pane_id=pane_id, shell_pid=pid,
+                foreground_process_group_id=pid, foreground_processes=[dict(pid=pid, argv=['bash'])]))
+        return loop_fixture.LoopIntegrationTests.pane_command(self, group, operation, *args)
 
     def select_adapter(self, options):
         # Validate supported options even with controlled agent transport.
@@ -159,6 +173,14 @@ class BootstrapLoopTests(unittest.TestCase):
         self.registry = ContextRegistry(self.repo.parent / 'initial-contexts.sqlite3')
         self.enterContext(patch('task_start.loop.ContextRegistry', return_value=self.registry))
         self.panes[0].update(agent=None, agent_session=None, label='Shell')
+        self.proc = self.repo.parent / 'bootstrap-proc'
+        for pid in (123, 124):
+            entry = self.proc / str(pid)
+            entry.mkdir(parents=True)
+            (entry / 'exe').symlink_to('/bin/bash')
+            (entry / 'cmdline').write_bytes(b'bash\0')
+        self.enterContext(patch('task_start.contexts.verify_shell_process',
+            side_effect=lambda pid, argv: verify_shell_process(pid, argv, proc=self.proc)))
         self.implementer = InitialAdapter(self)
         self.enterContext(patch('task_start.implementation_pass.adapter_for', side_effect=self.implementation_adapter))
         self.linear.get_issue.return_value = fixture.ISSUE
@@ -222,6 +244,652 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual((result.data['passes'], result.data['reviews']), (0, 0))
         self.assertEqual(self.launches, [])
         return result
+
+    def fail_before_launch(self, **kwargs):
+        read = Linear('test-placeholder').get_issue
+        calls = 0
+        def issue(identifier):
+            nonlocal calls
+            calls += 1
+            return fixture.ISSUE if calls == 1 else read(identifier)
+        with patch.object(self.linear, 'get_issue', side_effect=issue), \
+                patch('task_start.linear.urlopen', side_effect=HTTPError(
+                    'private-url', 503, 'private-body', {}, None)) as transport, \
+                patch('task_start.linear.time.sleep'), patch('sys.stderr', new_callable=io.StringIO):
+            result = self.run_loop(**kwargs)
+        self.assertEqual(transport.call_count, 3)
+        self.assertEqual(result.state, 'escalated', result.render())
+        state, pause = self.store.read()
+        self.assertFalse(pause)
+        self.assertEqual((state['pass_count'], state['review_count'], state['active_pass']), (0, 0, None))
+        self.assertEqual(state['next_phase'], 'initial_implementation')
+        self.assertEqual(state['implementation'], dict(context_id='DEV-7-I1'))
+        self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'launching')
+        self.assertIsNone(context_reference(self.registry.get('DEV-7-I1')))
+        self.assertEqual(self.launches, [])
+        return result
+
+    def test_repeat_command_recovers_503_reservation_once_with_saved_settings(self):
+        failed = self.fail_before_launch(max_reviews=2, max_passes=4, impl_model='saved-model')
+        self.assertIn('task loop DEV-7', failed.render())
+        before = self.store.read()[0]
+        # Defaults/config changes must not override either role or saved bounds.
+        self.local = replace(self.local, agent=None, reviewer=None)
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        after = self.store.read()[0]
+        for key in ('run_id', 'binding', 'requirements', 'implementation_options', 'reviewer_options',
+                    'timeout', 'max_reviews', 'max_passes'):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(after['implementation']['context_id'], 'DEV-7-I1')
+        self.assertEqual((len(self.launches), len(self.impl_prompts), len(self.prompts)), (1, 1, 1))
+        self.assertEqual([r['phase'] for r in after['records']], ['initial_implementation', 'review'])
+        self.assertEqual(self.preparation, ['base', 'create', 'linear'])
+        self.linear.start.assert_called_once()
+        with self.assertRaises(TaskError):
+            loop('DEV-7')
+        self.assertEqual(len(self.launches), 1)
+
+    def test_startup_read_recovers_within_same_command_retry_budget(self):
+        read = Linear('placeholder').get_issue
+        calls = 0
+        def issue(identifier):
+            nonlocal calls
+            calls += 1
+            return read(identifier) if calls == 2 else fixture.ISSUE
+        with patch.object(self.linear, 'get_issue', side_effect=issue), \
+                patch('task_start.linear.urlopen', side_effect=[
+                    HTTPError('private-url', 503, 'private-body', {}, None),
+                    io.BytesIO(json.dumps({'data': fixture.baseline.issue_data()}).encode())]) as transport, \
+                patch('task_start.linear.time.sleep'), patch('sys.stderr', new_callable=io.StringIO):
+            result = self.run_loop()
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(transport.call_count, 2)
+        self.assertEqual((len(self.launches), len(self.impl_prompts), len(self.prompts)), (1, 1, 1))
+
+    def test_legacy_503_checkpoint_uses_evidence_not_diagnostic_wording(self):
+        self.fail_before_launch()
+        state, _ = self.store.read()
+        state['reason'] = ('Linear HTTP error 503; check credentials/access or retry. '
+                           'Inspect contexts before recovery; no handoff was retried')
+        self.store.save(state)
+        result = loop('DEV-7', impl_agent_kind='pi', impl_model='implementer', impl_mode='low',
+                      agent_kind='codex', model='review-model', mode='high',
+                      timeout=0.02, max_reviews=3, max_passes=6)
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(result.data['run_id'], state['run_id'])
+
+    def test_persistent_or_invalid_linear_read_preserves_failed_reservation(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        context = self.registry.get('DEV-7-I1')
+        for code, count in ((503, 3), (401, 1)):
+            with self.subTest(code=code), patch.object(self.linear, 'get_issue',
+                    side_effect=Linear('placeholder').get_issue), \
+                    patch('task_start.linear.urlopen', side_effect=HTTPError(
+                        'private-url', code, 'private-body', {}, None)) as transport, \
+                    patch('task_start.linear.time.sleep'), patch('sys.stderr', new_callable=io.StringIO):
+                with self.assertRaisesRegex(TaskError, 'reservation retained' if code == 503 else 'recovery blocked'):
+                    loop('DEV-7')
+                self.assertEqual(transport.call_count, count)
+            self.assertEqual(self.store.read(), before)
+            self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(loop('DEV-7').state, 'clean')
+
+    def test_recovery_rejects_conflicting_overrides_without_mutation(self):
+        self.fail_before_launch()
+        before, context = self.store.read(), self.registry.get('DEV-7-I1')
+        for override in (dict(impl_agent_kind='codex'), dict(impl_model='other'), dict(impl_mode='high'),
+                         dict(agent_kind='pi'), dict(model='other'), dict(mode='low'),
+                         dict(timeout=12), dict(max_passes=4), dict(max_reviews=2), dict(from_review=True)):
+            with self.subTest(override=override), self.assertRaisesRegex(TaskError, 'conflicts'):
+                loop('DEV-7', **override)
+            self.assertEqual(self.store.read(), before)
+            self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_refuses_git_requirements_and_binding_drift(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        for changes in (dict(title='different'), dict(description='changed requirements'), dict(project='other')):
+            with self.subTest(changes=changes), patch.object(self.linear, 'get_issue',
+                    return_value=replace(fixture.ISSUE, **changes)), self.assertRaisesRegex(TaskError, 'recovery blocked'):
+                loop('DEV-7')
+            self.assertEqual(self.store.read(), before)
+        # The binding must still match even when the changed checkpoint is valid JSON/schema.
+        for key, value in (('repository', '/different/repo'), ('worktree', '/different/worktree'),
+                           ('branch', 'other-branch'), ('base_branch', 'other-base'),
+                           ('endpoint', '/other.sock'), ('workspace_id', 'other-workspace')):
+            with self.subTest(binding=key):
+                changed = copy.deepcopy(before[0])
+                changed['binding'][key] = value
+                if key == 'branch':
+                    changed['snapshot']['branch'] = value
+                self.store.save(changed)
+                with self.assertRaises(TaskError):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read()[0], changed)
+                self.store.save(before[0])
+        for edit in ('untracked', 'tracked', 'index', 'head', 'base'):
+            with self.subTest(edit=edit):
+                case = BootstrapLoopTests()
+                case.setUp()
+                try:
+                    case.fail_before_launch()
+                    checkpoint, context = case.store.read(), case.registry.get('DEV-7-I1')
+                    if edit == 'untracked':
+                        (case.path / 'unexpected').write_text('changed')
+                    elif edit in ('tracked', 'index'):
+                        tracked = case.command(case.path, 'ls-files').splitlines()[0]
+                        (case.path / tracked).write_text('changed')
+                        if edit == 'index':
+                            case.command(case.path, 'add', tracked)
+                    else:
+                        case.command(case.repo if edit == 'base' else case.path,
+                                     'commit', '--allow-empty', '-m', 'changed history')
+                    with self.assertRaisesRegex(TaskError, 'Checkout/base changed'):
+                        loop('DEV-7')
+                    self.assertEqual(case.store.read(), checkpoint)
+                    self.assertEqual(case.registry.get('DEV-7-I1'), context)
+                    self.assertEqual(case.launches, [])
+                finally:
+                    case.doCleanups()
+
+    def test_recovery_refuses_changed_or_ambiguous_reserved_runtime(self):
+        self.fail_before_launch()
+        before, original = self.store.read(), copy.deepcopy(self.panes)
+        for change in (dict(terminal_id='replaced'), dict(pane_id='replaced'), dict(tab_id='moved'),
+                       dict(workspace_id='moved'), dict(cwd=str(self.repo)),
+                       dict(agent='pi'), dict(agent_status='working'), dict(agent_status='unknown'),
+                       dict(agent_session=dict(agent='pi', kind='path', value='/existing.jsonl'))):
+            with self.subTest(change=change):
+                self.panes = [dict(original[0], **change)]
+                with self.assertRaisesRegex(TaskError, 'recovery blocked'):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read(), before)
+        for panes in ([], [original[0], dict(original[0], pane_id='p2')],
+                      [original[0], dict(original[0], pane_id='p2', terminal_id='t2', agent='codex')]):
+            self.panes = panes
+            with self.subTest(panes=panes), self.assertRaisesRegex(TaskError, 'recovery blocked'):
+                loop('DEV-7')
+            self.assertEqual(self.store.read(), before)
+        self.panes = original
+        for missing in ('agent', 'agent_session'):
+            self.panes = copy.deepcopy(original)
+            del self.panes[0][missing]
+            with self.assertRaisesRegex(TaskError, 'un[c]?ertain runtime'):
+                loop('DEV-7')
+        self.panes = original
+        for info in ({}, dict(pane_id='other', shell_pid=123, foreground_process_group_id=123,
+                             foreground_processes=[dict(pid=123)]),
+                     dict(pane_id='p1', shell_pid=123, foreground_process_group_id=456,
+                          foreground_processes=[dict(pid=456)])):
+            with patch.object(self.identities, 'command', return_value=dict(process_info=info)), \
+                    self.assertRaisesRegex(TaskError, 'busy or its process identity is unverified'):
+                loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_refuses_changed_reserved_context_and_foreign_claim(self):
+        self.fail_before_launch()
+        before, original = self.store.read(), self.registry.get('DEV-7-I1')
+        changes = (dict(state='uncertain'), dict(state='active'), dict(state='awaiting_user'),
+                   dict(session_id='/session.jsonl', session_kind='path'), dict(session_kind='path'),
+                   dict(herdr_session='{}'), dict(resumability='yes'), dict(model='other'), dict(mode='high'),
+                   dict(worktree=str(self.repo)), dict(endpoint='/other.sock'), dict(role='review'))
+        for change in changes:
+            with self.subTest(change=change):
+                with self.registry.connection(write=True) as db:
+                    db.execute('UPDATE contexts SET ' + ', '.join(k + '=?' for k in change), tuple(change.values()))
+                with self.assertRaises(TaskError):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read(), before)
+                with self.registry.connection(write=True) as db:
+                    db.execute('UPDATE contexts SET ' + ', '.join(k + '=?' for k in change),
+                               tuple(original[k] for k in change))
+        # Another issue can also claim this terminal/workspace; labels cannot exempt it.
+        self.registry.allocate('DEV-8', 'review', agent='pi', repository=str(self.repo),
+            worktree=str(self.path), endpoint='/server.sock', workspace_id='w1', terminal_id='term1')
+        with self.assertRaisesRegex(TaskError, 'Another workflow context conflicts'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.launches, [])
+
+    def test_simultaneous_retries_launch_only_once(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        entered, release = threading.Event(), threading.Event()
+        prepare = LoopRuntime.prepare
+        def held(runtime, state):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError('Retry test was not released')
+            return prepare(runtime, state)
+        with patch.object(LoopRuntime, 'prepare', held), ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(loop, 'DEV-7')
+            try:
+                self.assertTrue(entered.wait(10))
+                with self.assertRaisesRegex(TaskError, 'Another review or publication'):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read(), before)
+            finally:
+                release.set()
+            result = first.result(timeout=20)
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual((len(self.launches), len(self.impl_prompts), len(self.prompts)), (1, 1, 1))
+
+    def test_restart_compare_and_swap_preserves_new_checkpoint_evidence(self):
+        self.fail_before_launch()
+        prepare = LoopRuntime.prepare
+        changed = copy.deepcopy(self.store.read()[0])
+        changed['reason'] = 'Changed by another observer'
+        def change(runtime, state):
+            prepare(runtime, state)
+            self.store.save(changed)
+        with patch.object(LoopRuntime, 'prepare', change), self.assertRaisesRegex(TaskError, 'checkpoint changed'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read()[0], changed)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_keeps_sticky_pause_before_handoff(self):
+        self.fail_before_launch()
+        self.assertTrue(self.pause().data['pause_requested'])
+        with self.assertRaisesRegex(TaskError, 'Only a paused'):
+            self.continue_loop()
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'paused', result.render())
+        self.assertEqual(self.launches, [])
+        self.assertTrue(self.store.read()[1])
+        self.assertEqual(self.continue_loop().state, 'clean')
+
+    def pause_recovered_initial(self):
+        self.fail_before_launch()
+        self.assertTrue(self.pause().data['pause_requested'])
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'paused', result.render())
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_continue_rejects_exec_replaced_shell_after_pause(self):
+        self.pause_recovered_initial()
+        context = self.registry.get('DEV-7-I1')
+        # The old proof had matching PID and argv; only the executable changes.
+        (self.proc / '123' / 'exe').unlink()
+        (self.proc / '123' / 'exe').symlink_to('/usr/bin/sleep')
+        result = self.continue_loop()
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Shell executable/argv', result.data['reason'])
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_continue_rejects_competing_session_after_pause(self):
+        self.pause_recovered_initial()
+        context = self.registry.get('DEV-7-I1')
+        self.panes.append(dict(self.panes[0], pane_id='p2', terminal_id='term2', agent=None,
+            agent_status='working', agent_session=dict(agent='codex', kind='id', value='other-provider')))
+        self.next_pane_number = 3
+        result = self.continue_loop()
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Pane p2', result.data['reason'])
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_continue_rechecks_runtime_and_base_before_claim(self):
+        for fault in ('shell', 'competing_session', 'base'):
+            with self.subTest(fault=fault):
+                case = BootstrapLoopTests()
+                case.setUp()
+                try:
+                    case.pause_recovered_initial()
+                    context = case.registry.get('DEV-7-I1')
+                    observations = 0
+                    original = case.pane_command
+                    def observe(group, operation, *args):
+                        nonlocal observations
+                        result = original(group, operation, *args)
+                        if operation == 'process-info':
+                            observations += 1
+                            if observations == 2 and fault == 'base':
+                                case.command(case.repo, 'commit', '--allow-empty', '-m', 'Base moved during continuation')
+                        return result
+                    execute = LoopRuntime.execute
+                    def changed(runtime, state, *args):
+                        # After prepare, before the handoff's final claim checks.
+                        if fault == 'shell':
+                            (case.proc / '123' / 'exe').unlink()
+                            (case.proc / '123' / 'exe').symlink_to('/usr/bin/sleep')
+                        elif fault == 'competing_session':
+                            case.panes.append(dict(case.panes[0], pane_id='p2', terminal_id='term2', agent=None,
+                                agent_status='working', agent_session=dict(agent='codex', kind='id', value='competing')))
+                            case.next_pane_number = 3
+                        return execute(runtime, state, *args)
+                    with patch.object(case.identities, 'command', side_effect=observe), \
+                            patch.object(LoopRuntime, 'execute', changed):
+                        result = case.continue_loop()
+                    self.assertEqual(result.state, 'escalated', result.render())
+                    expected = {'shell': 'Shell executable/argv', 'competing_session': 'Pane p2',
+                                'base': 'Base changed before the handoff claim'}[fault]
+                    self.assertIn(expected, result.data['reason'])
+                    self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+                    self.assertEqual(case.registry.get('DEV-7-I1'), context)
+                    self.assertEqual(case.launches, [])
+                finally:
+                    case.doCleanups()
+
+    def test_recovery_continue_reproves_each_pause_and_keeps_original_reservation(self):
+        self.pause_recovered_initial()
+        before = self.store.read()[0]
+        begin = LoopStore.begin
+        def paused(store, state):
+            self.assertTrue(self.pause().data['pause_requested'])
+            return begin(store, state)
+        with patch.object(LoopStore, 'begin', paused):
+            result = self.continue_loop()
+        self.assertEqual(result.state, 'paused', result.render())
+        self.assertEqual(self.launches, [])
+        with patch.object(self.identities, 'command', side_effect=self.pane_command) as command:
+            result = self.continue_loop()
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(sum(c.args[:2] == ('pane', 'process-info') for c in command.call_args_list), 2)
+        after = self.store.read()[0]
+        for key in ('run_id', 'binding', 'requirements', 'snapshot', 'implementation_options',
+                    'reviewer_options', 'timeout', 'max_reviews', 'max_passes'):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(after['implementation']['context_id'], 'DEV-7-I1')
+        self.assertEqual([r['phase'] for r in after['records']], ['initial_implementation', 'review'])
+        self.assertEqual((len(self.launches), len(self.impl_prompts), len(self.prompts)), (1, 1, 1))
+        self.linear.start.assert_called_once()
+
+    def test_recovery_keeps_pause_requested_during_first_preflight(self):
+        self.fail_before_launch()
+        before = self.store.read()[0]
+        entered, release = threading.Event(), threading.Event()
+        prepare = LoopRuntime.prepare
+        def held(runtime, state):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError('Recovery preflight was not released')
+            return prepare(runtime, state)
+        with patch.object(LoopRuntime, 'prepare', held), ThreadPoolExecutor(max_workers=1) as executor:
+            retry = executor.submit(loop, 'DEV-7')
+            try:
+                self.assertTrue(entered.wait(10))
+                paused = self.pause()
+                self.assertEqual(paused.state, 'escalated')
+                self.assertTrue(paused.data['pause_requested'])
+                self.assertEqual(self.store.read(), (before, True))
+            finally:
+                release.set()
+            result = retry.result(timeout=20)
+        self.assertEqual(result.state, 'paused', result.render())
+        self.assertTrue(result.data['pause_requested'])
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.continue_loop().state, 'clean')
+
+    def test_recovery_rejects_exec_replaced_shell_with_same_pid(self):
+        self.fail_before_launch()
+        before, context = self.store.read(), self.registry.get('DEV-7-I1')
+        info = dict(pane_id='p1', shell_pid=123, foreground_process_group_id=123,
+                    foreground_processes=[dict(pid=123, argv=['/usr/bin/sleep', '600'])])
+        with patch.object(self.identities, 'command', return_value=dict(process_info=info)), \
+                self.assertRaisesRegex(TaskError, 'shell'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_requires_shell_argv_and_matching_local_executable(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        for process in (dict(pid=123), dict(pid=123, argv=None), dict(pid=123, argv=[]),
+                        dict(pid=123, argv='bash'), dict(pid=123, argv=['/tmp/bash']),
+                        dict(pid=123, argv=['bash', '-c', 'sleep 600']),
+                        dict(pid=123, argv=['bash', 'script.sh'])):
+            with self.subTest(process=process):
+                info = dict(pane_id='p1', shell_pid=123, foreground_process_group_id=123,
+                            foreground_processes=[process])
+                with patch.object(self.identities, 'command', return_value=dict(process_info=info)), \
+                        self.assertRaises(TaskError):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read(), before)
+        entry = self.proc / '123'
+        for fault in ('exec_replaced', 'stale_argv', 'missing_exe', 'missing_cmdline'):
+            with self.subTest(fault=fault):
+                if fault == 'exec_replaced':
+                    # Even spoofed/stale Herdr argv=['bash'] is insufficient.
+                    (entry / 'exe').unlink()
+                    (entry / 'exe').symlink_to('/usr/bin/sleep')
+                elif fault == 'stale_argv':
+                    (entry / 'cmdline').write_bytes(b'bash\0-c\0sleep 600\0')
+                else:
+                    (entry / fault.removeprefix('missing_')).unlink()
+                with self.assertRaisesRegex(TaskError, 'Shell executable/argv'):
+                    loop('DEV-7')
+                self.assertEqual(self.store.read(), before)
+                if not (entry / 'exe').is_symlink():
+                    (entry / 'exe').symlink_to('/bin/bash')
+                elif fault == 'exec_replaced':
+                    (entry / 'exe').unlink()
+                    (entry / 'exe').symlink_to('/bin/bash')
+                (entry / 'cmdline').write_bytes(b'bash\0')
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_rejects_competing_session_when_other_pane_has_no_agent(self):
+        self.fail_before_launch()
+        before, context = self.store.read(), self.registry.get('DEV-7-I1')
+        self.panes.append(dict(self.panes[0], pane_id='p2', terminal_id='term2', agent=None,
+            agent_status='working', agent_session=dict(agent='codex', kind='id', value='other-provider')))
+        with self.assertRaisesRegex(TaskError, 'runtime evidence'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_refuses_competing_pane_appearing_before_claim(self):
+        self.fail_before_launch()
+        execute = LoopRuntime.execute
+        def competing(runtime, state, *args):
+            self.panes.append(dict(self.panes[0], pane_id='p2', terminal_id='term2',
+                agent_status='working', agent_session=dict(agent='codex', kind='id', value='competing')))
+            return execute(runtime, state, *args)
+        with patch.object(LoopRuntime, 'execute', competing):
+            result = loop('DEV-7')
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Pane p2', result.data['reason'])
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_refuses_exec_replacement_during_final_shell_observation(self):
+        self.fail_before_launch()
+        original = self.pane_command
+        observations = 0
+        def replaced(group, operation, *args):
+            nonlocal observations
+            result = original(group, operation, *args)
+            if operation == 'process-info':
+                observations += 1
+                if observations == 3:
+                    # The PID and even reported argv can remain unchanged/stale.
+                    (self.proc / '123' / 'exe').unlink()
+                    (self.proc / '123' / 'exe').symlink_to('/usr/bin/sleep')
+            return result
+        with patch.object(self.identities, 'command', side_effect=replaced):
+            result = loop('DEV-7')
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Shell executable/argv', result.data['reason'])
+        self.assertEqual((result.data['passes'], result.data['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_checks_absence_evidence_in_all_related_panes(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        other = dict(self.panes[0], pane_id='p2', terminal_id='term2')
+        for change in (dict(agent_status='working'), dict(agent_status='unknown'), dict(agent_status={}),
+                       dict(agent_session=dict(agent='pi', kind='path', value='/other.jsonl')),
+                       dict(agent_session={})):
+            for location in ({}, dict(workspace_id='w2', cwd=str(self.repo), foreground_cwd=str(self.path / 'src'))):
+                with self.subTest(change=change, location=location):
+                    self.panes[:] = [self.panes[0], dict(other, **change, **location)]
+                    with self.assertRaisesRegex(TaskError, 'Pane p2.*runtime evidence'):
+                        loop('DEV-7')
+                    self.assertEqual(self.store.read(), before)
+        for missing in ('agent', 'agent_status', 'agent_session'):
+            self.panes[:] = [self.panes[0], dict(other)]
+            del self.panes[-1][missing]
+            with self.assertRaisesRegex(TaskError, 'Pane p2.*runtime evidence'):
+                loop('DEV-7')
+            self.assertEqual(self.store.read(), before)
+        # A busy unrecognized process in another related pane is also unsafe.
+        self.panes[:] = [self.panes[0], other]
+        (self.proc / '124' / 'exe').unlink()
+        (self.proc / '124' / 'exe').symlink_to('/usr/bin/sleep')
+        with self.assertRaisesRegex(TaskError, 'Shell executable/argv'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_allows_proven_idle_shells_and_ignores_unrelated_workspaces(self):
+        self.fail_before_launch()
+        self.panes.extend([
+            dict(self.panes[0], pane_id='p2', terminal_id='term2'),
+            dict(self.panes[0], pane_id='p3', terminal_id='term3', workspace_id='w3',
+                 cwd=str(self.repo), agent='codex', agent_status='working',
+                 agent_session=dict(agent='codex', kind='id', value='unrelated-session')),
+        ])
+        # The review fake allocates its next pane after these preexisting shells.
+        self.next_pane_number = 4
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual(len(self.launches), 1)
+
+    def test_recovery_pause_survives_another_preflight_failure(self):
+        self.fail_before_launch()
+        before = self.store.read()[0]
+        def paused_failure(runtime, state):
+            self.assertTrue(self.pause().data['pause_requested'])
+            raise TaskError('Temporary preflight failure')
+        with patch.object(LoopRuntime, 'prepare', paused_failure), self.assertRaisesRegex(TaskError, 'preflight failure'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), (before, True))
+        self.assertEqual(loop('DEV-7').state, 'paused')
+        self.assertEqual(self.launches, [])
+
+    def test_pause_does_not_mark_unrecoverable_escalations(self):
+        self.fail_before_launch()
+        before = self.store.read()[0]
+        for change in (dict(status='interrupted'), dict(findings=[dict(id='F1')]),
+                       dict(pass_count=1, active_pass=dict(phase='initial_implementation',
+                                                           context_id='DEV-7-I1', pass_id=None))):
+            changed = dict(before, **change)
+            self.store.save(changed)
+            with self.subTest(change=change):
+                self.assertFalse(self.pause().data['pause_requested'])
+                self.assertEqual(self.store.read(), (changed, False))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_never_restarts_other_states_or_unfinished_claims(self):
+        self.fail_before_launch()
+        original = self.store.read()[0]
+        for status in ('ready', 'interrupted', 'paused', 'running'):
+            changed = dict(original, status=status)
+            if status == 'running':
+                changed.update(pass_count=1, active_pass=dict(phase='initial_implementation',
+                                                             context_id=None, pass_id=None))
+            self.store.save(changed)
+            with self.subTest(status=status), self.assertRaisesRegex(TaskError, 'startup recovery blocked'):
+                loop('DEV-7')
+            self.assertEqual(self.store.read()[0], changed)
+        self.assertEqual(self.launches, [])
+
+    def test_missing_reservation_never_allocates_a_replacement(self):
+        self.fail_before_launch()
+        before, preparation = self.store.read(), list(self.preparation)
+        # Simulate lost registry evidence only in this disposable fixture.
+        with self.registry.connection(write=True) as db:
+            db.execute('DELETE FROM contexts')
+        with self.assertRaisesRegex(TaskError, 'original implementation reservation is missing'):
+            loop('DEV-7')
+        self.assertEqual(self.registry.list(), [])
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.preparation, preparation)
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_rechecks_busy_shell_immediately_before_claim(self):
+        self.fail_before_launch()
+        original = self.pane_command
+        observations = 0
+        def observe(group, operation, *args):
+            nonlocal observations
+            result = original(group, operation, *args)
+            if operation == 'process-info':
+                observations += 1
+                if observations == 3:  # Validation, normal prepare, then handoff boundary.
+                    result['process_info']['foreground_processes'].append(dict(pid=456))
+            return result
+        with patch.object(self.identities, 'command', side_effect=observe):
+            result = loop('DEV-7')
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('busy', result.data['reason'])
+        state, _ = self.store.read()
+        self.assertEqual((state['pass_count'], state['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_rechecks_git_after_shell_observation_before_claim(self):
+        self.fail_before_launch()
+        original = self.pane_command
+        observations = 0
+        def observe(group, operation, *args):
+            nonlocal observations
+            result = original(group, operation, *args)
+            if operation == 'process-info':
+                observations += 1
+                if observations == 3:
+                    (self.path / 'external-change').write_text('Changed during slow shell preflight')
+            return result
+        with patch.object(self.identities, 'command', side_effect=observe):
+            result = loop('DEV-7')
+        self.assertEqual(result.state, 'escalated', result.render())
+        self.assertIn('Checkout changed before the handoff claim', result.data['reason'])
+        state, _ = self.store.read()
+        self.assertEqual((state['pass_count'], state['active_pass']), (0, None))
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_rechecks_base_after_shell_observation_before_claim(self):
+        self.fail_before_launch()
+        original = self.pane_command
+        observations = 0
+        def observe(group, operation, *args):
+            nonlocal observations
+            result = original(group, operation, *args)
+            if operation == 'process-info':
+                observations += 1
+                if observations == 3:
+                    self.command(self.repo, 'commit', '--allow-empty', '-m', 'Base advanced during shell preflight')
+            return result
+        with patch.object(self.identities, 'command', side_effect=observe):
+            result = loop('DEV-7')
+        self.assertEqual(result.state, 'escalated', result.render())
+        state, _ = self.store.read()
+        self.assertEqual((state['pass_count'], state['active_pass']), (0, None))
+        self.assertIn('Base changed before the handoff claim', result.data['reason'])
+        self.assertEqual(self.launches, [])
+
+    def test_recovery_refuses_changed_initial_slice_metadata(self):
+        self.fail_before_launch()
+        before = self.store.read()
+        scope = self.git.scope_file(self.path)
+        changed = json.loads(scope.read_text())
+        changed['slice'] = 'add-ingestion-cli'
+        scope.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(TaskError, 'unsliced'):
+            loop('DEV-7')
+        self.assertEqual(self.store.read(), before)
+        self.assertEqual(self.launches, [])
 
     def test_untouched_issue_initial_handoff_then_fresh_review(self):
         self.local = replace(self.local, issue_structure=IssueStructureConfig('required'))

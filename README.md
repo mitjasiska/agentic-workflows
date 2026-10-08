@@ -202,6 +202,12 @@ initial implementation with a structured completion contract. A validated result
 automatically starts fresh independent review. This startup supports unsliced
 workspaces only.
 
+If Linear remains unavailable before the first handoff, repeat `task loop DEV-7`
+after it recovers. The loop can reuse its original reservation only after proving
+that no handoff was claimed and the requirements, checkout, and empty shell still
+match. Saved selections and bounds stay in effect; uncertain delivery requires
+human inspection. See [startup recovery](docs/lifecycle.md#checkpoint-and-interruption-recovery).
+
 If an implementation context already exists, the loop resumes that idle conversation
 to finish validation and collect its result. If you already know implementation is
 complete, use `task loop DEV-7 --from-review` to start directly with fresh review.
@@ -215,7 +221,8 @@ implementation settings and `[reviewer]` supplies review settings. Optional
 `--i-agent`, `--i-model`, and `--i-mode` override implementation; `--r-agent`,
 `--r-model`, and `--r-mode` override the fresh reviewer. Both roles require explicit
 resolved model and mode. Existing implementation contexts retain their recorded
-settings and reject `--i-*` overrides. Generic `--agent`, `--model`, and `--mode`
+settings and reject `--i-*` overrides, except identical selections during startup
+recovery. Generic `--agent`, `--model`, and `--mode`
 remain available on `task start` and `task review`; `task loop` uses only the
 role-prefixed overrides.
 

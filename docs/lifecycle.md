@@ -444,7 +444,8 @@ from `[agent]` and fresh reviewer settings from `[reviewer]`. Optional `--i-agen
 configuration. Both roles require explicit resolved model and mode before mutation.
 The loop rejects generic `--agent`, `--model`, and `--mode`; those flags are unchanged
 on `task start` and `task review`. Implementation overrides are refused when a
-context already exists, with `--from-review`, and with controls. Existing
+context already exists (except matching saved selections during pre-handoff
+startup recovery), with `--from-review`, and with controls. Existing
 implementation contexts always retain their recorded settings.
 
 When an exact implementation context already exists, start with it idle in the
@@ -508,11 +509,16 @@ is running. Do not type additional agent prompts or edit the checkout during a r
 pause, verifies the exact checkout/base, requirement fingerprint, contexts,
 sessions, and idle runtimes, then executes the pending phase. Before an initial
 launch, it instead verifies the reserved context and its exact empty shell; no
-provider session exists yet. It retains the saved implementation options without
+provider session exists yet. Every continuation awaiting the initial handoff
+repeats the full [startup recovery proof](#checkpoint-and-interruption-recovery),
+including related-pane session/activity checks and the final shell/base checks
+before claiming delivery. Proof obtained before a pause is never reused.
+It retains the saved implementation options without
 rerunning workspace preparation or the Linear transition. It never repeats a
 completed pass. Changes to requirements, checkout, identity, or resumability stop
 for inspection. A later pause remains sticky. `--status`, agent idleness, and
-repeating the ordinary `loop` command never continue a loop. Pause/status find
+repeating the ordinary `loop` command never continue a paused loop. The narrow
+pre-handoff startup recovery exception is described below. Pause/status find
 the checkpoint through the context registry without loading credentials,
 workflow configuration, or Linear; continuation fetches current requirements.
 All three controls resolve the task checkout from implementation/review contexts.
@@ -578,6 +584,63 @@ persistence observer, so later Pi path-only reports retain the verified immutabl
 conversation ID. The same session must serve later fixes. Pi initial
 loop launches load the session reporter used by review; ordinary `task start`
 launch arguments are unchanged.
+
+Read-only Linear issue retrieval retries HTTP 408, 429, 500, 502, 503 and 504,
+connection failures, and timeouts at most twice, waiting 0.5 then 1 second. Each
+request retains its 30-second transport timeout. Diagnostics report only the
+status/failure class and retry count, never credentials or server response bodies.
+Authentication/access errors, malformed JSON/issue data, and GraphQL errors stop
+without retries. Exhausted retries stop the command. Linear mutations are never
+automatically replayed: after an uncertain status update, a later command retrieves
+the issue again before deciding whether an update is still needed. A confirmed
+`In Progress` state needs no write.
+
+An availability failure after reservation but before the first handoff reports
+that you can repeat the ordinary `task loop ISSUE` command. That command can
+recover an **escalated version-3 initial checkpoint** only when it has zero passes
+and reviews, no active claim, no provider identity, no reviewer or completed
+records, and no findings/history. This includes checkpoints from before this
+recovery support; diagnostic wording does not authorize a retry. Fresh validation
+must establish the exact issue/repository/worktree/branch/base/Herdr binding,
+original unsliced task scope, unchanged requirements and pinned Git-visible
+snapshot, and the original
+`launching` context with its original model/mode and terminal. The pane must have
+no session evidence and a positively observed idle foreground shell. PID equality
+alone is insufficient: Herdr's foreground argv must name an ordinary interactive
+system shell and match that process's local executable and command line. This
+requires readable `/proc` evidence on Herdr's host/PID namespace. Other panes in
+the task workspace, or reporting a cwd/foreground cwd in the task checkout, must
+also have explicit sessionless, inactive agent reports and verified shell processes.
+A missing report, a retained provider session, or contradictory activity blocks
+recovery even when the pane reports no agent. Missing,
+replaced, moved, ambiguous, busy, or conflicting contexts/panes refuse recovery.
+Authentication failures, invalid requirements, and continued unavailability do
+not bypass these checks or reset the saved checkpoint.
+
+Recovery holds the same controller lock as review/publication. A short transaction
+compares the entire validated checkpoint before making the initial boundary ready;
+a concurrent retry cannot deliver another handoff. The configured base ref is
+resolved again after shell preflight and compared with the pinned base before
+claiming the handoff; checking only that the old commit exists is insufficient.
+A pending pause is retained, including a request during the first recovery
+preflight while this narrowly recoverable checkpoint still reports `escalated`,
+and the normal state machine must still claim the pass atomically before startup
+or delivery. Such a pause sets only the sticky flag: successful revalidation
+returns `paused` without launching, and `--continue` still requires that paused
+boundary. Other terminal/escalated checkpoints do not acquire this exception.
+The same run ID and I context are used; workspace preparation and
+the Linear status transition are not repeated. Recorded implementation/reviewer
+selections, timeout and bounds survive changed local defaults. Explicit matching
+options are accepted; conflicting overrides and `--from-review` are refused.
+
+Any handoff claim or observed provider identity makes delivery uncertain and
+requires inspection, even with no completed pass. Other escalated, running,
+interrupted, paused, completed, and established-review checkpoints cannot use this
+path. Requirements, Git/base, binding or runtime drift reports the recovery blocker
+without repairing state or allocating a replacement context. `--continue` remains
+exclusive to pauses, and `--new` cannot replace an unfinished initial reservation.
+The failed DEV-75 workspace is a live acceptance candidate only if all these
+checks still pass; development tests use disposable state and do not alter it.
 
 A crash between context reservation and checkpoint creation leaves a `launching`
 context for inspection. A crash after the claim leaves an uncertain active pass,

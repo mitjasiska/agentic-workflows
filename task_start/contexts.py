@@ -10,6 +10,7 @@ import re
 import sqlite3
 
 from . import TaskError
+from .integration_process import verify_shell_process
 from .sessions import merge_session, same_session
 from .ownership import ownership_gate, ownership_operation
 from .workspace import run
@@ -408,7 +409,7 @@ def allocate_launch(execution, registry, herdr):
         terminal_id=pane["terminal_id"])
 
 
-def pending_launch(execution, context_id, registry, herdr):
+def pending_launch(execution, context_id, registry, herdr, *, require_idle=False):
     """A reserved launch is usable only while its original shell is still empty."""
     context = registry.get(context_id)
     workspace = execution.workspace
@@ -426,6 +427,46 @@ def pending_launch(execution, context_id, registry, herdr):
             or Path(pane.get("cwd", "")).resolve() != workspace.path
             or any(p.get("agent") for p in panes if p["workspace_id"] == workspace.workspace_id)):
         raise TaskError("Reserved implementation shell is missing, occupied, or changed; no launch is safe")
+    if require_idle:
+        # Recovery needs positive absence evidence, not a missing/partial agent
+        # report. Keep the original context and terminal; never discover sessions.
+        if (any(context[k] is not None for k in ("session_id", "session_kind", "herdr_session"))
+                or context["resumability"] != "unknown"):
+            raise TaskError("Reserved implementation has provider/session or uncertain runtime evidence")
+        related = []
+        for current in panes:
+            paths = (current.get(k) for k in ("cwd", "foreground_cwd"))
+            if (current["workspace_id"] != workspace.workspace_id
+                    and not any(isinstance(p, str) and Path(p).is_absolute()
+                                and Path(p).resolve().is_relative_to(workspace.path) for p in paths)):
+                continue
+            if (any(k not in current for k in ("agent", "agent_session", "agent_status"))
+                    or current["agent"] is not None or current["agent_session"] is not None
+                    or current["agent_status"] not in (None, "idle", "done")):
+                raise TaskError(f"Pane {current['pane_id']} has provider/session or uncertain runtime evidence")
+            related.append(current)
+        others = [c for c in registry.list() if c["context_id"] != context_id]
+        if any(c["worktree"] == str(workspace.path) or c["endpoint"] == context["endpoint"] and (
+                c["workspace_id"] == workspace.workspace_id or c["terminal_id"] == context["terminal_id"]
+                or c["pane_id"] == workspace.pane_id) for c in others):
+            raise TaskError("Another workflow context conflicts with the reserved implementation")
+        if len(registry.list(execution.issue.identifier, include_retired=True)) != 1:
+            raise TaskError("Context history changed since the original implementation reservation")
+        for current in related:
+            try:
+                process = herdr.command("pane", "process-info", "--pane", current["pane_id"])["process_info"]
+                pid = process["shell_pid"]
+                group, foreground = process["foreground_process_group_id"], process["foreground_processes"]
+                if (process["pane_id"] != current["pane_id"] or type(pid) is not int or pid <= 0
+                        or type(group) is not int or group != pid or not isinstance(foreground, list)
+                        or any(not isinstance(p, dict) or type(p.get("pid")) is not int for p in foreground)
+                        or [p["pid"] for p in foreground] != [pid]):
+                    raise ValueError("not an idle shell")
+                verify_shell_process(pid, foreground[0]["argv"])
+            except (KeyError, TypeError, ValueError):
+                raise TaskError(f"Pane {current['pane_id']} shell is busy or its process identity is unverified") from None
+            except TaskError as error:
+                raise TaskError(f"Pane {current['pane_id']}: {error}") from None
     return pane
 
 

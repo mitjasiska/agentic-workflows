@@ -175,6 +175,53 @@ class IssueStructureTests(unittest.TestCase):
 class LinearTests(unittest.TestCase):
     def setUp(self):
         self.linear = Linear("test-placeholder")
+        self.sleep = self.enterContext(patch("task_start.linear.time.sleep"))
+
+    def test_transient_reads_retry_with_bounded_sanitized_backoff(self):
+        for code in (408, 429, 500, 502, 503, 504):
+            with self.subTest(code=code):
+                self.sleep.reset_mock()
+                errors = [HTTPError('private-url', code, 'private-body', {}, None) for _ in range(2)]
+                with patch('task_start.linear.urlopen', side_effect=[*errors,
+                        io.BytesIO(json.dumps({'data': issue_data()}).encode())]) as transport, \
+                        patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                    self.assertEqual(self.linear.get_issue('DEV-7'), ISSUE)
+                self.assertEqual(transport.call_count, 3)
+                self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [0.5, 1.0])
+                self.assertIn('retry 2/2', stderr.getvalue())
+                self.assertNotIn('private', stderr.getvalue())
+
+    def test_persistent_reads_stop_and_authentication_never_retries(self):
+        for code, attempts in ((503, 3), (401, 1), (403, 1), (400, 1), (404, 1)):
+            with self.subTest(code=code), patch('task_start.linear.urlopen',
+                    side_effect=HTTPError('private-url', code, 'private-body', {}, None)) as transport, \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(TaskError) as error:
+                self.linear.get_issue('DEV-7')
+            self.assertEqual(transport.call_count, attempts)
+            self.assertNotIn('private', str(error.exception))
+
+    def test_uncertain_writes_are_never_retried(self):
+        for failure in (HTTPError('private-url', 503, 'private-body', {}, None), TimeoutError()):
+            self.sleep.reset_mock()
+            with patch('task_start.linear.urlopen', side_effect=failure) as transport, self.assertRaises(TaskError):
+                self.linear.start(ISSUE)
+            self.assertEqual(transport.call_count, 1)
+            self.sleep.assert_not_called()
+
+    def test_read_current_state_after_lost_update_avoids_duplicate_mutation(self):
+        current = issue_data()
+        current['issue']['state'] = dict(id='started', name='In Progress', type='started')
+        with patch('task_start.linear.urlopen', side_effect=[
+                HTTPError('private-url', 503, 'lost update response', {}, None),
+                io.BytesIO(json.dumps({'data': current}).encode())]) as transport:
+            with self.assertRaises(TaskError):
+                self.linear.start(ISSUE)
+            self.linear.start(self.linear.get_issue('DEV-7'))
+        queries = [json.loads(c.args[0].data)['query'] for c in transport.call_args_list]
+        self.assertEqual(len(queries), 2)
+        self.assertTrue(queries[0].lstrip().startswith('mutation'))
+        self.assertTrue(queries[1].lstrip().startswith('query'))
+        self.sleep.assert_not_called()
 
     def response(self, payload):
         return patch("task_start.linear.urlopen", return_value=io.BytesIO(json.dumps(payload).encode()))
@@ -193,15 +240,17 @@ class LinearTests(unittest.TestCase):
         for payload in [[], {}, {"data": None}, {"errors": [{"message": "test-placeholder"}]},
                         {"data": issue_data(), "errors": [{"message": "partial failure"}]},
                         {"data": {}}, {"data": {"issue": []}}, {"data": {"issue": None}}]:
-            with self.subTest(payload=payload), self.response(payload), self.assertRaises(TaskError) as caught:
+            with self.subTest(payload=payload), self.response(payload) as transport, self.assertRaises(TaskError) as caught:
                 self.linear.get_issue("DEV-7")
+            self.assertEqual(transport.call_count, 1)
             self.assertNotIn("test-placeholder", str(caught.exception))
         with patch("task_start.linear.urlopen", return_value=io.BytesIO(b"not json")), self.assertRaises(TaskError):
             self.linear.get_issue("DEV-7")
 
     def test_transport_errors_are_sanitized(self):
         for error in [HTTPError("url", 401, "test-placeholder", {}, None), URLError("test-placeholder"), TimeoutError()]:
-            with patch("task_start.linear.urlopen", side_effect=error), self.assertRaises(TaskError) as caught:
+            with patch("task_start.linear.urlopen", side_effect=error), \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(TaskError) as caught:
                 self.linear.get_issue("DEV-7")
             self.assertNotIn("test-placeholder", str(caught.exception))
 
