@@ -2,9 +2,9 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md)
 
-Installation, project mapping, issue structure, task readiness, agent selection,
-review validation, repository permission profiles, and GitHub API credentials for
-the `task` CLI.
+Installation, project mapping, issue structure, task readiness, implementation
+scope, agent selection, review validation, repository permission profiles, and
+GitHub API credentials for the `task` CLI.
 
 ## Installation and project mapping
 
@@ -139,6 +139,40 @@ idle implementation session. `--continue` remains for graceful pauses, and an
 uncertain delivery cannot be retried automatically. See the
 [readiness result contract](lifecycle.md#implementation-readiness-outcomes) and
 [loop recovery](lifecycle.md#checkpoint-and-interruption-recovery).
+
+## Implementation scope discipline
+
+Configure scope guidance in the machine-local TOML:
+
+```toml
+[implementation.scope]
+policy = "strict" # strict | balanced
+```
+
+Omitting the table or `policy` defaults to `strict`. Only `strict` and `balanced`
+are accepted, with surrounding whitespace trimmed. Unsupported values, non-table
+settings, and unknown fields are configuration errors. Workspace-only preparation
+(`task start --no-agent`) and cleanup skip this execution setting.
+
+| Policy | Guidance |
+| --- | --- |
+| `strict` (default) | Prefer the smallest coherent change that satisfies the issue. Avoid unrelated refactors, formatting, renames, speculative documentation clarification, and opportunistic improvements. |
+| `balanced` | Permit small, clearly relevant adjacent improvements when justified by the requested outcome. No unrelated feature work or broad cleanup. |
+
+Both modes allow necessary supporting changes, regression tests, documentation,
+and safety fixes for a complete, safe solution. `task start`, loop-owned
+implementation (including completion and fixes), and independent review use the
+same resolved policy. Fresh review and same-reviewer re-review examine each
+substantive change against the complete issue and report unnecessary expansion
+as actionable findings with concrete evidence and a justified correction, without
+nitpicking necessary supporting work.
+
+This is behavioral guidance, with no automatic edits, pruning, or rejection based
+solely on diff size, file counts, or changed filenames. User-defined issue content
+supplies task scope wherever it appears; the policy requires no template, heading,
+or `Agent instructions` block. Workflow-owned lifecycle and safety instructions
+remain authoritative. The separate issue-structure, task-readiness, and review
+validation settings keep their existing behavior.
 
 ## Agent and reviewer selection
 

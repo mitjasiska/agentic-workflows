@@ -1,7 +1,7 @@
 """Purpose-specific semantic handoffs constructed by workflow commands."""
 
 from . import TaskError
-from .config import ReviewValidationConfig, TaskAssessmentConfig
+from .config import ImplementationScopeConfig, ReviewValidationConfig, TaskAssessmentConfig
 from .linear import Issue
 from .review_result import publication_fingerprint, publication_summary_limit
 from .workspace import Workspace
@@ -26,6 +26,35 @@ IMPLEMENTATION_INSTRUCTIONS = """- Treat the complete Linear issue above as the 
 - Work in the prepared checkout below; do not create another branch or worktree.
 - Do not connect to Linear, re-fetch this issue, or read Linear credentials or the local workflow config.
 - Do not write the Linear task description into the repository.
+"""
+
+
+IMPLEMENTATION_SCOPE_POLICIES = {
+    "strict": """Prefer the smallest coherent change that satisfies the issue. Avoid unrelated refactors, formatting,
+renames, speculative documentation clarification, and opportunistic improvements.
+""",
+    "balanced": """Small, clearly relevant adjacent improvements are permitted when justified; explain how they support
+the requested outcome. Do not add unrelated feature work or broad cleanup.
+""",
+}
+
+
+def scope_instructions(scope: ImplementationScopeConfig) -> str:
+    return (f"\nIMPLEMENTATION SCOPE POLICY: {scope.policy}\n"
+            "Use this resolved policy for this handoff, including when earlier turns used a different policy.\n"
+            "The complete Linear issue defines the requested outcome and task scope, regardless of headings or formatting.\n"
+            "This policy requires no template or Agent instructions block.\n"
+            "Workflow-owned lifecycle and safety instructions remain authoritative.\n"
+            + IMPLEMENTATION_SCOPE_POLICIES[scope.policy]
+            + "Necessary supporting changes, regression tests, documentation, and safety fixes remain allowed\n"
+            "when needed for a complete, safe solution. This is behavioral guidance, not a diff-size or file-count gate.\n"
+            "Do not automatically edit or prune changes based solely on changed filenames.\n")
+
+
+REVIEW_SCOPE_INSTRUCTIONS = """Examine each substantive change for relevance to the complete Linear issue and resolved policy.
+Report unnecessary scope expansion as actionable findings with concrete evidence and a justified correction.
+Do not nitpick supporting changes needed for a complete, safe solution or reject changes solely by line counts,
+file counts, or filenames.
 """
 
 
@@ -86,14 +115,15 @@ Skip the explicit assessment and proceed with ordinary implementation behavior; 
 """
 
 
-def implementation_handoff(issue: Issue, workspace: Workspace, *, assessment=TaskAssessmentConfig()) -> str:
+def implementation_handoff(issue: Issue, workspace: Workspace, *, assessment=TaskAssessmentConfig(),
+                           scope=ImplementationScopeConfig()) -> str:
     """Build the task-start implementation handoff before adapter selection."""
-    scope = (f"\nSlice: {workspace.slice}\n"
-             "Implement only this slice of the task. Ask if its scope is unclear.\n"
-             if workspace.slice is not None else "")
+    slice_instructions = (f"\nSlice: {workspace.slice}\n"
+                          "Implement only this slice of the task. Ask if its scope is unclear.\n"
+                          if workspace.slice is not None else "")
     handoff = (f"Implement Linear issue {issue.identifier}.\n\nTitle:\n{issue.title}\n\n"
                f"Task:\n{issue.description}\n\nWorkflow-owned implementation instructions:\n"
-               f"{IMPLEMENTATION_INSTRUCTIONS}{scope}"
+               f"{IMPLEMENTATION_INSTRUCTIONS}{scope_instructions(scope)}{slice_instructions}"
                f"{TASK_ASSESSMENT_INSTRUCTIONS if assessment.enabled else TASK_ASSESSMENT_DISABLED_INSTRUCTIONS}\n"
                f"Prepared checkout: {workspace.path}\nBranch: {workspace.branch}\n")
     if "\0" in handoff:
@@ -139,7 +169,7 @@ def integration_handoff(issue, record, output):
 
 def review_handoff(issue, repository, workspace, base, state, context_id, pass_kind,
                    options, pass_id, result_path, *, frozen_publication=None, loop_feedback=None,
-                   validation=ReviewValidationConfig()) -> str:
+                   validation=ReviewValidationConfig(), scope=ImplementationScopeConfig()) -> str:
     metadata = dict(issue=issue.identifier, title=issue.title, project=issue.project,
                     repository=str(repository), worktree=str(workspace.path), task_branch=workspace.branch,
                     base_branch=base, pinned_state=state.as_dict(), context_id=context_id,
@@ -168,6 +198,7 @@ If a slice is recorded, assess that slice and explain any remaining overall requ
 Git-visible drift observed at launch, polling, or final checkpoints permanently
 invalidates this pass, even if later restored; do not try to repair it.
 """
+    instructions += scope_instructions(scope) + REVIEW_SCOPE_INSTRUCTIONS
     instructions += (f"\nREVIEW VALIDATION POLICY: {validation.strategy}\n"
                      + REVIEW_VALIDATION_INSTRUCTIONS + REVIEW_VALIDATION_STRATEGIES[validation.strategy])
     focus = ("This is a fresh independent review. Do not inherit or retrieve implementation or prior reviewer chat."

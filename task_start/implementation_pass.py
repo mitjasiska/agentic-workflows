@@ -137,7 +137,7 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
                 "A later implementation blocker after a ready assessment still uses overall state=blocked. "
                 "Only state=failed may omit task_assessment if execution failed before assessment.\n")
         execution = replace(execution, handoff=implementation_handoff(
-            env.issue, env.workspace, assessment=assessment) + result_contract)
+            env.issue, env.workspace, assessment=assessment, scope=env.local.implementation_scope) + result_contract)
         before_handoff()
         pass_observer(context["context_id"], pass_id)
 

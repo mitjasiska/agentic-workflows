@@ -18,6 +18,10 @@ block_name = "Agent instructions"
 [implementation.task_assessment]
 enabled = true
 
+# Scope guidance shared by implementation and independent review.
+[implementation.scope]
+policy = "strict" # strict | balanced; strict is the default
+
 [agent]
 kind = "codex"
 # Use a model ID accepted by the selected agent and account.
