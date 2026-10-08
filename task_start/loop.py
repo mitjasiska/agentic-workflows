@@ -104,6 +104,10 @@ class LoopResult:
                  f"Contexts: {value['implementation_context']} / {value['reviewer_context'] or 'reviewer not started'}"]
         for item in value["implementation"]:
             lines.append(f"Implementation ({item['phase']}): {item['summary']}")
+            if "task_assessment" in item:
+                assessment = item["task_assessment"]
+                lines.append(f"Task assessment: {assessment['state']} — {assessment['summary']}")
+                lines.extend(f"  Question: {question}" for question in assessment["questions"])
         for item in value["review_iterations"]:
             lines.append(f"Review {item['iteration']}: {item['state']} — {item['summary']}")
             for finding in item["findings"]:
@@ -130,6 +134,8 @@ def report(state, pause=False):
                                 findings=record["findings"]))
         else:
             implementations.append(dict(phase=record["phase"], summary=record["summary"]))
+            if "task_assessment" in record:
+                implementations[-1]["task_assessment"] = record["task_assessment"]
         resolutions.extend(record.get("resolutions", []))
         for check in record["checks"]:
             if check not in checks:
@@ -184,6 +190,8 @@ def route(state, result, after):
     state["snapshot"] = after
     if result["state"] in {"failed", "blocked"}:
         state.update(status="escalated", reason=result["summary"])
+        if result.get("task_assessment", {}).get("state") == "blocked" and before != after:
+            state["reason"] = "Checkout changed during blocked task assessment; inspect before recovery"
     elif phase in {"initial_implementation", "implementation", "fixes"}:
         if result["state"] != "completed":
             raise TaskError("Implementation outcome cannot be routed")

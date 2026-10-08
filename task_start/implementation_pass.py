@@ -13,6 +13,7 @@ from .contexts import context_observer, context_reference, launch_allocated, pen
 from .handoff import implementation_handoff
 from .review_result import unique_object
 from .sessions import SessionInvalid, has_immutable_identity, merge_session
+from .task_assessment import validate_assessment
 
 
 def binding(context):
@@ -53,14 +54,20 @@ def implementation_target(env, expected=None):
     return context, adapter, execution, pane, reference
 
 
-def parse_implementation(raw, pass_id, findings):
+def parse_implementation(raw, pass_id, findings, *, assessment_enabled=False):
     try:
         value = json.loads(raw, object_pairs_hook=unique_object)
-        if (not isinstance(value, dict) or set(value) != {"pass_id", "state", "summary", "checks", "resolutions"}
+        fields = {"pass_id", "state", "summary", "checks", "resolutions"}
+        if assessment_enabled and isinstance(value, dict) and (
+                value.get("state") != "failed" or "task_assessment" in value):
+            fields.add("task_assessment")
+        if (not isinstance(value, dict) or set(value) != fields
                 or value["pass_id"] != pass_id or value["state"] not in {"completed", "blocked", "failed"}
                 or not isinstance(value["summary"], str) or not value["summary"].strip()
                 or not isinstance(value["checks"], list) or not isinstance(value["resolutions"], list)):
             raise ValueError("invalid result")
+        if "task_assessment" in value:
+            validate_assessment(value["task_assessment"], value["state"])
         for check in value["checks"]:
             if (not isinstance(check, dict) or set(check) != {"name", "result", "details"}
                     or check["result"] not in {"passed", "failed", "not_run"}
@@ -121,7 +128,16 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
             "objects with name, result (passed/failed/not_run), details. resolutions is a list of objects with "
             "finding_id and summary explaining the fix. For completed, include exactly one resolution for each "
             "supplied finding ID (none for initial completion), and no failed checks. Report skipped checks honestly.\n")
-        execution = replace(execution, handoff=implementation_handoff(env.issue, env.workspace) + result_contract)
+        assessment = env.local.task_assessment
+        if assessment.enabled:
+            result_contract += (
+                "Also include task_assessment with exactly state (ready/blocked), summary, and questions, matching the "
+                "pre-mutation assessment emitted in this turn. Ready requires questions=[]; blocked requires specific "
+                "nonempty questions and overall state=blocked. Include the blocking questions in summary as well. "
+                "A later implementation blocker after a ready assessment still uses overall state=blocked. "
+                "Only state=failed may omit task_assessment if execution failed before assessment.\n")
+        execution = replace(execution, handoff=implementation_handoff(
+            env.issue, env.workspace, assessment=assessment) + result_contract)
         before_handoff()
         pass_observer(context["context_id"], pass_id)
 
@@ -190,7 +206,8 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
             if status in {"idle", "done"} and output.exists():
                 if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                     raise TaskError("Invalid implementation result file")
-                result = parse_implementation(output.read_text(encoding="utf-8"), pass_id, findings)
+                result = parse_implementation(output.read_text(encoding="utf-8"), pass_id, findings,
+                                              assessment_enabled=assessment.enabled)
                 if fresh and reference is None:
                     raise TaskError("Initial implementation has no verified conversation identity")
                 implementation_target(env, expected)  # Provider/runtime verification after completion.

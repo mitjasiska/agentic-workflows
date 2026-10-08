@@ -2,8 +2,9 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md)
 
-Installation, project mapping, issue structure, agent selection, review validation, repository permission profiles,
-and GitHub API credentials for the `task` CLI.
+Installation, project mapping, issue structure, task readiness, agent selection,
+review validation, repository permission profiles, and GitHub API credentials for
+the `task` CLI.
 
 ## Installation and project mapping
 
@@ -97,6 +98,47 @@ appear anywhere; a collapsed block gives its contents no additional authority.
 Separate workflow-owned instructions govern lifecycle and safety behavior.
 The skill continues to generate its default `Agent instructions` block even if
 you configure another name for runtime validation.
+
+## Implementation task readiness
+
+The implementation agent performs a lightweight semantic assessment before edits
+by default. Configure it in the same machine-local TOML as agent selection:
+
+```toml
+[implementation.task_assessment]
+enabled = true
+```
+
+Omitting the table or `enabled` keeps assessment enabled; set `enabled = false`
+to skip the explicit assessment and retain ordinary implementation behavior.
+The value must be a TOML boolean. Non-table settings and unknown fields are
+configuration errors. Workspace-only preparation and cleanup skip this execution
+setting. No new configuration format or project-registry mapping is required.
+
+`task start` and loop-owned implementation use the same guidance and unchanged
+complete issue description. The agent reads just enough repository context to
+assess the outcome, scope and constraints, verification, feasibility, and blocking
+ambiguity. It does not require a template, headings, explicit acceptance criteria,
+or an `Agent instructions` block. It must not invent product decisions, expand
+scope, edit Linear, rewrite the description, create a persistent plan, or run broad
+validation just for readiness. A `ready` outcome continues in the same agent turn
+without human approval or another model invocation. A `blocked` outcome stops
+before implementation edits and contains specific questions.
+
+This is independent of [issue structure](#linear-issue-structure): `required`
+still refuses a missing configured block before preparation, even with assessment
+disabled. `warn` and `ignore` permit ordinary issues; missing structure alone
+cannot block readiness. Credentials, workspace, lifecycle, and exact session
+checks remain mandatory in either setting. Assessment occurs after normal workspace
+preparation and the workflow-owned Linear status transition.
+
+For interactive start, answer a blocked assessment in the existing implementation
+conversation. For a loop, inspect the stopped result and clarify the task, then
+use `task loop ISSUE --new` to deliver current requirements to the same verified,
+idle implementation session. `--continue` remains for graceful pauses, and an
+uncertain delivery cannot be retried automatically. See the
+[readiness result contract](lifecycle.md#implementation-readiness-outcomes) and
+[loop recovery](lifecycle.md#checkpoint-and-interruption-recovery).
 
 ## Agent and reviewer selection
 

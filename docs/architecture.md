@@ -49,6 +49,11 @@ result validation live in [`review_state.py`](../task_start/review_state.py) and
 completion, and fixes through the same adapters. Start and loop share workspace
 and Linear preparation in [`preparation.py`](../task_start/preparation.py); the loop
 owns its initial result contract and durable handoff claim.
+The shared implementation handoff also carries optional
+[task readiness guidance](lifecycle.md#implementation-readiness-outcomes).
+The same agent assesses and implements in one turn; the controller validates and
+reports the structured outcome through the existing implementation result and
+checkpoint. It does not classify issue quality or create an assessment phase.
 [`loop_state.py`](../task_start/loop_state.py) serializes private checkpoint and
 pause updates; it does not store a run archive or choose models. The controller
 holds the existing publication lock and calls the review primitive within that
@@ -336,6 +341,13 @@ boundaries, a pause from a second process, continuation without replay, cancella
 orphaned claims, corrupt checkpoints, identity loss, malformed outcomes, drift,
 non-progress, and bounded escalation. These are offline checks, not live model
 or Herdr loop acceptance.
+
+[`test_task_assessment.py`](../tests/test_task_assessment.py) covers readiness
+configuration, full-description handoffs, enabled/disabled start/loop parity,
+independent structure modes, controlled ready/blocked results, unchanged checkout
+on a block, mutation detection, and same-session recovery after clarification.
+These tests verify instructions and deterministic routing with simulated agent
+outcomes; they do not establish a live model's semantic judgment or compliance.
 
 For documentation changes, verify relative file links and heading anchors, compare
 commands with CLI help, and run `git diff --check`. No dedicated Markdown/link

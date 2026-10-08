@@ -58,6 +58,8 @@ class ImplementationAdapter:
         value = dict(pass_id=pass_id, state="completed", summary="Implementation completed and validated",
                      checks=[dict(name="unit", result="passed", details="Controlled implementation checks")],
                      resolutions=[dict(finding_id=f["id"], summary=f"Fixed {f['id']}") for f in items])
+        if 'TASK READINESS ASSESSMENT' in execution.handoff:
+            value['task_assessment'] = dict(state='ready', summary='Controlled readiness outcome', questions=[])
         value.update(test.impl_overrides)
         if test.impl_raw != "missing":
             output.write_text(test.impl_raw if test.impl_raw is not None else json.dumps(value))

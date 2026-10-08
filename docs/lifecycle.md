@@ -6,6 +6,7 @@ Command behavior, invariants, and refusal/retry cases. Start with the
 [README](../README.md#using-the-workflow) for the human workflow and command choices.
 
 - [Start and status transition](#task-start)
+- [Implementation readiness outcomes](#implementation-readiness-outcomes)
 - [Workspace reuse and slices](#workspace-lifecycle-and-slices)
 - [Failure and retry behavior](#failure-and-retry-behavior)
 - [Fresh review and exact resume](#task-review)
@@ -66,6 +67,56 @@ is passed unchanged in all three modes.
 transition without starting an agent. It does not require an `Agent instructions`
 block, `[agent]`, or an installed agent and cannot be combined with `--agent`,
 `--model`, or `--mode`.
+
+### Implementation readiness outcomes
+
+With [task assessment enabled](configuration.md#implementation-task-readiness),
+the shared implementation handoff asks the current agent to assess readiness
+before implementation mutations using the full issue and bounded read-only
+repository inspection. The assessment is semantic agent guidance, not a new
+issue parser, separate agent, planning phase, or controller boundary.
+
+The agent emits a small structured outcome in its conversation before edits:
+
+```json
+{"task_assessment":{"state":"ready","summary":"Outcome and verification are clear","questions":[]}}
+```
+
+`ready` proceeds automatically in the same turn. `blocked` has a concise summary
+and a nonempty `questions` list of specific blockers, and ends the turn before
+implementation mutations. Interactive `task start` remains a launch command:
+its exit status confirms handoff delivery, not assessment or implementation
+completion. Read the structured outcome in the implementation pane and supply
+clarification there; the agent reassesses and continues outstanding work in that
+conversation. It must not rewrite the issue or record a separate plan.
+
+Automated implementation passes include `task_assessment` in their existing
+temporary result JSON, alongside `pass_id`, `state`, `summary`, `checks`, and
+`resolutions`. This includes from-scratch launches and later completion/fix
+handoffs; each assesses the current outstanding work without replaying completed
+work. `ready` requires an empty question list. An assessment block requires
+overall `state=blocked`; it cannot be accepted as completed. If implementation
+later blocks after a ready assessment, the overall state is still `blocked`.
+Only an execution failure before assessment may omit the field with `state=failed`.
+With assessment disabled, the original result fields are used.
+
+The loop validates this contract and retains the small outcome with the existing
+pass record, displaying its questions in text and JSON status reports. A blocked
+assessment escalates the run with no review or automatic retry. The controller
+compares the existing before/after checkout snapshots and flags changes across a
+blocked assessment for inspection; this detects Git-visible changes, not transient
+edits or all possible side effects. The agent's pre-mutation instruction remains
+the assessment gate. Normal workspace preparation and Linear status transition
+have already occurred before the agent receives the task.
+
+After the user resolves the questions (in the existing conversation or by updating
+Linear), inspect the idle context and use `task loop ISSUE --new`. The workflow
+fetches the current issue and resumes the same verified implementation conversation;
+it does not relaunch the initial agent. A ready reassessment proceeds to ordinary
+implementation and independent review. `--continue` cannot resume an escalated
+block: it remains exclusive to a saved graceful pause. Session/checkout checks,
+interruption refusal, pass limits, and stop behavior are unchanged. See
+[checkpoint recovery](#checkpoint-and-interruption-recovery).
 
 ## Workspace lifecycle and slices
 

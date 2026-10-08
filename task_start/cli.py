@@ -148,7 +148,7 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
         policy = (codex_repository_policy(local.codex_repository_profiles, project.repo_name)
                   if options.kind == "codex" else {})
         execution = AgentExecution(issue, repo, workspace, options,
-                                   implementation_handoff(issue, workspace), policy=policy)
+                                   implementation_handoff(issue, workspace, assessment=local.task_assessment), policy=policy)
         status = launch_registered(agent, execution).summary
     else:
         status = "skipped (--no-agent)"

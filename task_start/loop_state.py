@@ -15,6 +15,7 @@ from uuid import UUID
 from . import TaskError
 from .review_result import unique_object
 from .sessions import has_immutable_identity
+from .task_assessment import validate_assessment
 from .workspace import Git
 
 
@@ -97,7 +98,11 @@ def validate_checkpoint(state):
     next_phase = initial_phase
     ids = set()
     for index, record in enumerate(records):
-        if (set(record) != {"phase", "pass_id", "context_id", "state", "summary", "findings", "checks", "resolutions"}
+        record_fields = {"phase", "pass_id", "context_id", "state", "summary", "findings", "checks", "resolutions"}
+        if "task_assessment" in record and next_phase in {"initial_implementation", "implementation", "fixes"}:
+            record_fields.add("task_assessment")
+            validate_assessment(record["task_assessment"], record["state"])
+        if (set(record) != record_fields
                 or record["phase"] != next_phase or record["pass_id"] in ids
                 or not isinstance(record["summary"], str)
                 or any(not isinstance(record[k], list) for k in ("findings", "checks", "resolutions"))):

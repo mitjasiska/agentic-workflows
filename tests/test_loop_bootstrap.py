@@ -84,7 +84,8 @@ class PiInitialTransport:
             output = Path(re.search(r'Write your result to (.*?)\. This temporary', prompt).group(1))
             pass_id = re.search(r'Pass ID: ([^\n]+)', prompt).group(1)
             output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
-                                              checks=[], resolutions=[])))
+                                              checks=[], resolutions=[], task_assessment=dict(
+                                                  state='ready', summary='Controlled readiness outcome', questions=[]))))
             pane['agent_status'] = 'working'
             return dict(agent=dict(pane))
         if (group, operation) == ('agent', 'get'):
@@ -391,7 +392,8 @@ class BootstrapLoopTests(unittest.TestCase):
             pass_id = re.search(r'Pass ID: ([^\n]+)', prompt).group(1)
             (self.path / 'implemented.txt').write_text('initial implementation')
             output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
-                                              checks=[], resolutions=[])))
+                                              checks=[], resolutions=[], task_assessment=dict(
+                                                  state='ready', summary='Controlled readiness outcome', questions=[]))))
         transport.on_queue = deliver
         result = self.run_loop()
         self.assertEqual(result.state, 'clean', result.render())
@@ -430,7 +432,8 @@ class BootstrapLoopTests(unittest.TestCase):
             self.assertEqual(pending, [pass_id])
             self.assertTrue(output.parent.is_dir())
             output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
-                                              checks=[], resolutions=[])))
+                                              checks=[], resolutions=[], task_assessment=dict(
+                                                  state='ready', summary='Controlled readiness outcome', questions=[]))))
         transport.on_queue = deliver
         with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
             stdin.isatty.return_value = True
@@ -497,7 +500,8 @@ class BootstrapLoopTests(unittest.TestCase):
             self.assertEqual(state['implementation']['session'], first)
             self.assertTrue(output.parent.is_dir())
             output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
-                                              checks=[], resolutions=[])))
+                                              checks=[], resolutions=[], task_assessment=dict(
+                                                  state='ready', summary='Controlled readiness outcome', questions=[]))))
         transport.on_queue = deliver
         with patch('task_start.agent.sys.stdin') as stdin, patch('task_start.agent.sys.stderr', new_callable=io.StringIO):
             stdin.isatty.return_value = True
