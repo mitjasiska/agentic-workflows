@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import call, patch
 from uuid import uuid4
+from types import SimpleNamespace
 
 from task_start import TaskError, cli
 from task_start.cleanup import DisposalStore, check_contents, check_mounts, mount_points, read_mounts, overlapping
@@ -20,7 +21,11 @@ from task_start.integrate import history_identity
 from task_start.integration_process import stopped_execution
 from task_start.integration_state import IntegrationStore, check_integration
 from task_start.publication_state import PublicationStore
-from task_start.workspace import Git, Herdr
+from task_start.loop import new_state
+from task_start.loop_state import LoopStore
+from task_start.pass_delivery import PassDelivery
+from task_start.agent import AgentOptions
+from task_start.workspace import Git, Herdr, Workspace
 import test_cleanup as completed
 import test_integration_abandon as abandonment
 
@@ -232,6 +237,41 @@ class ForcedCleanupTests(unittest.TestCase):
         cli.cleanup("DEV-7", force=True)
         self.assert_disposed()
         self.assertFalse(self.isolated.parent.exists())
+
+    def retained_loop(self):
+        env = SimpleNamespace(issue=self.issue, repo=self.repo, registry=self.registry,
+            endpoint="/tmp/test-herdr.sock", local=self.local.return_value,
+            project=SimpleNamespace(base_branch="main"), base=self.command(self.repo, "rev-parse", "HEAD"),
+            workspace=Workspace(self.branch, self.path, self.workspace_id, "t1", "p1", "fixture"))
+        with patch("task_start.loop.implementation_target", return_value=(self.registry.get("DEV-7-I1"),)), \
+                patch("task_start.loop.idle_reviewers"):
+            state = new_state(env, AgentOptions("codex", "model", "high"), 3, 6, 10)
+        store = LoopStore(self.path)
+        store.create(state); store.begin(state)
+        def persist(context_id, pass_id):
+            state["active_pass"].update(context_id=context_id, pass_id=pass_id)
+            store.save(state)
+        output = PassDelivery(state, persist, env).create("DEV-7-I1", str(uuid4()))
+        output.write_text('{"partial":')
+        self.addCleanup(shutil.rmtree, output.parent, True)
+        return output
+
+    def test_forced_disposal_removes_retained_loop_output_with_journal(self):
+        output = self.retained_loop()
+        cli.cleanup("DEV-7", force=True)
+        self.assert_disposed()
+        self.assertFalse(output.parent.exists())
+        retained = self.journal()["loop"]
+        self.assertEqual(set(retained["files"]), {"complete.py", "result.json"})
+        self.assertIn("discarded", cli.cleanup("DEV-7", force=True))
+
+    def test_forced_disposal_refuses_unrelated_loop_artifacts(self):
+        output = self.retained_loop()
+        (output.parent / "unrelated.txt").write_text("preserve")
+        with self.assertRaisesRegex(TaskError, "unsafe"):
+            cli.cleanup("DEV-7", force=True)
+        self.assertTrue(output.exists())
+        self.assert_preserved()
 
     def test_abandoned_archive_and_new_uncertain_attempt_are_both_disposed(self):
         record = self.retained_integration()

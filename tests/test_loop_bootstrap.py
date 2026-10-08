@@ -27,6 +27,7 @@ from test_loop import ImplementationAdapter, finding, findings
 import test_loop as loop_fixture
 import test_review as fixture
 from codex_startup_fixture import TRUST_SCREEN, CodexStartupTransport
+import pass_delivery_fixture
 
 
 UPDATE_BASE = Git.update_base
@@ -43,7 +44,10 @@ class PiInitialTransport:
         self.now = self.gets = self.polls = 0
         self.on_get = lambda: None
         self.saved_identities = []
+        self.prompt = self.completion = None
         test.enterContext(patch('task_start.implementation_pass.adapter_for', side_effect=Pi))
+        test.enterContext(patch('task_start.agent.adapter_for', side_effect=lambda options:
+                               Pi(options) if options.kind == 'pi' else test.adapter))
         test.enterContext(patch.object(Pi, 'check_available'))
         test.enterContext(patch.object(Pi, 'model_mode_capabilities', return_value=('implementer', 'low', ('low',))))
         self.command = test.enterContext(patch.object(Pi, 'command', side_effect=self.herdr))
@@ -62,7 +66,11 @@ class PiInitialTransport:
     def history(self, conversation_id='original-implementation', *, messages=True):
         entries = [dict(type='session', id=conversation_id, cwd=str(self.test.path))]
         if messages:
-            entries.append(dict(type='message', message=dict(role='user', content=[])))
+            entries.append(dict(type='message', id='input', parentId=None,
+                                message=dict(role='user', content=self.prompt or 'Earlier input')))
+            if self.completion:
+                entries.append(dict(type='message', id='output', parentId='input',
+                    message=dict(role='assistant', content=self.completion, stopReason='stop')))
         self.path.write_text(''.join(json.dumps(entry) + '\n' for entry in entries))
 
     def herdr(self, group, operation, *args):
@@ -83,6 +91,7 @@ class PiInitialTransport:
         if (group, operation) == ('agent', 'prompt'):
             test.assertEqual(args[0], 'p1')
             prompt = args[1]
+            self.prompt = prompt
             test.impl_prompts.append(prompt)
             test.assertIn('fresh conversation', prompt)
             if self.history_at == 'prompt':
@@ -92,6 +101,9 @@ class PiInitialTransport:
             output.write_text(json.dumps(dict(pass_id=pass_id, state='completed', summary='Implemented',
                                               checks=[], resolutions=[], task_assessment=dict(
                                                   state='ready', summary='Controlled readiness outcome', questions=[]))))
+            self.completion = pass_delivery_fixture.complete_prompt(prompt)
+            if self.history_at == 'prompt':
+                self.history()
             pane['agent_status'] = 'working'
             return dict(agent=dict(pane))
         if (group, operation) == ('agent', 'get'):
@@ -290,8 +302,7 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual([r['phase'] for r in after['records']], ['initial_implementation', 'review'])
         self.assertEqual(self.preparation, ['base', 'create', 'linear'])
         self.linear.start.assert_called_once()
-        with self.assertRaises(TaskError):
-            loop('DEV-7')
+        self.assertEqual(loop('DEV-7').data, result.data)
         self.assertEqual(len(self.launches), 1)
 
     def test_recovery_optional_shell_metadata_always_requires_process_proof(self):
@@ -351,7 +362,7 @@ class BootstrapLoopTests(unittest.TestCase):
         self.store.save(state)
         result = loop('DEV-7', impl_agent_kind='pi', impl_model='implementer', impl_mode='low',
                       agent_kind='codex', model='review-model', mode='high',
-                      timeout=0.02, max_reviews=3, max_passes=6)
+                      timeout=0.2, max_reviews=3, max_passes=6)
         self.assertEqual(result.state, 'clean', result.render())
         self.assertEqual(len(self.launches), 1)
         self.assertEqual(result.data['run_id'], state['run_id'])
@@ -830,7 +841,7 @@ class BootstrapLoopTests(unittest.TestCase):
                 changed.update(pass_count=1, active_pass=dict(phase='initial_implementation',
                                                              context_id=None, pass_id=None))
             self.store.save(changed)
-            with self.subTest(status=status), self.assertRaisesRegex(TaskError, 'startup recovery blocked'):
+            with self.subTest(status=status), self.assertRaisesRegex(TaskError, 'startup recovery blocked|no durable delivery proof'):
                 loop('DEV-7')
             self.assertEqual(self.store.read()[0], changed)
         self.assertEqual(self.launches, [])
@@ -1038,9 +1049,28 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertIn('Confirmation unavailable', result.data['reason'])
         self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'uncertain')
         self.assertEqual(self.prompts, [])
-        for kwargs in ({}, dict(action='new'), dict(action='continue')):
-            with self.assertRaises(TaskError):
-                loop('DEV-7', **kwargs)
+        self.assertEqual(loop('DEV-7').state, 'clean')
+        with self.assertRaises(TaskError):
+            loop('DEV-7', action='continue')
+        transport.assert_identity_retained()
+
+    def test_pi_interrupt_in_submission_uses_pinned_header_before_registry_enrichment(self):
+        transport = PiInitialTransport(self, history_at='prompt')
+        def interrupt(group, operation, *args):
+            result = transport.herdr(group, operation, *args)
+            if (group, operation) == ('agent', 'prompt'):
+                raise KeyboardInterrupt()
+            return result
+        transport.command.side_effect = interrupt
+        first = loop('DEV-7', timeout=2)
+        self.assertEqual(first.state, 'interrupted', first.render())
+        self.assertNotIn('conversation_id', context_reference(self.registry.get('DEV-7-I1')))
+        self.assertEqual(self.store.read()[0]['delivery']['context']['session']['conversation_id'],
+                         'original-implementation')
+        transport.command.side_effect = transport.herdr
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (1, 1))
         transport.assert_identity_retained()
 
     def test_pi_replaced_history_after_path_only_polls_refuses_review(self):
@@ -1150,7 +1180,8 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual(state['implementation']['session']['value'], transport.thread_id)
         self.assertEqual(self.registry.get('DEV-7-I1')['state'], 'uncertain')
         self.assertEqual(self.prompts, [])
-        for kwargs in ({}, dict(action='continue'), dict(action='new')):
+        self.assertEqual(loop('DEV-7').state, 'escalated')
+        for kwargs in (dict(action='continue'), dict(action='new')):
             with self.assertRaises(TaskError):
                 loop('DEV-7', **kwargs)
         transport.assert_effects(1, 1)

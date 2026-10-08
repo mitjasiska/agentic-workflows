@@ -211,8 +211,11 @@ workspaces only.
 If Linear remains unavailable before the first handoff, repeat `task loop DEV-7`
 after it recovers. The loop can reuse its original reservation only after proving
 that no handoff was claimed and the requirements, checkout, and empty shell still
-match. Saved selections and bounds stay in effect; uncertain delivery requires
-human inspection. See [startup recovery](docs/lifecycle.md#checkpoint-and-interruption-recovery).
+match. Saved selections and bounds stay in effect. After Ctrl+C, controller loss,
+or a terminal disconnect, repeat the same command to observe the original pass
+and collect its verified retained result without sending another prompt. Missing
+or conflicting evidence stops for inspection. See
+[recovery](docs/lifecycle.md#checkpoint-and-interruption-recovery).
 
 If an implementation context already exists, the loop resumes that idle conversation
 to finish validation and collect its result. If you already know implementation is
@@ -234,8 +237,9 @@ role-prefixed overrides.
 
 Run `--pause-after-current` from another terminal while the command is working.
 The current pass finishes; the next handoff waits for explicit `--continue`.
-`--status` only inspects. Ctrl+C and cancellation require inspection and cannot
-be continued as a graceful pause. Defaults are three reviews, six total passes,
+`--status` only inspects. Ctrl+C leaves the agent's completion uncertain; ordinary
+`task loop DEV-7` reconciles it, while `--continue` remains exclusive to pauses.
+Defaults are three reviews, six total passes,
 and 1800 seconds per delivered pass; use `--max-reviews`, `--max-passes`, and
 `--timeout` when starting the loop. The initial implementation counts as one pass;
 review counts begin when review runs.

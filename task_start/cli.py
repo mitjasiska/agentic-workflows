@@ -45,7 +45,7 @@ def parser() -> argparse.ArgumentParser:
                     "unmanaged host references are outside the V1 guarantee. Rerun --force to finish a partial disposal.")
     cleanup_command.add_argument("issue", type=issue_identifier)
     cleanup_command.add_argument("--force", action="store_true",
-        help="Destructively discard a never-published local execution without changing Linear status, including dirty files and retained integration artifacts")
+        help="Destructively discard a never-published local execution without changing Linear status, including dirty files and retained integration/loop artifacts")
     contexts = commands.add_parser("contexts", help="Inspect machine-local workflow contexts (read-only)")
     contexts.add_argument("issue", nargs="?", type=issue_identifier)
     contexts.add_argument("--all", action="store_true", help="Include retired contexts")
@@ -60,7 +60,8 @@ def parser() -> argparse.ArgumentParser:
                     "then run independent review and fixes. Existing implementation contexts retain their settings. "
                     "Configured use needs only task loop ISSUE: [agent] selects initial implementation and "
                     "[reviewer] selects review. Optional --i-* and --r-* flags override those roles. "
-                    "Both selections require explicit resolved model and mode.")
+                    "Both selections require explicit resolved model and mode. Repeat task loop ISSUE after "
+                    "controller interruption to observe its original pass without sending another prompt.")
     loop_command.add_argument("issue", type=issue_identifier)
     controls = loop_command.add_mutually_exclusive_group()
     controls.add_argument("--pause-after-current", dest="action", action="store_const", const="pause",
@@ -284,18 +285,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
             return {"clean": 0, "findings": 2, "blocked": 3, "failed": 1}[result.state]
         elif args.command == "loop":
-            # SIGTERM is cancellation, never a graceful pause. SIGKILL leaves a
-            # persisted running claim that --continue also refuses to replay.
+            # Interruption is not cancellation of the terminal-owned agent.
+            # SIGKILL also leaves the durable claim for ordinary-command recovery.
             def interrupted(signum, frame):
                 raise KeyboardInterrupt()
-            previous = signal.signal(signal.SIGTERM, interrupted)
+            previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGHUP)}
             try:
                 result = loop(args.issue, action=args.action, agent_kind=args.r_agent_kind, model=args.r_model,
                               mode=args.r_mode, max_reviews=args.max_reviews, max_passes=args.max_passes,
                               timeout=args.timeout, from_review=args.from_review,
                               impl_agent_kind=args.i_agent_kind, impl_model=args.i_model, impl_mode=args.i_mode)
             finally:
-                signal.signal(signal.SIGTERM, previous)
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
             if args.action in {"pause", "status"}:
                 return 0
@@ -323,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"task: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("task: interrupted; inspect workspace and issue state before retrying", file=sys.stderr)
+        if args.command == "loop":
+            print(f"task: controller interrupted; the original agent may still be working. "
+                  f"Repeat task loop {args.issue} to reconcile its saved boundary", file=sys.stderr)
+        else:
+            print("task: interrupted; inspect workspace and issue state before retrying", file=sys.stderr)
         return 130
     return 0

@@ -23,6 +23,7 @@ from task_start.workspace import Git, Herdr, Workspace
 from test_task_start import ISSUE
 import test_task_start as baseline
 from codex_startup_fixture import TRUST_SCREEN, CodexStartupTransport
+import pass_delivery_fixture as delivery_fixture
 
 
 def verdict(pass_id="pass", **changes):
@@ -1247,12 +1248,18 @@ class FakeReviewer:
             raise TaskError("Missing session")
         return dict(reference)
 
+    verify_session = verify_review_session
+
+    def observe_delivery(self, execution, reference, receipt, completion):
+        return True
+
     def deliver(self, execution, reference=None):
         test = self.test
         test.prompts.append(execution.handoff)
         pane = next(p for p in test.panes if p["pane_id"] == execution.workspace.pane_id)
         reference = reference or dict(agent=execution.options.kind, kind="id", value="session-" + pane["pane_id"])
         pane.update(agent=execution.options.kind, agent_session=reference)
+        delivery_fixture.claim(test, execution, reference)
         self.output = re.search(r"output-file write is (.*?)\. This temporary", execution.handoff).group(1)
         pass_id = re.search(r"Pass ID: ([^\n]+)", execution.handoff).group(1)
         if test.raw != "missing":
@@ -1265,6 +1272,7 @@ class FakeReviewer:
             Path(self.output).write_text(test.raw if test.raw is not None else json.dumps(result))
         if test.mutation:
             test.mutation()
+        delivery_fixture.complete(execution)
         if execution.runtime_observer:
             execution.runtime_observer(dict(session_id=reference["value"], session_kind=reference["kind"],
                                             terminal_id=pane["terminal_id"], resumability="yes"))
@@ -1279,6 +1287,8 @@ class FakeReviewer:
 
     def review_status(self, execution, terminal_id, reference):
         return self.test.status
+
+    status = review_status
 
 
 class ResultTests(unittest.TestCase):

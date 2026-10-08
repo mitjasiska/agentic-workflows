@@ -1,6 +1,7 @@
 """Structured initial implementation, completion, and fixes with exact identity."""
 
 from dataclasses import replace
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import tempfile
@@ -96,7 +97,8 @@ def initial_execution(env, options):
                           policy=dict(policy, session_reporting=True))
 
 
-def implementation_pass(env, expected, findings, timeout, before_handoff, pass_observer, *, initial_options=None):
+def implementation_pass(env, expected, findings, timeout, before_handoff, pass_observer, *, initial_options=None,
+                        delivery=None):
     fresh = initial_options is not None
     if fresh:
         execution = initial_execution(env, initial_options)
@@ -108,10 +110,14 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
         reference = None
     else:
         context, adapter, execution, pane, reference = implementation_target(env, expected)
-    with tempfile.TemporaryDirectory(prefix="task-implementation-") as directory:
+    pass_id = str(uuid4())
+    if delivery:
+        before_handoff()
+        output = delivery.create(context["context_id"], pass_id)
+    with (nullcontext(output.parent) if delivery else tempfile.TemporaryDirectory(prefix="task-implementation-")) as directory:
         if Path(directory).resolve().is_relative_to(env.workspace.path):
             raise TaskError("Implementation output must be outside the checkout; check TMPDIR")
-        output, pass_id = Path(directory) / "result.json", str(uuid4())
+        output = Path(directory) / "result.json"
         introduction = ("Start the requested implementation in this fresh conversation. Complete the work and validation. "
                         if fresh else "Continue in YOUR existing implementation conversation. "
                         "Finish outstanding work and validation; do not replay already completed work. ")
@@ -138,7 +144,10 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
                 "Only state=failed may omit task_assessment if execution failed before assessment.\n")
         execution = replace(execution, handoff=implementation_handoff(
             env.issue, env.workspace, assessment=assessment, scope=env.local.implementation_scope) + result_contract)
-        before_handoff()
+        if delivery:
+            execution = delivery.attach(execution)
+        else:
+            before_handoff()
         pass_observer(context["context_id"], pass_id)
 
         def observe_initial(_=None):
@@ -192,6 +201,8 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
             execution = replace(execution, runtime_observer=observe)
         else:
             adapter.resume(execution, reference, recreate=False)
+        if delivery:
+            delivery.started()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             current, notes = reconcile(env.registry.get(context["context_id"]), env.identities.snapshot())
@@ -206,7 +217,11 @@ def implementation_pass(env, expected, findings, timeout, before_handoff, pass_o
             if status in {"idle", "done"} and output.exists():
                 if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                     raise TaskError("Invalid implementation result file")
-                result = parse_implementation(output.read_text(encoding="utf-8"), pass_id, findings,
+                raw = delivery.verify(adapter, execution) if delivery else output.read_text(encoding="utf-8")
+                if raw is None:
+                    time.sleep(0.25)
+                    continue
+                result = parse_implementation(raw, pass_id, findings,
                                               assessment_enabled=assessment.enabled)
                 if fresh and reference is None:
                     raise TaskError("Initial implementation has no verified conversation identity")

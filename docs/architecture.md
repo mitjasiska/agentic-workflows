@@ -57,7 +57,11 @@ checkpoint. It does not classify issue quality or create an assessment phase.
 [`loop_state.py`](../task_start/loop_state.py) serializes private checkpoint and
 pause updates; it does not store a run archive or choose models. The controller
 holds the existing publication lock and calls the review primitive within that
-ownership. See [loop controls and recovery](lifecycle.md#task-loop).
+ownership. [`pass_delivery.py`](../task_start/pass_delivery.py) retains one private
+pass result destination and completion seal. Adapters persist a session-bound
+prompt digest before delivery and verify the exact provider completion receipt.
+Restart collection returns to the same loop router and review acceptance writer;
+it never launches or resumes an agent. See [loop controls and recovery](lifecycle.md#task-loop).
 Reviewed publishing stages
 live in [`publish.py`](../task_start/publish.py),
 with disposable integration and unpublished commit installation in
@@ -171,8 +175,9 @@ queue attempt. If readiness regresses during verification, history must be check
 again after the same runtime becomes ready within that budget. Process observation,
 provider identity, and recorded task delivery
 remain separate facts. Queue errors and uncertain receipts never enter recovery.
-Interrupted owners retain the pending mapping and cannot be replaced automatically;
-there is no reconstruction of a lost launch from a new command. See the
+Interrupted owners retain the pending mapping and cannot be replaced automatically.
+Loop passes with durable delivery evidence can observe their exact original turn;
+interrupted pre-delivery setup cannot reconstruct a lost launch. See the
 [user-action flow](lifecycle.md#codex-first-use-trust-and-setup).
 
 ### Pi prompt submission
@@ -252,7 +257,8 @@ possibly unestablished runtime or append a secondary missing-identity error to t
 launch failure. Its ordinal remains consumed, even if no session was observed.
 A launch interrupted before its result can be recorded remains `launching`;
 another concurrent launch cannot claim that pane until the uncertain context is
-inspected and cleaned up.
+inspected and cleaned up, or its controller-owned loop pass is proven complete
+through the recorded delivery and provider receipt.
 
 ### Live identity inspection and cleanup
 
@@ -341,6 +347,15 @@ boundaries, a pause from a second process, continuation without replay, cancella
 orphaned claims, corrupt checkpoints, identity loss, malformed outcomes, drift,
 non-progress, and bounded escalation. These are offline checks, not live model
 or Herdr loop acceptance.
+
+Recovery regressions also terminate real controller subprocesses with SIGINT,
+SIGTERM, SIGKILL and SIGHUP while a separate controlled provider process retains
+the original pass. They cover completion after exit, observation while still
+working, concurrent restart refusal, and exactly one independent review. Provider
+fixtures exercise nonce/digest/turn checks; disposable tests cover interrupted
+review/fix/re-review, corrupt output, drift, timeout, retained validation limitations,
+and journaled artifact disposal. They do not exercise installed provider binaries
+or reuse any historical DEV-75 evidence.
 
 Startup regressions inject Linear 503 responses after the original I reservation,
 exercise bounded read retries and ordinary-command recovery, and verify refusal

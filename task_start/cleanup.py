@@ -26,6 +26,8 @@ from .integration_process import shell_executable, stopped_execution
 from .integration_state import IntegrationStore, abandoned_context, evidence_digest, integration_tombstone
 from .integrate import history_identity
 from .publication_state import PublicationStore
+from .loop_state import LoopStore
+from .pass_delivery import FILES as PASS_FILES, check_directory, read_private, validate_delivery
 from .publish import remote_identity, verify_remote_identity
 from .review_result import unique_object
 from .workspace import Git, Herdr, HerdrRetirement, TaskWorktree, belongs_to_issue
@@ -571,6 +573,19 @@ def prepare_record(issue, project, repo, git, herdr, registry, identities, targe
     binding = dict(issue=issue.identifier, repository=str(repo), worktree=str(target.path), branch=target.branch,
                    base_branch=project.base_branch, endpoint=endpoint, workspace_id=target.open_workspace_id)
     roots, integrations = integration_evidence(publication, registry, binding, contexts)
+    loop_evidence = None
+    loop_store = LoopStore(target.path)
+    if loop_store.path.exists():
+        checkpoint, pause = loop_store.read()
+        if checkpoint.get("delivery"):
+            delivery = checkpoint["delivery"]
+            directory = Path(delivery["directory"])
+            present = directory_identity(directory) is not None
+            if present:
+                check_directory(delivery)
+            loop_evidence = dict(checkpoint_sha256=evidence_digest([checkpoint, pause]), delivery=delivery,
+                                 files={p.name: sha256(read_private(p)).hexdigest() for p in directory.iterdir()} if present else {})
+            roots.append(dict(path=str(directory), identity=directory_identity(directory), checkout=None, state="pending"))
     retirement = herdr.retirement(target, issue.identifier, project.base_branch)
     if git.load_retirement(issue.identifier, project.base_branch) is not None:
         raise TaskError("Completed-task cleanup has pending retirement evidence; inspect it before forced disposal")
@@ -584,6 +599,8 @@ def prepare_record(issue, project, repo, git, herdr, registry, identities, targe
                   contexts=contexts, integrations=integrations, roots=roots,
                   publication_sha256=evidence_digest(saved), at=now(),
                   workspace_state="pending", worktree_state="pending", branch_state="pending")
+    if loop_evidence is not None:
+        record["loop"] = loop_evidence
     if retirement:
         record["workspace_label"] = next(w["label"] for w in herdr.workspaces()
                                           if w["workspace_id"] == retirement.workspace_id)
@@ -606,6 +623,22 @@ def validate_record(record, issue, project, repo, registry):
             fields.add("execution_id")
             if str(UUID(record["execution_id"])) != record["execution_id"]:
                 raise ValueError("invalid execution identity")
+        if "loop" in record:
+            fields.add("loop")
+            retained = record["loop"]
+            delivery = retained["delivery"]
+            if (set(retained) != {"checkpoint_sha256", "delivery", "files"}
+                    or set(retained["files"]) - PASS_FILES
+                    or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in
+                           [retained["checkpoint_sha256"], *retained["files"].values()])):
+                raise ValueError("invalid loop disposal evidence")
+            context = delivery["context"]
+            claim = dict(pass_id=delivery["pass_id"], phase=delivery["phase"],
+                         context_id=context["context_id"] if context else None)
+            validate_delivery(delivery, dict(run_id=delivery["run_id"], active_pass=claim,
+                                             binding=dict(worktree=record["path"])))
+            if context and not any(c["context_id"] == context["context_id"] for c in record["contexts"]):
+                raise ValueError("unowned loop output")
         if set(record) != fields or not isinstance(record["contexts"], list):
             raise ValueError("invalid journal fields")
         if any(not isinstance(record[k], str) or not record[k]
@@ -676,6 +709,8 @@ def validate_record(record, issue, project, repo, registry):
                     raise ValueError("invalid retained output")
         permitted = {str(Path(i["checkout"]).parent) for i in record["integrations"]}
         permitted |= {str(Path(i["output"]).parent) for i in record["integrations"] if i["output"]}
+        if "loop" in record:
+            permitted.add(record["loop"]["delivery"]["directory"])
         if {r["path"] for r in record["roots"]} != permitted:
             raise ValueError("invalid artifact selectors")
         for root in record["roots"]:
@@ -712,9 +747,17 @@ def check_roots(record, git):
             continue
         if identity != root["identity"]:
             raise TaskError("Retained artifact directory was replaced; cleanup refused")
-        allowed = {"checkout", "result.json"} if root["checkout"] else {"result.json"}
+        loop_output = record.get("loop")
+        loop_output = loop_output if loop_output and str(path) == loop_output["delivery"]["directory"] else None
+        allowed = PASS_FILES if loop_output else {"checkout", "result.json"} if root["checkout"] else {"result.json"}
         if set(p.name for p in path.iterdir()) - allowed:
             raise TaskError("Unrelated files appeared in a disposable artifact directory")
+        if loop_output:
+            check_directory(loop_output["delivery"])
+            files = {p.name: sha256(read_private(p)).hexdigest() for p in path.iterdir()}
+            if (root["state"] == "pending" and files != loop_output["files"]
+                    or any(loop_output["files"].get(k) != v for k, v in files.items())):
+                raise TaskError("Retained loop output changed during disposal")
         if any(Path(t["worktree"]).is_relative_to(path) for t in trees):
             raise TaskError("A registered worktree occupies a disposable artifact directory")
         check_contents(path, git_root=Path(root["checkout"]) if root["checkout"] else None)
@@ -786,6 +829,11 @@ def verify_contexts(record, registry):
     for directory in stores:
         if directory == Path(record["git_dir"]):
             continue  # Own provenance is frozen and checked by the disposal guard.
+        loop_store = LoopStore.at_directory(directory)
+        if loop_store.path.exists():
+            checkpoint, _ = loop_store.read()
+            if checkpoint.get("delivery") and conflicts([checkpoint["delivery"]["directory"]]):
+                raise TaskError("Another loop delivery claim owns a cleanup target")
         for integration in IntegrationStore(publication_store=SimpleNamespace(directory=directory)).disposal_records():
             tombstone = integration_tombstone(integration)
             released = any(j["state"] == "complete" and any(
@@ -855,6 +903,8 @@ def finish(record, journal, git, herdr, registry, identities):
         if saved is not None and evidence_digest(saved) != record["publication_sha256"]:
             raise TaskError("Publication evidence changed during forced cleanup")
         if present:
+            if "loop" in record and evidence_digest(list(LoopStore(Path(record["path"])).read())) != record["loop"]["checkpoint_sha256"]:
+                raise TaskError("Loop checkpoint changed during forced cleanup")
             evidence = [integration_tombstone(r) for r in IntegrationStore(Path(record["path"])).disposal_records()]
             if evidence != [{k: v for k, v in i.items() if k != "output_sha256"} for i in record["integrations"]]:
                 raise TaskError("Integration provenance changed during forced cleanup")

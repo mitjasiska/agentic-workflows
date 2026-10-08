@@ -517,8 +517,7 @@ It retains the saved implementation options without
 rerunning workspace preparation or the Linear transition. It never repeats a
 completed pass. Changes to requirements, checkout, identity, or resumability stop
 for inspection. A later pause remains sticky. `--status`, agent idleness, and
-repeating the ordinary `loop` command never continue a paused loop. The narrow
-pre-handoff startup recovery exception is described below. Pause/status find
+repeating the ordinary `loop` command never continue a paused loop. Ordinary restart recovery for interrupted passes is described below. Pause/status find
 the checkpoint through the context registry without loading credentials,
 workflow configuration, or Linear; continuation fetches current requirements.
 All three controls resolve the task checkout from implementation/review contexts.
@@ -540,7 +539,7 @@ Fix results identify every supplied finding and describe the claimed resolution;
 the reviewer independently checks those claims. Duplicate/missing/unknown IDs,
 malformed output, failed checks claimed as completed work, blocked agents,
 delivery/identity failures, or absent output stop for inspection. No transport or
-uncertain pass is automatically retried. An unchanged content snapshot after
+uncertain pass is automatically redelivered; recovery only observes its original execution. An unchanged content snapshot after
 fixes, repeated finding-ID sets, identical findings with renamed IDs, or retention
 of every previous unresolved ID also stops as non-progress.
 
@@ -636,37 +635,79 @@ the Linear status transition are not repeated. Recorded implementation/reviewer
 selections, timeout and bounds survive changed local defaults. Explicit matching
 options are accepted; conflicting overrides and `--from-review` are refused.
 
-Any handoff claim or observed provider identity makes delivery uncertain and
-requires inspection, even with no completed pass. Other escalated, running,
-interrupted, paused, completed, and established-review checkpoints cannot use this
-path. Requirements, Git/base, binding or runtime drift reports the recovery blocker
-without repairing state or allocating a replacement context. `--continue` remains
-exclusive to pauses, and `--new` cannot replace an unfinished initial reservation.
-The failed DEV-75 workspace is a live acceptance candidate only if all these
-checks still pass; development tests use disposable state and do not alter it.
+A handoff claim never authorizes another delivery. The pre-handoff recovery
+exception above remains separate from collection of a delivered pass. A crash
+between context reservation and checkpoint creation, or after a claim but before
+provider delivery evidence was saved, still requires inspection. Historical
+controller-lifetime temporary output cannot establish recovery evidence.
 
-A crash between context reservation and checkpoint creation leaves a `launching`
-context for inspection. A crash after the claim leaves an uncertain active pass,
-even if startup never reached delivery. Neither case authorizes automatic launch,
-replacement, or prompt replay. Once claimed, output is accepted only during that
-controller pass through the normal result parser and final identity checks.
+For new controller-owned implementation, fix, review, and re-review passes, repeat
+`task loop DEV-20` after Ctrl+C, SIGTERM, SIGHUP/terminal disconnect, or controller
+termination. The publication lock first excludes another controller. The command
+then validates the saved requirements, issue/worktree/base, context, model/mode,
+provider conversation and exact pane/terminal. It observes the same pass while
+that agent is working, without sending input, restarting an agent, moving a pane,
+or allocating a replacement. The original timeout and pass/review limits remain
+in force. Conflicting supplied settings are refused; matching settings are allowed.
 
-Ctrl+C, SIGTERM, and process cancellation are distinct from graceful pause. Caught
-interruption records `interrupted`; it never accepts output as a completed pass
-merely because the agent becomes idle. SIGKILL or loss before a result checkpoint
-can leave `running` with an active pass. Status reports that recorded claim; it
-does not prove a controller is still alive. `--continue` refuses both states.
-The exact context/nonce and any previously collected results remain for inspection;
-delivery may have succeeded and the agent may still be working. Do not retry or
-manufacture completion from a transcript or temporary result file.
+Before delivery, the existing checkpoint retains the run/pass nonce, session and
+location, prompt digest and provider receipt selector. It also names one private
+0700 `task-loop-<run UUID>-<pass UUID>` directory under the temporary root. This
+is an explicitly retained directory, not a controller-lifetime TemporaryDirectory.
+The generated completion helper contains only selectors and pinned Git identity.
+Agents write their structured result there, then run that helper as their final
+tool to flush the result and seal its digest and final Git snapshot. Their final
+answer must contain exactly the machine-readable completion receipt emitted by
+the helper. No prompts, transcripts, credentials or broad run archive are retained
+by the workflow.
 
-After inspecting and reconciling a stopped run, `task loop DEV-20 --new` explicitly
-replaces its single checkpoint and requests a fresh reviewer outside the old
-automatic continuation. All contexts must pass identity/idle checks. An orphaned
-`running`/`ready` claim, uncertain context, or missing session is refused and needs
-manual reconciliation of its evidence; there is no automatic recovery/replay or
-context repair command. `--new` also intentionally starts another loop after a
-clean result or abandons a paused boundary. It does not retain report history.
+Collection verifies the structured result with the existing parser. It also
+requires that the provider's exact completed turn contains the recorded prompt
+and matching completion receipt: Codex must report the latest full turn with the
+saved client message ID and an empty queue; Pi must retain the exact prompt and
+final receipt on an uninterrupted native history chain in the same conversation.
+Additional input, replacement sessions, missing/partial history and unsupported
+provider responses refuse collection. Agent idleness, ordinary chat prose, or a
+JSON file alone never prove completion. The current Git state must equal the
+sealed final state; implementation cannot change HEAD/base, and reviews must
+preserve their entire pinned snapshot. Observed review invalidation stays sticky,
+even if files are restored later. Frozen publication metadata is rechecked.
+
+Only this proof can restore the exact context's active state and feed the existing
+loop router. The completed result and next boundary are saved atomically before
+another handoff. Recovery of implementation starts one fresh independent review;
+fixes retain the original reviewer for re-review. A crash after result consumption
+continues at the saved next boundary. Repeating a completed loop returns its saved
+report. Validation limitations, including `not_run` checks, survive restart.
+
+Caught interruption records `interrupted` and prints the repeat-command hint.
+SIGKILL can leave `running`; neither state proves that the agent stopped. Neither
+is a graceful pause. A sticky `--pause-after-current` request survives recovery:
+collect the original pass, then stop at `paused` before the next handoff.
+`--continue` still accepts only a paused boundary.
+
+Absent, truncated, stale, conflicting, forged or late results stop with a diagnostic
+and retain the original claim. A seal written within the saved timeout may be
+collected after controller downtime; restarting never extends an unfinished
+pass's deadline. Restore transient provider access or the original runtime's
+observable identity, then repeat the command. Do not edit evidence, infer success
+from a transcript, reset a checkpoint, or resend a claimed prompt. If proof is
+irretrievably lost, preserve valuable work and stop the agents; explicit
+[forced local-execution disposal](#forced-local-execution-disposal) is the supported
+way to discard a never-published execution before starting over. Published or
+otherwise ambiguous executions require manual inspection. `--new` refuses every
+active claim, including escalated or interrupted ones.
+
+Retention is bounded to one unresolved pass destination per task checkout. The
+result is limited to 1 MiB, the completion seal to 16 KiB, and no unknown directory
+entries are accepted. Accepted output is removed after its result is durably in
+the checkpoint and before another pass; interrupted disposal is retried without
+reaccepting the result. Forced disposal includes unresolved loop artifacts in its
+existing journal and stopped-runtime checks. Temporary-root eviction or missing
+artifacts fail closed; configure host cleanup accordingly for long-lived tasks.
+The checkpoint still stores only the current bounded run (at most 40 passes),
+not historical reports. `--new` after a clean or explicitly paused run requests a
+new loop with a fresh reviewer and replaces that checkpoint.
 
 ## Task pr
 
