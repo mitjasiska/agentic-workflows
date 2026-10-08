@@ -26,6 +26,10 @@ kind = "codex"
 model = "gpt-6-astra"
 mode = "high"
 
+# Optional validation guidance for initial review and same-reviewer re-review.
+[review.validation]
+strategy = "focused_first" # focused_first | exhaustive
+
 # Optional Codex-only override for a repository you explicitly trust. The value
 # names $CODEX_HOME/agentic-workflows-trusted.config.toml; see the README.
 # [codex.repositories."agentic-workflows"]

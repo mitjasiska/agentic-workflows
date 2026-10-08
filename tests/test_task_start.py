@@ -550,6 +550,18 @@ class OrchestrationTests(unittest.TestCase):
         self.linear.start.assert_not_called()
         self.agent.launch.assert_not_called()
 
+    def test_invalid_validation_config_fails_before_execution_mutation(self):
+        with patch('task_start.config.read_toml', return_value=dict(projects_root='/projects',
+                linear=dict(api_key='test-placeholder'), review=dict(validation=dict(strategy='invalid')))), \
+                patch('task_start.cli.load_local', side_effect=load_local):
+            with self.assertRaisesRegex(TaskError, 'review.validation.strategy'):
+                cli.start('DEV-7')
+        self.linear.get_issue.assert_not_called()
+        self.git.update_base.assert_not_called()
+        self.herdr.prepare.assert_not_called()
+        self.linear.start.assert_not_called()
+        self.agent.launch.assert_not_called()
+
     def test_no_agent_without_instructions_still_prepares_and_updates_status(self):
         self.enterContext(patch('task_start.cli.load_local', return_value=replace(
             LOCAL, issue_structure=IssueStructureConfig('required'))))

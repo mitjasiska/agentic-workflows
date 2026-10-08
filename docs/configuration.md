@@ -2,7 +2,7 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md)
 
-Installation, project mapping, issue structure, agent selection, repository permission profiles,
+Installation, project mapping, issue structure, agent selection, review validation, repository permission profiles,
 and GitHub API credentials for the `task` CLI.
 
 ## Installation and project mapping
@@ -162,6 +162,26 @@ Optional `--agent`, `--model`, and `--mode` override those fields independently;
 model and mode must both be explicit before integration mutation or launch.
 It always creates a fresh integration context; it does not inherit or change the
 implementation context's settings. See [integration recovery](lifecycle.md#task-integrate).
+
+## Review validation
+
+The optional machine-local setting applies to standalone and loop-owned reviews,
+including same-reviewer re-review:
+
+```toml
+[review.validation]
+strategy = "focused_first" # focused_first | exhaustive
+```
+
+`focused_first` is the default: inspect the full diff, batch actionable findings,
+and use targeted tests; defer expensive full-suite validation on findings passes.
+`exhaustive` requests full validation on every review pass, even with findings.
+Both preserve explicit Linear issue and repository test requirements and read-only
+review safety. Invalid tables or strategy values are rejected before execution
+mutation. Workspace-only start (`--no-agent`) and cleanup skip this execution setting.
+The implementation handoff always prefers test-first work where practical and
+focused local tests; there is no configurable methodology setting.
+See [validation guidance](lifecycle.md#validation-guidance) for final checks and reporting.
 
 ## Codex permissions for trusted repositories
 

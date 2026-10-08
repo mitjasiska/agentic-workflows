@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from task_start import TaskError, cli
 from task_start.agent import AgentExecution, AgentOptions, Codex, LaunchResult, Pi
-from task_start.config import AgentConfig, LocalConfig, Project, load_local
+from task_start.config import AgentConfig, LocalConfig, Project, ReviewValidationConfig, load_local
 from task_start.contexts import ContextRegistry, HerdrContexts, context_observer, context_reference
 from task_start.handoff import review_handoff
 from task_start.review import finalize_reviewer, review
@@ -546,6 +546,29 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "busy"):
             self.registry.claim_review(context)
         self.assertEqual(self.registry.get(first.context_id)["state"], "reviewing")
+
+    def test_validation_strategy_reaches_fresh_and_same_reviewer_handoffs(self):
+        for strategy in ('focused_first', 'exhaustive'):
+            with self.subTest(strategy=strategy):
+                self.local = replace(self.local, review_validation=ReviewValidationConfig(strategy))
+                first = review('DEV-7')
+                second = review('DEV-7', resume=first.context_id)
+                self.assertEqual((first.state, second.state), ('clean', 'clean'))
+                self.assertEqual(second.context_id, first.context_id)
+                for prompt in self.prompts[-2:]:
+                    self.assertIn(f'REVIEW VALIDATION POLICY: {strategy}', prompt)
+
+    def test_invalid_validation_config_precedes_review_execution(self):
+        before = self.registry.list()
+        with patch('task_start.config.read_toml', return_value=dict(projects_root='/projects',
+                linear=dict(api_key='test-placeholder'), review=dict(validation=dict(strategy='invalid')))), \
+                patch('task_start.review.load_local', side_effect=load_local):
+            with self.assertRaisesRegex(TaskError, 'review.validation.strategy'):
+                review('DEV-7')
+        self.linear.get_issue.assert_not_called()
+        self.assertEqual(self.registry.list(), before)
+        self.identity_command.assert_not_called()
+        self.assertEqual(self.prompts, [])
 
     def test_settings_must_be_explicit_and_failed_resume_does_not_create_fresh(self):
         self.local = replace(self.local, reviewer=AgentConfig("codex"))
