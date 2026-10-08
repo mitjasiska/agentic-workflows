@@ -13,6 +13,11 @@ api_key = ""
 mode = "warn" # required | warn | ignore; warn continues when the block is absent
 block_name = "Agent instructions"
 
+# Optional semantic readiness check by the implementation agent before edits.
+# Independent of linear.issue_structure; omit this table to keep it enabled.
+[implementation.task_assessment]
+enabled = true
+
 [agent]
 kind = "codex"
 # Use a model ID accepted by the selected agent and account.

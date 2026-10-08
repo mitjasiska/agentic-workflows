@@ -40,6 +40,11 @@ class ReviewValidationConfig:
 
 
 @dataclass(frozen=True)
+class TaskAssessmentConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class LocalConfig:
     projects_root: Path
     api_key: str = field(repr=False)
@@ -48,6 +53,7 @@ class LocalConfig:
     reviewer: AgentConfig | None = None
     issue_structure: IssueStructureConfig = field(default_factory=IssueStructureConfig)
     review_validation: ReviewValidationConfig = field(default_factory=ReviewValidationConfig)
+    task_assessment: TaskAssessmentConfig = field(default_factory=TaskAssessmentConfig)
 
 
 def read_toml(path: Path) -> dict:
@@ -77,6 +83,8 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
                  else issue_structure_config(data["linear"].get("issue_structure", {})))
     validation = (ReviewValidationConfig() if no_agent
                   else review_validation_config(data.get("review", {})))
+    assessment = (TaskAssessmentConfig() if no_agent
+                  else task_assessment_config(data.get("implementation", {})))
     try:
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
@@ -84,7 +92,7 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         agent = None if no_agent else agent_config(data.get("agent"))
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
         reviewer = None if no_agent else agent_config(data.get("reviewer"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation)
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation, assessment)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 
@@ -111,6 +119,18 @@ def review_validation_config(data: dict) -> ReviewValidationConfig:
     if not isinstance(strategy, str) or strategy.strip() not in {"focused_first", "exhaustive"}:
         raise TaskError("review.validation.strategy must be focused_first or exhaustive")
     return ReviewValidationConfig(strategy.strip())
+
+
+def task_assessment_config(data: dict) -> TaskAssessmentConfig:
+    if not isinstance(data, dict) or set(data) - {"task_assessment"}:
+        raise TaskError("implementation must be a table supporting only task_assessment")
+    assessment = data.get("task_assessment", {})
+    if not isinstance(assessment, dict) or set(assessment) - {"enabled"}:
+        raise TaskError("implementation.task_assessment must be a table supporting only enabled")
+    enabled = assessment.get("enabled", True)
+    if type(enabled) is not bool:
+        raise TaskError("implementation.task_assessment.enabled must be a boolean")
+    return TaskAssessmentConfig(enabled)
 
 
 def agent_config(data: dict | None) -> AgentConfig | None:

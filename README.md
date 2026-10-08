@@ -116,6 +116,14 @@ agent with the current issue and checkout. Renaming an issue does not change its
 existing workspace's identity. Uncommitted work in a reused task checkout is
 preserved.
 
+By default, the implementation agent briefly assesses task readiness before edits,
+using the complete issue and relevant repository context. A ready task proceeds
+automatically in the same session; a blocked task returns specific questions.
+Ordinary issues need no template or `Agent instructions` block for this assessment.
+Set `enabled = false` under `[implementation.task_assessment]` to skip it; the separate
+issue-structure policy and workflow safety checks still apply. See
+[readiness configuration and recovery](docs/configuration.md#implementation-task-readiness).
+
 Use `--no-agent` to prepare or focus the workspace without launching an agent.
 It still updates Linear and works without an agent installation or `[agent]`
 configuration. It cannot be combined with agent selection flags. If an agent is

@@ -1,7 +1,7 @@
 """Purpose-specific semantic handoffs constructed by workflow commands."""
 
 from . import TaskError
-from .config import ReviewValidationConfig
+from .config import ReviewValidationConfig, TaskAssessmentConfig
 from .linear import Issue
 from .review_result import publication_fingerprint, publication_summary_limit
 from .workspace import Workspace
@@ -58,14 +58,43 @@ Continue full-diff inspection and collect the complete findings batch before rep
 }
 
 
-def implementation_handoff(issue: Issue, workspace: Workspace) -> str:
+TASK_ASSESSMENT_INSTRUCTIONS = """
+TASK READINESS ASSESSMENT
+After reading repository instructions, before implementation mutations, briefly assess the complete issue description
+and just enough relevant repository context for objective/outcome clarity, scope and constraints, how completion can be verified,
+feasibility in this repository, and genuinely blocking ambiguity or missing product decisions.
+Resolve ordinary uncertainty through bounded read-only inspection. Do not run broad validation or a full suite just to assess readiness.
+Do not require perfect specifications, acceptance-criteria headings, a template, delimiters, or an Agent instructions block.
+Guidance anywhere in the description counts; missing structure alone is never a readiness blocker.
+Do not invent product decisions, expand scope, edit Linear, rewrite the source description, or create a persistent plan artifact.
+Use this same agent/session; do not delegate assessment, start a planning phase, or request approval for a ready task.
+Before edits, emit a small JSON task_assessment object in the conversation, with exactly state, summary, and questions:
+{"task_assessment": {"state": "ready", "summary": "Brief reason implementation can proceed", "questions": []}}
+or {"task_assessment": {"state": "blocked", "summary": "Specific missing decision", "questions": ["Specific blocking question?"]}}.
+Ready continues implementation automatically in this turn. Blocked stops before implementation mutations; ask only questions
+that genuinely prevent safe implementation. For a blocked assessment when RESULT DELIVERY is supplied, return state=blocked
+and the assessment there, then end the turn; do not wait for answers inside the automated pass or report completed.
+Without RESULT DELIVERY, end with the blocked JSON.
+After clarification in this conversation or a later workflow handoff, reassess with the available answers and current repository
+context, then continue outstanding work without replaying completed work. Preserve the workflow's stop and resume boundaries.
+"""
+
+
+TASK_ASSESSMENT_DISABLED_INSTRUCTIONS = """
+Explicit task readiness assessment is disabled for this handoff, overriding any assessment instruction from earlier turns.
+Skip the explicit assessment and proceed with ordinary implementation behavior; all workflow safety instructions still apply.
+"""
+
+
+def implementation_handoff(issue: Issue, workspace: Workspace, *, assessment=TaskAssessmentConfig()) -> str:
     """Build the task-start implementation handoff before adapter selection."""
     scope = (f"\nSlice: {workspace.slice}\n"
              "Implement only this slice of the task. Ask if its scope is unclear.\n"
              if workspace.slice is not None else "")
     handoff = (f"Implement Linear issue {issue.identifier}.\n\nTitle:\n{issue.title}\n\n"
                f"Task:\n{issue.description}\n\nWorkflow-owned implementation instructions:\n"
-               f"{IMPLEMENTATION_INSTRUCTIONS}{scope}\n"
+               f"{IMPLEMENTATION_INSTRUCTIONS}{scope}"
+               f"{TASK_ASSESSMENT_INSTRUCTIONS if assessment.enabled else TASK_ASSESSMENT_DISABLED_INSTRUCTIONS}\n"
                f"Prepared checkout: {workspace.path}\nBranch: {workspace.branch}\n")
     if "\0" in handoff:
         raise TaskError("Linear context contains a NUL character and cannot be delivered to the execution agent")
