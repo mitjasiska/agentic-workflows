@@ -610,9 +610,12 @@ alone is insufficient: Herdr's foreground argv must name an ordinary interactive
 system shell and match that process's local executable and command line. This
 requires readable `/proc` evidence on Herdr's host/PID namespace. Other panes in
 the task workspace, or reporting a cwd/foreground cwd in the task checkout, must
-also have explicit sessionless, inactive agent reports and verified shell processes.
-A missing report, a retained provider session, or contradictory activity blocks
-recovery even when the pane reports no agent. Missing,
+also have no agent/session evidence and verified shell processes. Herdr may omit
+`agent` and `agent_session` and report `agent_status: "unknown"` for an ordinary
+shell. Missing/null metadata or an `unknown`, `idle`, or `done` status only permits
+process verification; it never proves idleness. Every related pane must still pass
+the shell/process checks above. A reported agent, retained provider session,
+contradictory activity, or missing process evidence blocks recovery. Missing,
 replaced, moved, ambiguous, busy, or conflicting contexts/panes refuse recovery.
 Authentication failures, invalid requirements, and continued unavailability do
 not bypass these checks or reset the saved checkpoint.

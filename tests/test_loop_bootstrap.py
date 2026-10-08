@@ -132,7 +132,7 @@ class InitialAdapter(ImplementationAdapter):
         test.assertNotIn('Continue in YOUR existing', execution.handoff)
         test.launches.append(execution)
         pane = test.panes[0]
-        pane.update(agent=execution.options.kind,
+        pane.update(agent=execution.options.kind, agent_status='idle',
                     agent_session=dict(agent='pi', kind='path', value='/implementation.jsonl'))
         execution.runtime_observer(dict(herdr_session=json.dumps(pane['agent_session'])))
         # Session identity is retained before delivery can become uncertain.
@@ -157,7 +157,7 @@ class BootstrapLoopTests(unittest.TestCase):
             pane_id = args[1]
             pid = {'p1': 123, 'p2': 124}[pane_id]
             return dict(process_info=dict(pane_id=pane_id, shell_pid=pid,
-                foreground_process_group_id=pid, foreground_processes=[dict(pid=pid, argv=['bash'])]))
+                foreground_process_group_id=pid, foreground_processes=[dict(pid=pid, argv=['/bin/bash'])]))
         return loop_fixture.LoopIntegrationTests.pane_command(self, group, operation, *args)
 
     def select_adapter(self, options):
@@ -172,13 +172,17 @@ class BootstrapLoopTests(unittest.TestCase):
         # registry remains in its disposable directory and is never consulted.
         self.registry = ContextRegistry(self.repo.parent / 'initial-contexts.sqlite3')
         self.enterContext(patch('task_start.loop.ContextRegistry', return_value=self.registry))
-        self.panes[0].update(agent=None, agent_session=None, label='Shell')
+        # Actual DEV-75 Herdr shell response: optional agent/session keys omitted,
+        # status unknown. Only process evidence can establish an idle shell.
+        self.panes[0].pop('agent', None)
+        self.panes[0].pop('agent_session', None)
+        self.panes[0].update(agent_status='unknown', label='Shell')
         self.proc = self.repo.parent / 'bootstrap-proc'
         for pid in (123, 124):
             entry = self.proc / str(pid)
             entry.mkdir(parents=True)
             (entry / 'exe').symlink_to('/bin/bash')
-            (entry / 'cmdline').write_bytes(b'bash\0')
+            (entry / 'cmdline').write_bytes(b'/bin/bash\0')
         self.enterContext(patch('task_start.contexts.verify_shell_process',
             side_effect=lambda pid, argv: verify_shell_process(pid, argv, proc=self.proc)))
         self.implementer = InitialAdapter(self)
@@ -269,7 +273,7 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual(self.launches, [])
         return result
 
-    def test_repeat_command_recovers_503_reservation_once_with_saved_settings(self):
+    def test_dev75_shell_response_recovers_503_reservation_once_with_saved_settings(self):
         failed = self.fail_before_launch(max_reviews=2, max_passes=4, impl_model='saved-model')
         self.assertIn('task loop DEV-7', failed.render())
         before = self.store.read()[0]
@@ -289,6 +293,38 @@ class BootstrapLoopTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             loop('DEV-7')
         self.assertEqual(len(self.launches), 1)
+
+    def test_recovery_optional_shell_metadata_always_requires_process_proof(self):
+        self.fail_before_launch()
+        before, context = self.store.read(), self.registry.get('DEV-7-I1')
+        shell = dict(self.panes[0])
+        del shell['agent_status']
+        runtime = LoopRuntime('DEV-7', None, startup_recovery=True)
+        for metadata in ({}, dict(agent_status=None), dict(agent_status='unknown'),
+                         dict(agent=None), dict(agent_session=None),
+                         dict(agent=None, agent_session=None, agent_status='idle'),
+                         dict(agent=None, agent_session=None, agent_status='done')):
+            for location in ({}, dict(workspace_id='w2', cwd=str(self.path)),
+                             dict(workspace_id='w2', cwd=str(self.repo), foreground_cwd=str(self.path / 'src'))):
+                with self.subTest(metadata=metadata, location=location):
+                    self.panes[:] = [dict(shell, **metadata),
+                                    dict(shell, pane_id='p2', terminal_id='term2', **metadata, **location)]
+                    with patch.object(self.identities, 'command', side_effect=self.pane_command) as command:
+                        runtime.prepare(before[0])
+                    self.assertEqual([c.args for c in command.call_args_list],
+                                     [('pane', 'process-info', '--pane', 'p1'),
+                                      ('pane', 'process-info', '--pane', 'p2')])
+                    for unverified in ('p1', 'p2'):
+                        def observe(group, operation, *args):
+                            if operation == 'process-info' and args[1] == unverified:
+                                return dict(process_info={})
+                            return self.pane_command(group, operation, *args)
+                        with patch.object(self.identities, 'command', side_effect=observe), \
+                                self.assertRaisesRegex(TaskError, f'Pane {unverified}.*unverified'):
+                            runtime.prepare(before[0])
+                    self.assertEqual(self.store.read(), before)
+                    self.assertEqual(self.registry.get('DEV-7-I1'), context)
+        self.assertEqual(self.launches, [])
 
     def test_startup_read_recovers_within_same_command_retry_budget(self):
         read = Linear('placeholder').get_issue
@@ -402,8 +438,11 @@ class BootstrapLoopTests(unittest.TestCase):
         before, original = self.store.read(), copy.deepcopy(self.panes)
         for change in (dict(terminal_id='replaced'), dict(pane_id='replaced'), dict(tab_id='moved'),
                        dict(workspace_id='moved'), dict(cwd=str(self.repo)),
-                       dict(agent='pi'), dict(agent_status='working'), dict(agent_status='unknown'),
-                       dict(agent_session=dict(agent='pi', kind='path', value='/existing.jsonl'))):
+                       dict(agent='pi'), dict(agent='codex'), dict(agent=False), dict(agent={}),
+                       dict(agent_status='working'), dict(agent_status='blocked'), dict(agent_status={}),
+                       dict(agent_session=False), dict(agent_session={}),
+                       dict(agent_session=dict(agent='pi', kind='path', value='/existing.jsonl')),
+                       dict(agent_session=dict(agent='codex', kind='id', value='conflicting-session'))):
             with self.subTest(change=change):
                 self.panes = [dict(original[0], **change)]
                 with self.assertRaisesRegex(TaskError, 'recovery blocked'):
@@ -415,12 +454,6 @@ class BootstrapLoopTests(unittest.TestCase):
             with self.subTest(panes=panes), self.assertRaisesRegex(TaskError, 'recovery blocked'):
                 loop('DEV-7')
             self.assertEqual(self.store.read(), before)
-        self.panes = original
-        for missing in ('agent', 'agent_session'):
-            self.panes = copy.deepcopy(original)
-            del self.panes[0][missing]
-            with self.assertRaisesRegex(TaskError, 'un[c]?ertain runtime'):
-                loop('DEV-7')
         self.panes = original
         for info in ({}, dict(pane_id='other', shell_pid=123, foreground_process_group_id=123,
                              foreground_processes=[dict(pid=123)]),
@@ -661,7 +694,7 @@ class BootstrapLoopTests(unittest.TestCase):
         for fault in ('exec_replaced', 'stale_argv', 'missing_exe', 'missing_cmdline'):
             with self.subTest(fault=fault):
                 if fault == 'exec_replaced':
-                    # Even spoofed/stale Herdr argv=['bash'] is insufficient.
+                    # Even spoofed/stale Herdr argv=['/bin/bash'] is insufficient.
                     (entry / 'exe').unlink()
                     (entry / 'exe').symlink_to('/usr/bin/sleep')
                 elif fault == 'stale_argv':
@@ -676,7 +709,7 @@ class BootstrapLoopTests(unittest.TestCase):
                 elif fault == 'exec_replaced':
                     (entry / 'exe').unlink()
                     (entry / 'exe').symlink_to('/bin/bash')
-                (entry / 'cmdline').write_bytes(b'bash\0')
+                (entry / 'cmdline').write_bytes(b'/bin/bash\0')
         self.assertEqual(self.launches, [])
 
     def test_recovery_rejects_competing_session_when_other_pane_has_no_agent(self):
@@ -729,21 +762,17 @@ class BootstrapLoopTests(unittest.TestCase):
         self.fail_before_launch()
         before = self.store.read()
         other = dict(self.panes[0], pane_id='p2', terminal_id='term2')
-        for change in (dict(agent_status='working'), dict(agent_status='unknown'), dict(agent_status={}),
+        for change in (dict(agent_status='working'), dict(agent_status='blocked'), dict(agent_status={}),
+                       dict(agent='pi'), dict(agent='codex'), dict(agent=False), dict(agent={}),
                        dict(agent_session=dict(agent='pi', kind='path', value='/other.jsonl')),
-                       dict(agent_session={})):
+                       dict(agent_session=dict(agent='codex', kind='id', value='other-provider')),
+                       dict(agent_session=False), dict(agent_session={})):
             for location in ({}, dict(workspace_id='w2', cwd=str(self.repo), foreground_cwd=str(self.path / 'src'))):
                 with self.subTest(change=change, location=location):
                     self.panes[:] = [self.panes[0], dict(other, **change, **location)]
-                    with self.assertRaisesRegex(TaskError, 'Pane p2.*runtime evidence'):
+                    with self.assertRaisesRegex(TaskError, 'recovery blocked'):
                         loop('DEV-7')
                     self.assertEqual(self.store.read(), before)
-        for missing in ('agent', 'agent_status', 'agent_session'):
-            self.panes[:] = [self.panes[0], dict(other)]
-            del self.panes[-1][missing]
-            with self.assertRaisesRegex(TaskError, 'Pane p2.*runtime evidence'):
-                loop('DEV-7')
-            self.assertEqual(self.store.read(), before)
         # A busy unrecognized process in another related pane is also unsafe.
         self.panes[:] = [self.panes[0], other]
         (self.proc / '124' / 'exe').unlink()
