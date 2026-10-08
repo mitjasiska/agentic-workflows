@@ -19,6 +19,7 @@ from task_start.loop import loop
 from task_start.loop_state import LoopStore
 from task_start.review_result import parse_verdict
 import test_review as review_fixture
+import pass_delivery_fixture as delivery_fixture
 
 
 def finding(number=1, *, category="implementation", **changes):
@@ -45,8 +46,12 @@ class ImplementationAdapter:
     def status(self, execution, terminal_id, reference):
         return self.test.impl_status
 
+    def observe_delivery(self, execution, reference, receipt, completion):
+        return True  # Provider history is exercised by separate transport tests.
+
     def resume(self, execution, reference, *, recreate):
         test = self.test
+        delivery_fixture.claim(test, execution, reference)
         test.assertFalse(recreate)
         test.assertEqual(reference["value"], "/implementation.jsonl")
         test.assertEqual(execution.purpose, "implementation")
@@ -65,6 +70,7 @@ class ImplementationAdapter:
             output.write_text(test.impl_raw if test.impl_raw is not None else json.dumps(value))
         if items and test.make_progress:
             (test.path / "fix.txt").write_text(str(len(test.impl_prompts)))
+        delivery_fixture.complete(execution)
         if test.on_implementation:
             test.on_implementation(execution, items)
 
@@ -111,9 +117,11 @@ class LoopIntegrationTests(unittest.TestCase):
         self.enterContext(patch("task_start.loop.Linear", return_value=self.linear))
         self.enterContext(patch("task_start.loop.adapter_for", side_effect=self.select_adapter))
         self.enterContext(patch("task_start.implementation_pass.adapter_for", return_value=self.implementer))
+        self.enterContext(patch("task_start.agent.adapter_for", side_effect=lambda options:
+                                self.implementer if options.kind == "pi" else self.adapter))
 
     def run_loop(self, **kwargs):
-        return loop("DEV-7", timeout=0.02, **kwargs)
+        return loop("DEV-7", timeout=0.2, **kwargs)
 
     def pause(self):
         return loop("DEV-7", action="pause")
@@ -635,7 +643,8 @@ class LoopIntegrationTests(unittest.TestCase):
         result = self.run_loop()
         self.assertEqual(result.state, "escalated")
         self.assertEqual((len(self.impl_prompts), len(self.prompts)), (1, 1))
-        self.assertEqual(result.data["final_review_state"], "failed")
+        self.assertEqual(result.data["final_review_state"], "not_run")
+        self.assertEqual(result.data["active_pass"]["phase"], "review")
 
     def test_fresh_review_pane_creation_failure_preserves_readable_escalation(self):
         def fail_creation(group, operation, *args):
@@ -723,11 +732,11 @@ class LoopIntegrationTests(unittest.TestCase):
         result = self.run_loop()
         self.assertEqual(result.state, "escalated", result.render())
         self.assertEqual(result.data["reviewer_context"], "DEV-7-R1")
-        self.assertEqual(result.data["final_review_state"], "failed")
+        self.assertEqual(result.data["final_review_state"], "findings")
         state, pause = LoopStore(self.path).read()
         self.assertEqual(state["reviewer"]["context_id"], "DEV-7-R1")
-        self.assertEqual(state["records"][-1]["context_id"], "DEV-7-R1")
-        self.assertEqual(state["records"][-1]["phase"], "rereview")
+        self.assertEqual(state["active_pass"]["context_id"], "DEV-7-R1")
+        self.assertEqual(state["active_pass"]["phase"], "rereview")
         self.assertEqual(loop("DEV-7", action="status").as_dict(), result.as_dict())
         self.assertEqual(self.recreated, [False])
         self.assertEqual(len(self.registry.list()), 2)
@@ -735,7 +744,7 @@ class LoopIntegrationTests(unittest.TestCase):
         for change in (dict(reviewer=None), {}):
             candidate = copy.deepcopy(state)
             candidate.update(change)
-            candidate["records"][-1]["context_id"] = None
+            candidate["active_pass"]["context_id"] = None
             with self.subTest(change=change), self.assertRaisesRegex(TaskError, "Malformed loop checkpoint"):
                 LoopStore.decode((json.dumps(candidate), pause))
 
@@ -799,11 +808,12 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertIn("not confirmed idle", result.data["reason"])
         self.assertEqual(len(self.impl_prompts), 1)
 
-    def test_invalidated_review_is_collected_and_never_routes_fixes(self):
+    def test_invalidated_review_retains_claim_and_never_routes_fixes(self):
         self.mutation = lambda: (self.path / "drift.txt").write_text("Reviewer drift")
         result = self.run_loop()
         self.assertEqual(result.state, "escalated", result.render())
-        self.assertEqual(result.data["final_review_state"], "blocked")
+        self.assertEqual(result.data["final_review_state"], "not_run")
+        self.assertTrue(self.store.read()[0]["delivery"]["invalidated"])
         self.assertIn("invalidated", result.data["reason"])
         self.assertEqual(len(self.impl_prompts), 1)
 

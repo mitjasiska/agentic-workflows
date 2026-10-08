@@ -196,15 +196,20 @@ class TaskAssessmentLifecycleTests(unittest.TestCase):
             self.assertIn(case.linear.get_issue.return_value.description, case.impl_prompts[-1])
 
     def test_blocked_mutation_and_malformed_outcomes_never_advance_to_review(self):
+        from pass_delivery_fixture import complete
         for malformed in (False, True):
             with self.subTest(malformed=malformed), self.fixture(True) as case:
                 value = assessment('blocked')
                 if malformed:
                     value['questions'] = []
-                else:
-                    case.on_implementation = lambda *_: (case.path / 'unexpected.txt').write_text('unexpected edit')
+                def finish(execution):
+                    if not malformed:
+                        # Model an edit during the pass, before its final seal.
+                        (case.path / 'unexpected.txt').write_text('unexpected edit')
+                    return complete(execution)
                 case.impl_overrides = dict(state='blocked', task_assessment=value)
-                result = case.run_loop()
+                with patch('test_loop.delivery_fixture.complete', side_effect=finish):
+                    result = case.run_loop()
                 self.assertEqual(result.state, 'escalated', result.render())
                 self.assertEqual((len(case.launches), len(case.impl_prompts), len(case.prompts)), (1, 1, 0))
                 self.assertIn('Malformed' if malformed else 'Checkout changed during blocked task assessment', result.data['reason'])

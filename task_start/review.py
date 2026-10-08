@@ -1,6 +1,7 @@
 """One fresh or explicitly resumed review pass, without routing fixes or reports."""
 
 from dataclasses import asdict, replace
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import time
 from uuid import uuid4
 
 from . import TaskError
+from .pass_delivery import object_digest
 from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
@@ -25,7 +27,7 @@ from .workspace import Git, Herdr, Workspace
 
 
 def resolve_review_workspace(issue, project, repo, registry, identities, *, pending_implementation=None,
-                             local_only=False):
+                             local_only=False, recovery_implementation=None):
     git, herdr = Git(repo), Herdr(repo)
     if local_only:
         git.check_repository()
@@ -42,7 +44,7 @@ def resolve_review_workspace(issue, project, repo, registry, identities, *, pend
     if any(c["repository"] != str(repo) or (c["role"] != "integration" and c["worktree"] != str(target.path))
            or c["endpoint"] != endpoint or c["workspace_id"] != target.open_workspace_id for c in contexts):
         raise TaskError("Issue context repository/worktree/Herdr mappings are inconsistent")
-    bound = [c for c in contexts if c["state"] in {"active", "reviewing"}]
+    bound = [c for c in contexts if recovery_implementation or c["state"] in {"active", "reviewing"}]
     for index, context in enumerate(bound):
         for other in bound[:index]:
             shared_runtime = any(context[key] and context[key] == other[key] for key in ("pane_id", "terminal_id"))
@@ -52,7 +54,9 @@ def resolve_review_workspace(issue, project, repo, registry, identities, *, pend
             if shared_runtime or shared_session:
                 raise TaskError("Multiple workflow contexts claim the same reviewer/implementation identity")
     implementation_state = "launching" if pending_implementation else "active"
-    implementations = [c for c in contexts if c["role"] == "implementation" and c["state"] == implementation_state]
+    implementations = [c for c in contexts if c["role"] == "implementation" and
+                       (c["state"] == implementation_state or recovery_implementation == c["context_id"]
+                        and c["state"] in {"launching", "uncertain"})]
     if len(implementations) != 1:
         raise TaskError("Review requires exactly one active implementation context mapping")
     if pending_implementation and (len(contexts) != 1 or implementations[0]["context_id"] != pending_implementation):
@@ -181,7 +185,7 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
 
 def review_pass(issue, project, repo, registry, identities, workspace, anchor, base, endpoint,
                 local, resume, agent_kind, model, mode, timeout, store, *, loop_feedback=None,
-                before_handoff=None, pass_observer=None):
+                before_handoff=None, pass_observer=None, delivery=None):
     registry.check_pending_startup(issue.identifier, repo, workspace.path, "review")
     context, pane = (resolve_reviewer(resume, issue, workspace, repo, endpoint, registry, identities)
                      if resume is not None else (None, None))
@@ -245,25 +249,30 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
         except TaskError:
             post = None
             invalidated = True
+        if delivery and invalidated and delivery.state.get("delivery"):
+            delivery.invalidate_review()
 
     policy = codex_repository_policy(local.codex_repository_profiles, project.repo_name) if options.kind == "codex" else {}
     policy = dict(policy, read_only=True)
     try:
-        with tempfile.TemporaryDirectory(prefix="task-review-") as directory:
-            if Path(directory).resolve().is_relative_to(workspace.path):
+        with (nullcontext(None) if delivery else tempfile.TemporaryDirectory(prefix="task-review-")) as directory:
+            if directory is not None and Path(directory).resolve().is_relative_to(workspace.path):
                 raise TaskError("Temporary review output must be outside the task checkout; check TMPDIR")
-            output = Path(directory) / "result.json"
+            output = Path(directory) / "result.json" if directory is not None else None
 
             def handoff(allocated):
-                nonlocal context_id, claimed
+                nonlocal context_id, claimed, output
                 context_id = allocated
                 claimed = True
-                if pass_observer:
+                if delivery:
+                    output = delivery.create(allocated, pass_id,
+                        review=dict(pass_kind=pass_kind, frozen=frozen, publication=object_digest(saved)))
+                elif pass_observer:
                     pass_observer(allocated, pass_id)
                 return review_handoff(issue, repo, workspace, project.base_branch, before,
                                       context_id, pass_kind, options, pass_id, output, frozen_publication=frozen,
                                       loop_feedback=loop_feedback, validation=local.review_validation,
-                                      scope=local.implementation_scope)
+                                      scope=local.implementation_scope) + (delivery.contract() if delivery else "")
 
             if before_handoff:
                 before_handoff()
@@ -275,12 +284,15 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                 # old tab. split rechecks this anchor before creating the pane.
                 pane = identities.split(anchor, workspace.path)
             workspace = replace(workspace, pane_id=pane["pane_id"], tab_id=pane["tab_id"])
+            # The handoff records delivery coordinates from this binding.
+            if context and pane["pane_id"] != context["pane_id"]:
+                registry.rebind_review_pane(context, pane)
             execution = AgentExecution(issue, repo, workspace, options,
                                        handoff(context_id) if context else "Review handoff pending allocation",
                                        purpose="review", policy=policy)
+            if delivery:
+                execution = delivery.attach(execution, add_contract=False)
             if context:
-                if pane["pane_id"] != context["pane_id"]:
-                    registry.rebind_review_pane(context, pane)
                 identities.label(pane, context_id)
                 execution = replace(execution, runtime_observer=context_observer(registry, context_id))
                 execution.runtime_observer(dict(herdr_session=json.dumps(reference)))
@@ -307,6 +319,8 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                 context = registry.get(context_id)
                 reference = context_reference(context)
                 execution = replace(execution, runtime_observer=context_observer(registry, context_id))
+            if delivery:
+                delivery.started()
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 checkpoint()
@@ -334,6 +348,8 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                         status = adapter.review_status(execution, pane["terminal_id"], reference)
                 finally:
                     checkpoint()
+                if delivery and invalidated:
+                    raise TaskError("Checkout changed during review; retained pass is invalidated")
                 reference = context_reference(registry.get(context_id))
                 if status == "blocked":
                     state, summary = "blocked", "Reviewer needs human intervention; a new pass is required"
@@ -341,7 +357,11 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
                 if status in {"idle", "done"} and output.exists():
                     if output.is_symlink() or not output.is_file() or output.stat().st_size > 1024 * 1024:
                         raise TaskError("Invalid reviewer result file")
-                    verdict = parse_verdict(output.read_text(encoding="utf-8"), pass_id,
+                    raw = delivery.verify(adapter, execution) if delivery else output.read_text(encoding="utf-8")
+                    if raw is None:
+                        time.sleep(0.25)
+                        continue
+                    verdict = parse_verdict(raw, pass_id,
                                             frozen_fingerprint=frozen_fingerprint, identifier=issue.identifier,
                                             routing=loop_feedback is not None)
                     state, summary = verdict["state"], verdict["summary"]
@@ -354,6 +374,8 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
             else:
                 summary = "Timed out waiting for validated reviewer output; inspect the pane before another pass"
     except (TaskError, OSError, UnicodeError) as error:
+        if delivery and delivery.state.get("delivery"):
+            raise  # Retain the active claim; only proven structured results route.
         state, summary = "failed", str(error)
     finally:
         if context_id and claimed and not fresh_launch_failed:
@@ -377,17 +399,28 @@ def review_pass(issue, project, repo, registry, identities, workspace, anchor, b
         state, summary = "blocked", ("Implementation changed during review, its state could not be verified, or frozen publication metadata changed. "
                                      "This pass is invalidated; a new pass is required. "
                                      "Reviewer-caused task changes also violate read-only review policy.")
+    if (delivery and delivery.state.get("delivery")
+            and (invalidated or verdict is None or state != verdict["state"])):
+        raise TaskError(summary)
     if state == "clean":
-        saved["acceptance"] = dict(version=1, issue=issue.identifier, repository=str(repo),
-            worktree=str(workspace.path), branch=workspace.branch, workspace_id=workspace.workspace_id,
-            endpoint=endpoint, base_branch=project.base_branch, context_id=context_id,
-            pass_id=pass_id, pass_kind=pass_kind, verdict="clean", completed_at=now(),
-            review_state=before.as_dict(), execution=asdict(options),
-            session=merge_session(None, context_reference(registry.get(context_id)), options.kind),
-            publication=verdict.get("publication") if frozen is None else None)
-        if frozen is not None:
-            saved["acceptance"]["publication_approval"] = verdict["publication_approval"]
-        store.write(saved)
+        accept_review(store, saved, issue, repo, workspace, endpoint, project.base_branch,
+                      context_id, pass_id, pass_kind, before.as_dict(), options,
+                      context_reference(registry.get(context_id)), verdict, frozen)
     return ReviewResult(state, summary, context_id, pass_kind, asdict(options), before.as_dict(), pass_id,
                         verdict["findings"] if verdict else [], verdict["checks"] if verdict else [],
                         invalidated, post.fingerprint if post else None)
+
+
+def accept_review(store, saved, issue, repo, workspace, endpoint, base_branch,
+                  context_id, pass_id, pass_kind, before, options, reference, verdict, frozen):
+    """Shared acceptance writer for live and reconciled loop results."""
+    saved["acceptance"] = dict(version=1, issue=issue.identifier, repository=str(repo),
+            worktree=str(workspace.path), branch=workspace.branch, workspace_id=workspace.workspace_id,
+            endpoint=endpoint, base_branch=base_branch, context_id=context_id,
+            pass_id=pass_id, pass_kind=pass_kind, verdict="clean", completed_at=now(),
+            review_state=before, execution=asdict(options),
+            session=merge_session(None, reference, options.kind),
+            publication=verdict.get("publication") if frozen is None else None)
+    if frozen is not None:
+        saved["acceptance"]["publication_approval"] = verdict["publication_approval"]
+    store.write(saved)

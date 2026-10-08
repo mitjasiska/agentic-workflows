@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, replace
 import copy
 import hashlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,13 +13,15 @@ from . import TaskError
 from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, resolve_agent_options
 from .config import load_local, load_projects, repository_path, resolve_project
-from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch
-from .implementation_pass import binding, implementation_pass, implementation_target, initial_execution
+from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch, context_observer, context_reference
+from .implementation_pass import binding, implementation_pass, implementation_target, initial_execution, parse_implementation
 from .linear import Linear, LinearUnavailable
 from .loop_state import LoopStore, PauseRequested, startup_recovery_blocker
 from .publication_state import PublicationStore, prepare_review_continuation
 from .preparation import check_issue_structure, prepare_task
-from .review import resolve_review_workspace, resolve_reviewer, review_pass
+from .review import resolve_review_workspace, resolve_reviewer, review_pass, accept_review
+from .review_result import parse_verdict, publication_fingerprint
+from .pass_delivery import PassDelivery, dispose, object_digest
 from .review_state import snapshot
 from .workspace import Git, Herdr
 
@@ -27,7 +30,7 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
-def environment(identifier, *, allow_bootstrap=False, pending_implementation=None):
+def environment(identifier, *, allow_bootstrap=False, pending_implementation=None, recovery_implementation=None):
     local = load_local()
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
@@ -40,7 +43,8 @@ def environment(identifier, *, allow_bootstrap=False, pending_implementation=Non
             raise TaskError("Context history exists without an established implementation; inspect it before starting")
         return env
     env.workspace, env.anchor, env.base, env.endpoint = resolve_review_workspace(
-        issue, project, repo, registry, identities, pending_implementation=pending_implementation)
+        issue, project, repo, registry, identities, pending_implementation=pending_implementation,
+        recovery_implementation=recovery_implementation)
     return env
 
 
@@ -173,7 +177,7 @@ def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_r
         status="ready", reason="Implementation completion pending", next_phase="implementation", active_pass=None,
         pass_count=0, review_count=0, max_reviews=max_reviews, max_passes=max_passes, timeout=timeout,
         snapshot=snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict(),
-        findings=[], seen=[], records=[])
+        findings=[], seen=[], records=[], delivery=None)
     if initial_options is not None:
         state.update(version=3, initial_phase="initial_implementation", next_phase="initial_implementation",
                      implementation_options=asdict(initial_options), reason="Initial implementation pending")
@@ -263,6 +267,7 @@ class LoopRuntime:
 
     def execute(self, state, before_handoff, pass_observer):
         env, phase = self.env, state["next_phase"]
+        delivery = PassDelivery(state, pass_observer, env)
         if phase in {"initial_implementation", "implementation", "fixes"}:
             saved = self.publication.read()
             if saved["rebase"] is not None and saved["rebase"].get("result") is None:
@@ -271,10 +276,12 @@ class LoopRuntime:
                 {k: state["binding"][k] for k in ("issue", "repository", "worktree", "branch", "base_branch")}, env.base)
             saved.update(acceptance=None, intent=None)
             self.publication.write(saved)
-            return implementation_pass(env, state["implementation"], state["findings"], state["timeout"],
+            result = implementation_pass(env, state["implementation"], state["findings"], state["timeout"],
                                        before_handoff, pass_observer,
                                        initial_options=AgentOptions(**state["implementation_options"])
-                                       if phase == "initial_implementation" else None)
+                                       if phase == "initial_implementation" else None, delivery=delivery)
+            self.completed_snapshot = delivery.completed_snapshot
+            return result
         options = state["reviewer_options"]
         feedback = ({} if phase == "review" else
                     dict(findings=state["findings"], resolutions=state["records"][-1]["resolutions"]))
@@ -285,15 +292,121 @@ class LoopRuntime:
             options["model"] if phase == "review" else None,
             options["mode"] if phase == "review" else None,
             state["timeout"], self.publication, loop_feedback=feedback,
-            before_handoff=before_handoff, pass_observer=pass_observer)
+            before_handoff=before_handoff, pass_observer=pass_observer, delivery=delivery)
+        self.completed_snapshot = getattr(delivery, "completed_snapshot", None)
         if result.context_id and result.state in {"clean", "findings"}:
             state["reviewer"] = binding(env.registry.get(result.context_id))
         return dict(pass_id=result.pass_id, context_id=result.context_id, state=result.state,
                     summary=result.summary, findings=result.findings, checks=result.checks, resolutions=[])
 
+    def recover(self, state, persist):
+        """Collect the claimed pass without invoking any adapter delivery method."""
+        if not state.get("delivery"):
+            raise TaskError("Claim lacks durable recovery evidence (possibly a historical temporary result); "
+                            "inspect task contexts; completion cannot be reconstructed or replayed")
+        delivery = PassDelivery(state, persist, None)
+        if delivery.evidence["review"] is not None:
+            delivery.snapshot()
+        env = environment(self.identifier, recovery_implementation=state["implementation"]["context_id"])
+        if task_binding(env) != state["binding"] or requirements(env) != state["requirements"]:
+            raise TaskError("Task requirements or exact checkout binding changed during interrupted pass")
+        self.env = delivery.env = env
+        current = delivery.snapshot()
+        if (current["head"] != state["snapshot"]["head"] or env.base != state["snapshot"]["base_commit"]
+                or state["next_phase"] in {"review", "rereview"} and current != state["snapshot"]):
+            delivery.invalidate_review()
+            raise TaskError("Git history/base or pinned review state changed during interrupted pass")
+        value = delivery.evidence
+        if env.workspace.slice != value["slice"]:
+            raise TaskError("Task slice changed during interrupted pass; saved scope cannot be replaced")
+        if value["review"] is None:
+            idle_reviewers(env, state["reviewer"])
+        else:
+            implementation_target(env, state["implementation"])
+        while True:
+            if value["review"] is not None:
+                delivery.snapshot()
+            try:
+                adapter, execution, pane, reference = delivery.runtime()
+                status = adapter.status(execution, pane["terminal_id"], reference)
+            finally:
+                delivery.checkpoint()
+            if value["invalidated"]:
+                raise TaskError("Checkout changed during review recovery; retained pass is invalidated")
+            if status == "blocked":
+                raise TaskError("Original agent needs human intervention; resolve it in the exact context, then repeat task loop")
+            output = Path(value["directory"]) / "result.json"
+            if status in {"idle", "done"} and output.exists():
+                try:
+                    raw = delivery.verify(adapter, execution)
+                finally:
+                    delivery.checkpoint()
+                if value["invalidated"]:
+                    raise TaskError("Checkout changed during review recovery; retained pass is invalidated")
+                if raw is not None:
+                    break
+            if time.time() >= value["deadline"]:
+                raise TaskError("Original pass deadline expired without proven completion; inspect its retained output/context; "
+                                "timeout cannot be reset by restarting")
+            time.sleep(min(0.25, max(0, value["deadline"] - time.time())))
+        # Observe identity again after the provider read and Git seal check.
+        try:
+            delivery.runtime()
+        finally:
+            delivery.checkpoint()
+        self.completed_snapshot = delivery.completed_snapshot
+        try:
+            fresh = environment(self.identifier, recovery_implementation=state["implementation"]["context_id"])
+        finally:
+            delivery.checkpoint()
+        after = delivery.snapshot()
+        if (task_binding(fresh) != state["binding"] or requirements(fresh) != state["requirements"]
+                or fresh.base != state["snapshot"]["base_commit"]
+                or after != self.completed_snapshot):
+            if fresh.base != state["snapshot"]["base_commit"] or after != self.completed_snapshot:
+                delivery.invalidate_review()
+            raise TaskError("Task requirements or checkout changed while observing the original pass")
+        observed_reference = dict(context_reference(env.registry.get(value["context"]["context_id"])), **reference)
+        if value["review"] is None:
+            result = parse_implementation(raw, value["pass_id"], state["findings"],
+                                          assessment_enabled=value["assessment"])
+            context_observer(env.registry, value["context"]["context_id"])(
+                dict(herdr_session=json.dumps(observed_reference), state="active", resumability="yes"))
+            state["implementation"] = value["context"]
+            implementation_target(env, state["implementation"])
+            return dict(result, context_id=value["context"]["context_id"], findings=[])
+        review = value["review"]
+        saved = self.publication.read()
+        if (saved["intent"] is not None
+                or saved["acceptance"] is not None and saved["acceptance"].get("pass_id") != value["pass_id"]
+                or object_digest(dict(saved, acceptance=None)) != review["publication"]):
+            raise TaskError("Publication state changed during interrupted review")
+        frozen = review["frozen"]
+        verdict = parse_verdict(raw, value["pass_id"], identifier=env.issue.identifier, routing=True,
+                                frozen_fingerprint=publication_fingerprint(frozen) if frozen else None)
+        state["reviewer"] = value["context"]
+        context_observer(env.registry, state["reviewer"]["context_id"])(
+            dict(herdr_session=json.dumps(observed_reference), state="active", resumability="yes"))
+        if verdict["state"] == "clean":
+            accept_review(self.publication, saved, env.issue, env.repo, env.workspace, env.endpoint,
+                env.project.base_branch, state["reviewer"]["context_id"], value["pass_id"], review["pass_kind"],
+                state["snapshot"], execution.options, reference, verdict, frozen)
+        return {k: verdict[k] for k in ("pass_id", "state", "summary", "findings", "checks")} | dict(
+            context_id=state["reviewer"]["context_id"], resolutions=[])
+
     def snapshot(self):
         env = self.env
         return snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict()
+
+    def revoke_active_acceptance(self, state):
+        claim = state["active_pass"]
+        if claim and claim["phase"] in {"review", "rereview"}:
+            saved = self.publication.read()
+            if saved["acceptance"] and saved["acceptance"].get("pass_id") == claim["pass_id"]:
+                if saved["intent"] is not None:
+                    raise TaskError("Publication intent conflicts with an unfinished loop review; inspect without resetting it")
+                saved["acceptance"] = None
+                self.publication.write(saved)
 
     def before_claim(self, state):
         if self.startup_recovery and state["next_phase"] == "initial_implementation":
@@ -314,7 +427,39 @@ def drive(store, state, runtime, *, on_pass_result=None):
     on_pass_result is an optional future persistence seam, invoked only after the
     completed result and next boundary are checkpointed. It never owns routing.
     """
+    def collect(result):
+        delivery = PassDelivery(state, lambda *_: store.save(state), runtime.env) if state.get("delivery") else None
+        try:
+            after = runtime.snapshot()
+        except TaskError:
+            if delivery:
+                delivery.invalidate_review()
+            raise
+        if state.get("delivery") and after != runtime.completed_snapshot:
+            delivery.invalidate_review()
+            raise TaskError("Checkout changed after completion verification; retained pass cannot be accepted")
+        route(state, result, after)
+        store.save(state)
+        if on_pass_result:
+            on_pass_result(copy.deepcopy(result))
+
+    def clean_delivery():
+        if state.get("delivery") and state["active_pass"] is None:
+            dispose(state["delivery"])
+            state["delivery"] = None
+            store.save(state)
+
     try:
+        if state["active_pass"] is not None:
+            collect(runtime.recover(state, lambda *_: store.save(state)))
+        clean_delivery()
+        if state["status"] in {"interrupted", "escalated"} and state["records"] and state["next_phase"] is not None:
+            state.update(status="ready", reason="Completed pass retained; revalidating the next boundary")
+            store.save(state)
+        elif (state["status"] in {"interrupted", "escalated"} and state["records"]
+                and state["records"][-1]["state"] == "clean" and state["next_phase"] is None):
+            state.update(status="clean", reason="Implementation and independent review completed cleanly")
+            store.save(state)
         while state["status"] == "ready":
             _, pause = store.read()
             if pause:
@@ -346,16 +491,24 @@ def drive(store, state, runtime, *, on_pass_result=None):
             result = runtime.execute(state, begin, observe)
             if state["status"] != "running":
                 raise TaskError("Agent pass returned without a recorded handoff claim")
-            route(state, result, runtime.snapshot())
-            store.save(state)
-            if on_pass_result:
-                on_pass_result(copy.deepcopy(result))
+            collect(result)
+            clean_delivery()
     except PauseRequested:
         state.update(status="paused", reason="Paused after collecting the current pass; use --continue explicitly")
     except (KeyboardInterrupt, SystemExit):
-        state.update(status="interrupted", reason="Controller interrupted; handoff completion is uncertain. Inspect contexts; --continue is refused")
+        state.update(status="interrupted", reason=f"Controller interrupted; the original agent may still be working. "
+                     f"Repeat task loop {runtime.identifier} to reconcile the saved pass; --continue only resumes a pause")
+        if state.get("delivery"):
+            state["reason"] += f". Retained evidence: {state['delivery']['directory']}"
     except Exception as error:
+        runtime.revoke_active_acceptance(state)
         state.update(status="escalated", reason=f"{error}. Inspect contexts before recovery; no handoff was retried")
+        if state["active_pass"] is not None:
+            state["reason"] += (f". Preserve the checkpoint/output; repeat task loop {runtime.identifier} after resolving "
+                                "the reported evidence problem. If proof is lost, stop the agents and use task cleanup "
+                                f"{runtime.identifier} --force only to explicitly discard a never-published execution")
+            if state.get("delivery"):
+                state["reason"] += f". Retained evidence: {state['delivery']['directory']}"
         if isinstance(error, LinearUnavailable) and startup_recovery_blocker(state) is None:
             state["reason"] = (f"{error}. No initial handoff was claimed; rerun task loop {runtime.identifier} "
                                "to revalidate and reuse the original reservation")
@@ -433,6 +586,28 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
         store, path = existing
         with PublicationStore(path).locked() as publication:
             state, _ = store.read()
+            if state["active_pass"] is not None and not (state.get("delivery") or {}).get("receipt"):
+                raise TaskError("Saved handoff claim has no durable delivery proof; inspect task contexts and retained "
+                                "output. Never replay it or reconstruct historical temporary output. "
+                                "If proof is lost, stop the agents and explicitly dispose the never-published execution "
+                                f"with task cleanup {identifier} --force")
+            if (state["active_pass"] is not None
+                    or "delivery" in state and state["records"] and state["status"] != "paused"
+                    and (state["next_phase"] is not None or state["records"][-1]["state"] == "clean"
+                         or state.get("delivery"))):
+                if from_review and state.get("initial_phase") != "review":
+                    raise TaskError("Recovery preserves the original boundary; --from-review conflicts")
+                implementation_options = state.get("implementation_options") or {
+                    "kind": state["implementation"].get("agent"), "model": state["implementation"].get("model"),
+                    "mode": state["implementation"].get("mode")}
+                for saved, supplied in ((implementation_options, implementation_overrides),
+                                       (state["reviewer_options"], (agent_kind, model, mode))):
+                    if any(v is not None and v != saved[k] for k, v in zip(("kind", "model", "mode"), supplied)):
+                        raise TaskError("Recovery preserves recorded agent/model/mode; supplied settings conflict")
+                if any(v is not None and v != state[k] for k, v in
+                       (("max_reviews", max_reviews), ("max_passes", max_passes), ("timeout", timeout))):
+                    raise TaskError("Recovery preserves recorded limits and original timeout; supplied bounds conflict")
+                return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)
             blocker = startup_recovery_blocker(state)
             if blocker:
                 raise TaskError("A loop checkpoint already exists; startup recovery blocked: " + blocker

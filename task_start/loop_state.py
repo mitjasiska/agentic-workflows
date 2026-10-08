@@ -16,6 +16,7 @@ from . import TaskError
 from .review_result import unique_object
 from .sessions import has_immutable_identity
 from .task_assessment import validate_assessment
+from .pass_delivery import validate_delivery
 from .workspace import Git
 
 
@@ -46,6 +47,9 @@ def validate_checkpoint(state):
               "reviewer_options", "status", "reason", "next_phase", "active_pass", "pass_count",
               "review_count", "max_reviews", "max_passes", "timeout", "snapshot", "findings", "seen", "records"}
     initial_phase = "implementation"  # Version 1 always starts with completion.
+    if "delivery" in state:
+        fields.add("delivery")
+        validate_delivery(state["delivery"], state)
     if state["version"] == 2:
         fields.add("initial_phase")
         initial_phase = state["initial_phase"]
@@ -147,11 +151,15 @@ def validate_checkpoint(state):
             next_phase = "fixes" if record["state"] == "findings" else None
     if state["review_count"] != reviews + bool(active and active["phase"] in {"review", "rereview"}):
         raise ValueError("missing review evidence")
-    if state["status"] in {"ready", "paused", "running"}:
+    if (state["status"] in {"ready", "paused", "running"} or active is not None
+            or records and state["next_phase"] is not None):
         if state["next_phase"] != next_phase:
             raise ValueError("completed work would be replayed")
         if next_phase in {"fixes", "rereview"} and (not state["findings"] or state["reviewer"] is None):
             raise ValueError("missing feedback or reviewer")
+    if state["status"] == "clean" and (active is not None or state["next_phase"] is not None
+            or not records or records[-1]["state"] != "clean"):
+        raise ValueError("unproven clean boundary")
 
 
 class PauseRequested(Exception):
@@ -162,6 +170,13 @@ class LoopStore:
     def __init__(self, worktree):
         directory = Path(Git(worktree).command("rev-parse", "--absolute-git-dir").strip())
         self.path = directory / "agentic-workflows-loop.sqlite3"
+
+    @classmethod
+    def at_directory(cls, directory):
+        """Inspect registry-known private metadata without requiring a live checkout."""
+        store = cls.__new__(cls)
+        store.path = Path(directory) / "agentic-workflows-loop.sqlite3"
+        return store
 
     @contextmanager
     def connection(self, *, write=False):
@@ -228,7 +243,7 @@ class LoopStore:
                 if not replace:
                     raise TaskError("A loop checkpoint already exists; use --status, --continue for a pause, "
                                     "or explicitly --new after inspecting the previous run")
-                if old["status"] in {"ready", "running"}:
+                if old["status"] in {"ready", "running"} or old["active_pass"] is not None or old.get("delivery"):
                     raise TaskError("An unfinished handoff exists; inspect its contexts before replacing the checkpoint")
             db.execute("INSERT OR REPLACE INTO checkpoint VALUES (1, ?, 0)", (json.dumps(state),))
 
@@ -244,7 +259,8 @@ class LoopStore:
             state, _ = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
             # Recovery retains escalated state during preflight. Record pause
             # intent there without making the boundary resumable before proof.
-            if state["status"] in {"ready", "running", "paused"} or startup_recovery_blocker(state) is None:
+            if (state["status"] in {"ready", "running", "paused"} or state.get("delivery")
+                    and state["active_pass"] is not None or startup_recovery_blocker(state) is None):
                 db.execute("UPDATE checkpoint SET pause=1 WHERE id=1")
         return self.read()
 

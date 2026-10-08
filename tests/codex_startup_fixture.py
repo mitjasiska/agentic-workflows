@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from task_start.agent import Codex
 from task_start import AgentNotReady
+import pass_delivery_fixture
 
 
 TRUST_SCREEN = """  Folder access
@@ -133,9 +134,16 @@ class CodexStartupTransport:
             self.test.assertIsNone(self.queued_at, "handoff must never be resubmitted")
             self.queued_at, self.queued = self.now, params
             self.on_queue(params["input"][0]["text"])
+            self.completion = pass_delivery_fixture.complete_prompt(params["input"][0]["text"])
             if self.queue_error:
                 raise self.queue_error
             return dict(queuedSubmission=dict(id="queue", **params))
+        if method == "thread/queue/list":
+            return dict(data=[], nextCursor=None)
+        if method == "thread/turns/list":
+            return dict(data=[dict(id="task-turn", status="completed", error=None, itemsView="full", items=[
+                dict(type="userMessage", clientId=self.queued["clientUserMessageId"], content=self.queued["input"]),
+                dict(type="agentMessage", phase="final_answer", text=self.completion)])], nextCursor=None)
         self.test.fail(method)
 
     def accept_setup(self):

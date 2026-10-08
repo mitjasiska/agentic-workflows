@@ -63,6 +63,8 @@ class AgentExecution:
     # Optional workflow-owned persistence hook; never includes the semantic handoff.
     runtime_observer: Callable[[dict], None] | None = field(default=None, compare=False, repr=False)
     context_id: str | None = None
+    # Persist provider identity and prompt digest BEFORE the one delivery attempt.
+    delivery_observer: Callable[[dict, str, str], None] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.handoff, str) or not self.handoff.strip():
@@ -106,6 +108,8 @@ class AgentAdapter(Protocol):
 
     def status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
 
+    def observe_delivery(self, execution, reference, receipt, completion): ...
+
     def verify_abandonment(self, path: Path, shell_pid: int | None, *, allow_readiness=False) -> dict: ...
 
 
@@ -140,6 +144,9 @@ class HerdrAgentAdapter:
 
     def validate_options(self) -> None:
         pass
+
+    def observe_delivery(self, execution, reference, receipt, completion):
+        raise TaskError(f"{self.display_name} cannot prove this saved pass; preserve its claim for inspection")
 
     def check_available(self) -> None:
         if shutil.which(self.kind) is None:
@@ -318,6 +325,8 @@ class HerdrAgentAdapter:
             # Authenticate the observed provider conversation AFTER startup. A
             # path-based provider may have recreated an empty file during launch.
             self.verify_review_session(execution.workspace, reference)
+            if execution.delivery_observer:
+                execution.delivery_observer(reference, str(uuid4()), execution.handoff)
             prompted = self.command("agent", "prompt", execution.workspace.pane_id, execution.handoff)["agent"]
             observed = self.observe_agent(execution, prompted, observed, expected_session=reference)
             self.confirm_target(execution, observed, expected_session=reference)
@@ -464,6 +473,8 @@ class CodexAdapter(HerdrAgentAdapter):
                 raise TaskError("Reviewer is not idle; no follow-up was queued")
             message_id = str(uuid4())
             inputs = [{"type": "text", "text": execution.handoff, "text_elements": []}]
+            if execution.delivery_observer:
+                execution.delivery_observer(reference, message_id, execution.handoff)
             with CodexRPC(execution.workspace.path) as rpc:
                 queued = rpc.request("thread/queue/add", {"threadId": thread_id,
                     "clientUserMessageId": message_id, "input": inputs})["queuedSubmission"]
@@ -769,6 +780,8 @@ class CodexAdapter(HerdrAgentAdapter):
                     observed = self.confirm_target(execution, observed, expected_session=provider_session)
                 phase = "prompt queue"
                 inputs = [{"type": "text", "text": prompt, "text_elements": []}]
+                if execution.delivery_observer:
+                    execution.delivery_observer(provider_session, message_id, execution.handoff)
                 queued = rpc.request("thread/queue/add", {"threadId": thread_id,
                                      "clientUserMessageId": message_id, "input": inputs})["queuedSubmission"]
                 if (queued["clientUserMessageId"] != message_id or queued["input"] != inputs
@@ -789,6 +802,48 @@ class CodexAdapter(HerdrAgentAdapter):
             raise TaskError(f"Codex {phase} failed in pane {workspace.pane_id}: {error}. "
                             f"Session: {thread_id or 'not yet observed'}. "
                             "Workspace left intact; inspect the pane before retrying") from None
+
+    def observe_delivery(self, execution, reference, receipt, completion):
+        """Read the exact latest turn and empty queue; never submit or resume."""
+        try:
+            with CodexRPC(execution.workspace.path) as rpc:
+                thread = rpc.request("thread/read", {"threadId": reference["value"]})["thread"]
+                if (thread["id"] != reference["value"] or Path(thread["cwd"]).resolve() != execution.workspace.path
+                        or thread.get("forkedFromId") is not None or thread.get("parentThreadId") is not None):
+                    raise ValueError("different thread")
+                # Only the latest turn can finish this pass. Additional input,
+                # forks, pagination ambiguity and queued follow-ups all refuse.
+                page = rpc.request("thread/turns/list", dict(threadId=reference["value"],
+                    sortDirection="desc", limit=1, itemsView="full"))
+                queue = rpc.request("thread/queue/list", dict(threadId=reference["value"], limit=1))
+                if queue["data"] != [] or queue["nextCursor"] is not None:
+                    raise TaskError("Codex has pending input; saved pass completion is not exclusive")
+                if not isinstance(page["data"], list) or len(page["data"]) != 1:
+                    raise ValueError("missing turn")
+                turn = page["data"][0]
+                if turn["itemsView"] != "full" or not isinstance(turn["items"], list):
+                    raise ValueError("partial turn")
+                users = [item for item in turn["items"] if item["type"] == "userMessage"]
+                if len(users) != 1:
+                    raise ValueError("ambiguous input")
+                user = users[0]
+                content = user["content"]
+                if (user["clientId"] != receipt["message_id"] or len(content) != 1
+                        or content[0]["type"] != "text"
+                        or hashlib.sha256(content[0]["text"].encode()).hexdigest() != receipt["prompt_sha256"]):
+                    raise ValueError("different pass input")
+                if turn["status"] == "inProgress":
+                    return False
+                if turn["status"] != "completed" or turn["error"] is not None:
+                    raise ValueError("incomplete or failed turn")
+                finals = [item for item in turn["items"] if item["type"] == "agentMessage"
+                          and item.get("phase") == "final_answer"]
+                if (len(finals) != 1 or completion is not None and finals[0]["text"] != completion
+                        or turn["items"][-1] != finals[0]):
+                    raise ValueError("missing structured completion receipt")
+                return True
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise TaskError("Codex saved turn does not prove exact pass completion; preserve output and inspect the context") from None
 
     def find_session(self, rpc, workspace: Workspace, bootstrap: str, *, deadline=None) -> str:
         deadline = time.monotonic() + 30 if deadline is None else deadline
@@ -854,6 +909,60 @@ class PiAdapter(HerdrAgentAdapter):
     kind = "pi"
     display_name = "Pi"
     MODES = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def delivery_session(self, workspace, reference):
+        """The native header exists before Pi's first task message."""
+        try:
+            path = Path(reference["value"])
+            if reference["kind"] != "path" or not path.is_absolute() or path.is_symlink():
+                raise ValueError("not a session file")
+            with path.open(encoding="utf-8") as source:
+                header = json.loads(source.readline(65536))
+            if (header["type"] != "session" or not isinstance(header["id"], str) or not header["id"]
+                    or Path(header["cwd"]).resolve() != workspace.path
+                    or reference.get("conversation_id", header["id"]) != header["id"]):
+                raise ValueError("wrong session")
+            return dict(reference, conversation_id=header["id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            raise TaskError("Pi delivery needs its exact persisted session header; no prompt was sent") from None
+
+    def observe_delivery(self, execution, reference, receipt, completion):
+        verified = self.verify_session(execution.workspace, reference)
+        if verified != reference:
+            raise TaskError("Pi conversation changed during saved pass")
+        try:
+            found, parent, final, total = False, None, None, 0
+            with Path(reference["value"]).open(encoding="utf-8") as source:
+                for line in iter(lambda: source.readline(2 * 1024 * 1024 + 1), ""):
+                    total += len(line)
+                    if total > 64 * 1024 * 1024 or len(line) > 2 * 1024 * 1024:
+                        raise ValueError("history exceeds observation bound")
+                    entry = json.loads(line)
+                    if entry.get("type") != "message":
+                        if found:
+                            raise ValueError("history branched or compacted during pass")
+                        continue
+                    message = entry["message"]
+                    content = message.get("content")
+                    text = (content if isinstance(content, str) else
+                            content[0]["text"] if isinstance(content, list) and len(content) == 1
+                            and content[0].get("type") == "text" else None)
+                    match = (message["role"] == "user" and text is not None
+                             and hashlib.sha256(text.encode()).hexdigest() == receipt["prompt_sha256"])
+                    if found:
+                        if entry["parentId"] != parent or message["role"] == "user":
+                            raise ValueError("different history branch or additional input")
+                    elif match:
+                        found = True
+                    if found:
+                        parent = entry["id"]
+                        final = (message["role"] == "assistant" and message.get("stopReason") == "stop"
+                                 and (completion is None or text == completion))
+            if not found:
+                raise ValueError("claimed prompt not found")
+            return bool(final)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+            raise TaskError("Pi history does not prove the exact saved pass; preserve its claim for inspection") from None
 
     def validate_options(self) -> None:
         mode = "off" if self.options.mode == "none" else self.options.mode
@@ -998,6 +1107,9 @@ class PiAdapter(HerdrAgentAdapter):
             observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose in {"review", "integration"}))
             observed = self.confirm_target(execution, observed)
             phase = "prompt submission"
+            if execution.delivery_observer:
+                reference = self.delivery_session(workspace, observed["_session_reference"])
+                execution.delivery_observer(reference, str(uuid4()), execution.handoff)
             prompted = self.command("agent", "prompt", workspace.pane_id, execution.handoff)["agent"]
             observed = self.observe_agent(execution, prompted, observed)
             if prompted.get("agent_status") not in {"idle", "done", "working"}:
