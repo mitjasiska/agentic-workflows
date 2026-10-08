@@ -14,8 +14,8 @@ from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, re
 from .config import load_local, load_projects, repository_path, resolve_project
 from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch
 from .implementation_pass import binding, implementation_pass, implementation_target, initial_execution
-from .linear import Linear
-from .loop_state import LoopStore, PauseRequested
+from .linear import Linear, LinearUnavailable
+from .loop_state import LoopStore, PauseRequested, startup_recovery_blocker
 from .publication_state import PublicationStore, prepare_review_continuation
 from .preparation import check_issue_structure, prepare_task
 from .review import resolve_review_workspace, resolve_reviewer, review_pass
@@ -47,6 +47,9 @@ def environment(identifier, *, allow_bootstrap=False, pending_implementation=Non
 def bootstrap(env, options):
     check_issue_structure(env.issue, env.local.issue_structure)
     adapter_for(options).check_available()
+    target = Herdr(env.repo).resolve_task(Git(env.repo), env.issue.identifier, include_remotes=False)
+    if target is not None and LoopStore(target.path).path.exists():
+        raise TaskError("Loop checkpoint exists but its original implementation reservation is missing; inspect before recovery")
     env.workspace = prepare_task(env.issue, env.project, Linear(env.local.api_key), Git(env.repo),
                                  lambda: Herdr(env.repo), default_only=True)
     env.endpoint = env.identities.endpoint()
@@ -161,6 +164,8 @@ def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_r
         # An interruption in this gap leaves a launching context, never a retry.
         if env.registry.list(env.issue.identifier, include_retired=True):
             raise TaskError("Context history changed before initial allocation; inspect before starting")
+        if LoopStore(env.workspace.path).path.exists():
+            raise TaskError("Loop checkpoint already exists; no replacement implementation was reserved")
         execution = initial_execution(env, initial_options)
         implementation = dict(context_id=allocate_launch(execution, env.registry, env.identities))
     state = dict(version=1, run_id=str(uuid4()), binding=task_binding(env), requirements=requirements(env),
@@ -230,8 +235,9 @@ def route(state, result, after):
 
 
 class LoopRuntime:
-    def __init__(self, identifier, publication):
+    def __init__(self, identifier, publication, *, startup_recovery=False):
         self.identifier, self.publication = identifier, publication
+        self.startup_recovery = startup_recovery
         self.env = None
 
     def prepare(self, state):
@@ -242,10 +248,14 @@ class LoopRuntime:
         if snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict() != state["snapshot"]:
             raise TaskError("Checkout/base changed since the saved boundary; no completed pass will be replayed")
         if initial:
+            if self.startup_recovery and env.workspace.slice is not None:
+                raise TaskError("Reserved initial implementation no longer has its original unsliced task scope")
             options = AgentOptions(**state["implementation_options"])
             adapter_for(options).check_available()
             pending_launch(initial_execution(env, options), state["implementation"]["context_id"],
-                           env.registry, env.identities)
+                           env.registry, env.identities, require_idle=self.startup_recovery)
+            if self.startup_recovery:
+                adapter_for(AgentOptions(**state["reviewer_options"])).check_available()
         else:
             implementation_target(env, state["implementation"])
         idle_reviewers(env, state["reviewer"])
@@ -285,6 +295,18 @@ class LoopRuntime:
         env = self.env
         return snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict()
 
+    def before_claim(self, state):
+        if self.startup_recovery and state["next_phase"] == "initial_implementation":
+            pending_launch(initial_execution(self.env, AgentOptions(**state["implementation_options"])),
+                           state["implementation"]["context_id"], self.env.registry, self.env.identities,
+                           require_idle=True)
+            # The cached base object can still exist after its ref advances during
+            # slow shell preflight. Recheck the saved ref before claiming delivery.
+            base = Git(self.env.repo).command(
+                "rev-parse", "--verify", f"refs/heads/{state['binding']['base_branch']}^{{commit}}").strip()
+            if base != state["snapshot"]["base_commit"]:
+                raise TaskError("Base changed before the handoff claim; inspect the saved boundary")
+
 
 def drive(store, state, runtime, *, on_pass_result=None):
     """Single controller, deterministic bounds, no retries of uncertain delivery.
@@ -316,6 +338,7 @@ def drive(store, state, runtime, *, on_pass_result=None):
 
             def begin():
                 # Recheck after potentially slow provider/session preflight.
+                runtime.before_claim(state)
                 if runtime.snapshot() != state["snapshot"]:
                     raise TaskError("Checkout changed before the handoff claim; inspect the saved boundary")
                 store.begin(state)
@@ -333,21 +356,28 @@ def drive(store, state, runtime, *, on_pass_result=None):
         state.update(status="interrupted", reason="Controller interrupted; handoff completion is uncertain. Inspect contexts; --continue is refused")
     except Exception as error:
         state.update(status="escalated", reason=f"{error}. Inspect contexts before recovery; no handoff was retried")
+        if isinstance(error, LinearUnavailable) and startup_recovery_blocker(state) is None:
+            state["reason"] = (f"{error}. No initial handoff was claimed; rerun task loop {runtime.identifier} "
+                               "to revalidate and reuse the original reservation")
     store.save(state)
     return report(*store.read())
 
 
-def control_store(identifier):
+def control_store(identifier, *, optional=False):
     """Pause/status/continue locate exact private state without Linear or local config."""
     contexts = ContextRegistry().list(identifier)
     # Integration contexts retain a separate checkout for recovery/provenance.
     # Only implementation/review contexts identify the task's loop checkpoint.
     paths = {c["worktree"] for c in contexts
              if c["role"] in {"implementation", "review"} and c["worktree"]}
+    if optional and not paths:
+        return None
     if len(paths) != 1:
         raise TaskError("Loop control requires exactly one registered task checkout")
     path = Path(paths.pop())
     store = LoopStore(path)
+    if optional and not store.path.exists():
+        return None
     state, _ = store.read()
     if state["binding"]["issue"] != identifier or state["binding"]["worktree"] != str(path):
         raise TaskError("Loop checkpoint does not match the exact issue/checkout")
@@ -366,12 +396,9 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
     if action not in {"run", "new"} and any(v is not None for v in overrides):
         raise TaskError("Loop controls preserve recorded settings/limits and do not accept selection overrides")
     if action in {"run", "new"}:
-        max_reviews = 3 if max_reviews is None else max_reviews
-        max_passes = 6 if max_passes is None else max_passes
-        timeout = 1800 if timeout is None else timeout
-        if (type(max_reviews) is not int or not 1 <= max_reviews <= 20
-                or type(max_passes) is not int or not 1 <= max_passes <= 40
-                or not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400):
+        if (max_reviews is not None and (type(max_reviews) is not int or not 1 <= max_reviews <= 20)
+                or max_passes is not None and (type(max_passes) is not int or not 1 <= max_passes <= 40)
+                or timeout is not None and (not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400)):
             raise TaskError("Loop requires 1..20 reviews, 1..40 passes, and a positive timeout up to 86400 seconds")
         if from_review and any(v is not None for v in implementation_overrides):
             raise TaskError("--i-* options require a from-scratch loop, not --from-review")
@@ -394,8 +421,46 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
             return report(*store.read())
         with PublicationStore(path).locked() as publication:
             state = store.continue_paused()
-            return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)
+            # A pause outlives the runtime that proved the reservation safe.
+            # Every continued initial handoff must establish that proof again,
+            # including the final runtime/base checks immediately before claim.
+            runtime = LoopRuntime(identifier, publication,
+                                  startup_recovery=state["next_phase"] == "initial_implementation")
+            return drive(store, state, runtime, on_pass_result=on_pass_result)
     implementation_overrides = (impl_agent_kind, impl_model, impl_mode)
+    existing = control_store(identifier, optional=True) if action == "run" else None
+    if existing is not None:
+        store, path = existing
+        with PublicationStore(path).locked() as publication:
+            state, _ = store.read()
+            blocker = startup_recovery_blocker(state)
+            if blocker:
+                raise TaskError("A loop checkpoint already exists; startup recovery blocked: " + blocker
+                                + ". Use --status to inspect; --continue only resumes a pause")
+            if from_review:
+                raise TaskError("Startup recovery preserves initial implementation; --from-review conflicts")
+            selections = dict(max_reviews=max_reviews, max_passes=max_passes, timeout=timeout)
+            for saved, supplied, flags in (
+                    (state["implementation_options"], implementation_overrides, ("--i-agent", "--i-model", "--i-mode")),
+                    (state["reviewer_options"], (agent_kind, model, mode), ("--r-agent", "--r-model", "--r-mode"))):
+                for key, value, flag in zip(("kind", "model", "mode"), supplied, flags):
+                    if value is not None and value != saved[key]:
+                        raise TaskError(f"Startup recovery preserves recorded settings; {flag} conflicts")
+            for key, value in selections.items():
+                if value is not None and value != state[key]:
+                    raise TaskError(f"Startup recovery preserves recorded bounds; --{key.replace('_', '-')} conflicts")
+            runtime = LoopRuntime(identifier, publication, startup_recovery=True)
+            try:
+                runtime.prepare(state)
+            except LinearUnavailable as error:
+                raise TaskError(f"{error}. Startup reservation retained; rerun task loop {identifier} when Linear recovers") from None
+            except TaskError as error:
+                raise TaskError(f"Startup recovery blocked: {error}. Inspect the original context; no handoff was sent") from None
+            state = store.restart_initial(state)
+            return drive(store, state, runtime, on_pass_result=on_pass_result)
+    max_reviews = 3 if max_reviews is None else max_reviews
+    max_passes = 6 if max_passes is None else max_passes
+    timeout = 1800 if timeout is None else timeout
     env = environment(identifier, allow_bootstrap=not from_review)
     options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode),
                                     section="reviewer", agent_flag="--r-agent")

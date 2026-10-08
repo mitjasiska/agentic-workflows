@@ -23,6 +23,23 @@ PHASES = {"initial_implementation", "implementation", "review", "fixes", "rerevi
 STATES = {"ready", "running", "paused", "clean", "escalated", "interrupted"}
 
 
+def startup_recovery_blocker(state):
+    """Structural delivery evidence, including legacy v3 checkpoints, never error prose."""
+    if state["active_pass"] is not None or state["pass_count"]:
+        return "a handoff was already claimed; delivery/completion may be uncertain"
+    if state["status"] != "escalated":
+        return f"the saved loop is {state['status']}; only an escalated pre-handoff startup can retry"
+    if (state["version"] != 3 or state.get("initial_phase") != "initial_implementation"
+            or state["next_phase"] != "initial_implementation"):
+        return "the checkpoint is not at its original initial implementation boundary"
+    if (state["review_count"] or state["reviewer"] is not None or state["records"]
+            or state["findings"] or state["seen"]):
+        return "review/completion history exists; startup recovery cannot adopt it"
+    if set(state["implementation"]) != {"context_id"}:
+        return "an implementation provider session is already recorded"
+    return None
+
+
 def validate_checkpoint(state):
     """Never turn missing/corrupt routing evidence into a fresh or replayed pass."""
     fields = {"version", "run_id", "binding", "requirements", "implementation", "reviewer",
@@ -225,7 +242,9 @@ class LoopStore:
     def pause(self):
         with self.connection(write=True) as db:
             state, _ = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
-            if state["status"] in {"ready", "running", "paused"}:
+            # Recovery retains escalated state during preflight. Record pause
+            # intent there without making the boundary resumable before proof.
+            if state["status"] in {"ready", "running", "paused"} or startup_recovery_blocker(state) is None:
                 db.execute("UPDATE checkpoint SET pause=1 WHERE id=1")
         return self.read()
 
@@ -236,6 +255,25 @@ class LoopStore:
                 raise TaskError("Only a paused boundary can continue; interrupted/unfinished handoffs require inspection")
             state.update(status="ready", reason="Explicit continuation requested")
             db.execute("UPDATE checkpoint SET payload=?, pause=0 WHERE id=1", (json.dumps(state),))
+        return state
+
+    def restart_initial(self, expected):
+        """Called under the controller lock after revalidating the original reservation.
+
+        Compare the entire checkpoint in one transaction and retain a racing pause.
+        A later handoff still needs begin(); this never clears delivery evidence.
+        """
+        with self.connection(write=True) as db:
+            state, pause = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
+            if state != expected:
+                raise TaskError("Startup checkpoint changed during recovery; no state was overwritten")
+            blocker = startup_recovery_blocker(state)
+            if blocker:
+                raise TaskError("Startup recovery blocked: " + blocker)
+            state.update(status="paused" if pause else "ready",
+                         reason="Pause retained; use --continue explicitly" if pause else
+                                "Original pre-handoff reservation revalidated; initial implementation pending")
+            db.execute("UPDATE checkpoint SET payload=? WHERE id=1", (json.dumps(state),))
         return state
 
     def begin(self, state):

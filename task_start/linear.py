@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 import json
+import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -26,6 +28,13 @@ mutation StartTask($id: String!, $state: String!) {
   }
 }
 """
+
+READ_BACKOFF = (0.5, 1.0)
+RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504}
+
+
+class LinearUnavailable(TaskError):
+    """A read exhausted its bounded availability retries; no mutation was sent."""
 
 
 @dataclass(frozen=True)
@@ -54,20 +63,39 @@ class Linear:
     def __init__(self, api_key: str):
         self._api_key = api_key
 
-    def request(self, query: str, variables: dict) -> dict:
+    def request(self, query: str, variables: dict, *, retry_read: bool = False) -> dict:
         request = Request(
             "https://api.linear.app/graphql",
             data=json.dumps({"query": query, "variables": variables}).encode(),
             headers={"Authorization": self._api_key, "Content-Type": "application/json"},
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=30) as response:
-                payload = json.load(response)
-        except HTTPError as error:
-            raise TaskError(f"Linear HTTP error {error.code}; check credentials/access or retry") from None
-        except (URLError, OSError, ValueError):
-            raise TaskError("Linear request failed or returned invalid JSON") from None
+        # Only get_issue opts in. GraphQL uses POST for reads and mutations alike;
+        # neither HTTP method nor a transient response authorizes replaying writes.
+        for attempt in range(len(READ_BACKOFF) + 1):
+            transient = False
+            try:
+                with urlopen(request, timeout=30) as response:
+                    payload = json.load(response)
+                break
+            except HTTPError as error:
+                diagnostic = f"Linear HTTP error {error.code}"
+                transient = error.code in RETRYABLE_HTTP
+            except (URLError, TimeoutError, ConnectionError):
+                diagnostic = "Linear connection failed or timed out"
+                transient = True
+            except (OSError, ValueError):
+                diagnostic = "Linear request failed or returned invalid JSON"
+            if not retry_read:
+                raise TaskError(diagnostic + "; update outcome may be uncertain; retrieve current issue state before retrying") from None
+            if not transient:
+                raise TaskError(diagnostic + "; check issue data, credentials and access") from None
+            if attempt == len(READ_BACKOFF):
+                raise LinearUnavailable(diagnostic + f"; issue read unavailable after {attempt + 1} attempts") from None
+            delay = READ_BACKOFF[attempt]
+            print(f"{diagnostic}; retry {attempt + 1}/{len(READ_BACKOFF)} of read-only issue retrieval in {delay:g}s",
+                  file=sys.stderr)
+            time.sleep(delay)
         if not isinstance(payload, dict):
             raise TaskError("Unexpected Linear response")
         # Do not echo server error bodies, which may contain request information.
@@ -78,7 +106,7 @@ class Linear:
         return payload["data"]
 
     def get_issue(self, identifier: str) -> Issue:
-        data = self.request(ISSUE_QUERY, {"id": identifier})
+        data = self.request(ISSUE_QUERY, {"id": identifier}, retry_read=True)
         if data.get("issue", False) is None:
             raise TaskError(f"Linear issue {identifier} was not found")
         try:

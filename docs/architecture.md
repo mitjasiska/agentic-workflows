@@ -342,6 +342,14 @@ orphaned claims, corrupt checkpoints, identity loss, malformed outcomes, drift,
 non-progress, and bounded escalation. These are offline checks, not live model
 or Herdr loop acceptance.
 
+Startup regressions inject Linear 503 responses after the original I reservation,
+exercise bounded read retries and ordinary-command recovery, and verify refusal
+on claims, session/runtime ambiguity, Git/requirements drift, conflicting options,
+and concurrent retries. Recovery uses the existing controller lock and an atomic
+checkpoint comparison before returning to the normal handoff claim. It neither
+reconstructs missing state nor replays uncertain Linear mutations. The real DEV-75
+checkpoint remains outside these disposable tests; no live recovery is claimed.
+
 [`test_task_assessment.py`](../tests/test_task_assessment.py) covers readiness
 configuration, full-description handoffs, enabled/disabled start/loop parity,
 independent structure modes, controlled ready/blocked results, unchanged checkout
