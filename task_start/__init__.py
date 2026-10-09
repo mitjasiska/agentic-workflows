@@ -5,6 +5,10 @@ class TaskError(Exception):
     """An operational failure suitable for displaying without a traceback."""
 
 
+class HerdrResponseError(TaskError):
+    """An unrecognized response envelope, never evidence of an operation's outcome."""
+
+
 class AgentNotReady(TaskError):
     """Herdr started an agent but could not confirm interactive readiness."""
 

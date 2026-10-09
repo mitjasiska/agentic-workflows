@@ -9,7 +9,7 @@ import subprocess
 import unicodedata
 from uuid import UUID
 
-from . import AgentNotReady, TaskError
+from . import AgentNotReady, HerdrResponseError, TaskError
 from .github import MergedPull, check_history, merged_pull, repository_name
 from .review_result import unique_object
 
@@ -692,11 +692,17 @@ class Herdr:
             payload = json.loads(output)
             result = payload["result"]
             expected = {"list": "workspace_list", "close": "workspace_closed"}
+            if operation == "close" and isinstance(result, dict) and args:
+                reported = [result.get("workspace_id")]
+                if isinstance(result.get("workspace"), dict):
+                    reported.append(result["workspace"].get("workspace_id"))
+                if any(value is not None and value != args[0] for value in reported):
+                    raise TaskError("Herdr close response identifies another workspace; inspect before retrying")
             if payload.get("error") or result["type"] != expected[operation]:
                 raise ValueError("unexpected result")
             return result
         except (ValueError, KeyError, TypeError):
-            raise TaskError(f"Unexpected Herdr workspace {operation} response; "
+            raise HerdrResponseError(f"Unexpected Herdr workspace {operation} response; "
                             "inspect workspace state before retrying") from None
 
     def workspaces(self) -> list[dict]:

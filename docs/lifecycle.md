@@ -237,6 +237,13 @@ This works with any checkout path, including newly created isolated checkouts.
    during setup; they must verify the recorded readiness turn after setup before
    sending the task.
 
+Transient unrecognized Herdr observation responses are retried within that same
+budget. An unrecognized launch response may also be reconciled by observing the
+original nonce-bearing process; `agent start` is never repeated. Each continuation
+still requires the allocated terminal, exact session and readiness-only provider
+history. A visible `READY` never establishes task delivery. Persistent errors
+retain the context with pane/session inspection and loop-abort guidance.
+
 Do not rerun `start`, `review`, `loop`, or `integrate` to get past trust. The original
 command retains the handoff and result paths, and the execution timeout
 starts after launch/delivery completes. It neither launches a replacement nor
@@ -434,7 +441,7 @@ task loop DEV-20 --continue
 task loop DEV-20 --abort
 ```
 
-With no implementation context or context history, `task loop ISSUE` prepares
+With no implementation context, `task loop ISSUE` prepares
 and runs the initial implementation itself. It shares `task start`'s configurable
 issue structure preflight, project/base resolution, base update, default workspace
 create/reuse, and Linear `In Progress` transition. Both implementation and reviewer selections
@@ -444,7 +451,11 @@ workspace but allocates no context and launches no agent.
 
 This entry supports only the unsliced default workspace, including a workspace
 prepared earlier with `task start --no-agent`. Existing slice scope, ambiguous or
-historical workspaces, and retired/conflicting context history are refused.
+historical workspaces, and conflicting context history are refused. Retired contexts
+permit a fresh start only when each exactly matches a validated completed forced
+cleanup journal in this repository. Pending disposal, missing provenance, changed
+identities and live claims still refuse. Fresh starts preserve all history and
+journals and allocate the next implementation ordinal.
 It does not adopt an unregistered running agent or repair a missing context.
 The first implementation handoff already contains the loop's nonce-bound structured
 result contract. Validated completion proceeds directly to fresh review, without
@@ -598,7 +609,13 @@ controller refuses it. It requires exact saved issue/checkout/branch, context,
 provider, pane and terminal identities; positive idle-shell executable, argv,
 TTY, PID/start-time and process-family evidence; and readable Linux `/proc`.
 It also rejects observable detached same-user processes with checkout cwd,
-arguments or open files. This is local process evidence, not a supervisor for
+arguments or open files. Descriptor closures and confirmed process exits tolerate
+bounded observation races. Failed reference observations recheck the original
+PID, start time and identity; a verified transition to zombie/dead state can pass
+even while the PID directory remains. Inaccessible live cwd/descriptors refuse
+regardless of process age, argv or ancestry/session. Missing identity evidence,
+PID reuse and other identity changes also refuse.
+This is local process evidence, not a supervisor for
 remote hosts or arbitrary external access. A missing pane or an `idle` label
 alone never proves stoppage. Codex additionally requires a terminal provider turn
 and an empty queue; delivered claims must match the latest input. Pi verifies the
@@ -1625,7 +1642,11 @@ removal boundary revalidates this evidence, exact target identity, ownership,
 filesystem roots and stopped runtime. The proof survives worktree and branch
 removal, so `task cleanup ISSUE --force` can finish an interrupted workspace
 close, worktree removal, branch deletion or context retirement without creating
-scope metadata or repeating a confirmed deletion. New or changed proof, reused
+scope metadata or repeating a confirmed deletion. An unrecognized Herdr close
+response is reconciled against the exact endpoint/workspace, terminal snapshot,
+process proof and Git target in the same invocation. Verified closure continues;
+a still-open workspace, conflicting response identity or ambiguous evidence keeps
+the pending journal and refuses further removal. New or changed proof, reused
 paths, new claims and runtime uncertainty stop further removal. Remote refs,
 GitHub PRs and Linear state are never changed.
 

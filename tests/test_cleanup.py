@@ -13,7 +13,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
-from task_start import TaskError, cli
+from task_start import HerdrResponseError, TaskError, cli
 from task_start.config import LocalConfig, Project
 from task_start.contexts import ContextRegistry
 from task_start.linear import Linear
@@ -1286,11 +1286,21 @@ class HerdrRetirementCommandTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in runner.call_args_list], [
             ["herdr", "workspace", "list"], ["herdr", "workspace", "close", "w9"]])
 
+    def test_conflicting_close_identity_is_not_a_transient_response_error(self):
+        herdr = Herdr(Path("/repo"))
+        for response in (dict(type="workspace_list", workspace_id="other"),
+                         dict(type="workspace_closed", workspace_id="w9", workspace=dict(workspace_id="other"))):
+            with self.subTest(response=response), patch("task_start.workspace.run", return_value=json.dumps(
+                    dict(result=response))):
+                with self.assertRaisesRegex(TaskError, "another workspace") as caught:
+                    herdr.workspace_command("close", "w9")
+                self.assertNotIsInstance(caught.exception, HerdrResponseError)
+
     def test_malformed_workspace_response_is_not_retirement_success(self):
         herdr = Herdr(Path("/repo"))
         with patch("task_start.workspace.run", return_value=json.dumps(
                 {"result": {"type": "workspace_list", "workspace_id": "w9"}})), \
-                self.assertRaisesRegex(TaskError, "Unexpected Herdr workspace close response"):
+                self.assertRaisesRegex(HerdrResponseError, "Unexpected Herdr workspace close response"):
             herdr.workspace_command("close", "w9")
         with patch("task_start.workspace.run", return_value=json.dumps(
                 {"result": {"type": "workspace_list", "workspaces": "invalid"}})), \

@@ -148,10 +148,11 @@ not track individual turns. Codex task text is therefore never pasted into the
 terminal. Receipt polling has a 30-second deadline and never resends input. A blocked
 startup normally fails closed, with pane and session IDs for inspection.
 
-Before any queue attempt, a typed Herdr `agent_not_ready` response (or a valid
-session-discovery timeout) permits read-only startup inspection. Recovery requires
-the exact Codex argv including the native readiness nonce, foreground process
-identity and checkout, the allocated terminal, and a recognized menu in the visible
+Before any queue attempt, a typed Herdr `agent_not_ready` response, an unrecognized
+launch/observation response envelope, or a valid session-discovery timeout permits
+read-only startup inspection. Recovery requires the exact Codex argv including the
+native readiness nonce, foreground process identity and checkout, and the allocated
+terminal. Human action additionally requires a recognized menu in the visible
 viewport. The supported signatures are Codex's folder-access trust menu and its
 ChatGPT/device-code/API-key sign-in method menu. Missing argv/cwd information or
 clipped/unknown screens refuse this path. An already observed provider identity
@@ -165,12 +166,15 @@ The original workflow remains alive at an explicit human-action boundary. It sav
 caller result paths in memory. User acknowledgement rechecks the original process
 and terminal; it does not establish readiness. A single 30-second budget covers
 post-action runtime reconciliation, provider discovery and readiness/history checks.
-Transient `blocked` or `unknown` reports are polled on the same process and terminal;
-observations receive the remaining budget, and late responses cannot authorize
-delivery. Identity conflicts, replacement, unsupported evidence or timeout stop
+Transient `blocked` or `unknown` reports and unrecognized observation envelopes
+are polled on the same process and terminal; observations receive the remaining
+budget, and late responses cannot authorize delivery. After a non-ready or
+unrecognized launch response, an already-ready original runtime can proceed to
+provider verification without requiring a menu that has disappeared. Launch and
+queue mutations are never retried. Identity conflicts, replacement, unsupported evidence or timeout stop
 recovery. Only the exact provider session and recorded readiness exchange permit
-progress. A paginated history check rejects
-additional user input, and the adapter rechecks process identity before its first
+progress. A paginated history check rejects additional user input, an empty queue
+check excludes pending provider input, and the adapter rechecks process identity before its first
 queue attempt. If readiness regresses during verification, history must be checked
 again after the same runtime becomes ready within that budget. Process observation,
 provider identity, and recorded task delivery

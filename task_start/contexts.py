@@ -478,8 +478,8 @@ def pending_launch(execution, context_id, registry, herdr, *, require_idle=False
                 c["workspace_id"] == workspace.workspace_id or c["terminal_id"] == context["terminal_id"]
                 or c["pane_id"] == workspace.pane_id) for c in others):
             raise TaskError("Another workflow context conflicts with the reserved implementation")
-        if len(registry.list(execution.issue.identifier, include_retired=True)) != 1:
-            raise TaskError("Context history changed since the original implementation reservation")
+        from .cleanup import disposed_context_history
+        disposed_context_history(registry, execution.issue.identifier, execution.repository, excluding={context_id})
         for current in related:
             try:
                 process = herdr.command("pane", "process-info", "--pane", current["pane_id"])["process_info"]

@@ -355,7 +355,6 @@ class ProcessRecoveryTests(unittest.TestCase):
         self.enterContext(patch("task_start.agent.adapter_for", side_effect=lambda options:
             Codex(options) if options.model == "initial-codex" else self.adapter))
         self.enterContext(patch.object(Codex, "check_available"))
-        self.enterContext(patch.object(Codex, "check_target"))
         self.enterContext(patch.object(Codex, "clear_shell_input"))
         self.enterContext(patch.object(Codex, "command", side_effect=self.herdr))
         rpc = self.enterContext(patch("task_start.agent.CodexRPC"))

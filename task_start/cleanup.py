@@ -19,7 +19,7 @@ import sys
 from uuid import UUID, uuid4
 from types import SimpleNamespace
 
-from . import TaskError
+from . import HerdrResponseError, TaskError
 from .contexts import ContextRegistry, HerdrContexts, now
 from .ownership import ownership_operation
 from .github import pull_requests, repository_name
@@ -435,6 +435,25 @@ def context_claimed(context, journals):
 def selected_contexts(registry, identifier, journals=()):
     return [c for c in registry.list(identifier, include_retired=True)
             if context_claimed(c, journals)]
+
+
+def disposed_context_history(registry, identifier, repository, *, excluding=()):
+    """Admit history only when exact completed disposal tombstones release it.
+
+    Retirement alone does not prove disposal. Use the validated inventory so
+    malformed, pending, foreign, or changed claims cannot become restart proof.
+    Completed paths are historical selectors, not claims on a new checkout.
+    """
+    history = [c for c in registry.list(identifier, include_retired=True) if c["context_id"] not in excluding]
+    if not history:
+        return history
+    _, journals, _, _ = ownership_inventory(registry, repository)
+    selected = [j for j in journals if j["issue"] == identifier]
+    if (any(j["state"] != "complete" or j["repository"] != str(repository) for j in selected)
+            or any(c["repository"] != str(repository) or not runtime_released(c)
+                   or sum(c in j["contexts"] for j in selected) != 1 for c in history)):
+        raise TaskError("Context history lacks exact completed disposal; finish pending cleanup or inspect conflicting claims")
+    return history
 
 
 def overlapping(left, right, mounts):
@@ -1091,10 +1110,21 @@ def finish(record, journal, git, herdr, registry, identities):
         journal.write(record)
         _, _, observed = guard()
         if observed["workspace"]:
-            result = herdr.workspace_command("close", record["workspace_id"])
-            if result.get("workspace_id") != record["workspace_id"]:
-                raise TaskError("Herdr close result is uncertain; rerun --force after inspection")
-        observed = runtime(record, herdr, identities)
+            try:
+                result = herdr.workspace_command("close", record["workspace_id"])
+                if result.get("workspace_id") is None:
+                    raise HerdrResponseError("Herdr close response omitted the workspace identity")
+            except HerdrResponseError as error:
+                # The mutation may have succeeded. Never repeat close here:
+                # reconcile the frozen endpoint/workspace, terminals and Git.
+                _, _, observed = guard()
+                if observed["workspace"] or observed["panes"]:
+                    raise TaskError(f"{error}; exact workspace closure is unconfirmed. "
+                                    "Journal retained; inspect and rerun --force") from None
+            else:
+                if result.get("workspace_id") != record["workspace_id"]:
+                    raise TaskError("Herdr close result is uncertain; rerun --force after inspection")
+        _, _, observed = guard()
         if observed["workspace"] or observed["panes"]:
             raise TaskError("Herdr workspace closure was not confirmed; rerun --force after inspection")
         record["workspace_state"] = "closed"

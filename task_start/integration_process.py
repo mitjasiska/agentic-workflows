@@ -1,6 +1,6 @@
 """Read-only local process evidence for startup recovery and execution retirement."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
@@ -309,32 +309,98 @@ def stopped_loop_execution(path, shells, *, proc=Path("/proc")):
 
     The controller must run outside the checkout. In addition to registered
     ancestry, reject detached same-user processes with checkout cwd, arguments,
-    or open files. Inaccessible evidence refuses; no process is ever signalled.
+    or open files. Inaccessible live process references refuse regardless of
+    process age or ancestry. Failed observations require a fresh identity check;
+    only verified termination or bounded descriptor races can be tolerated.
     """
     proof = stopped_execution([path], shells, proc=proc)
     if not shells:
         raise TaskError("Missing original task shells cannot prove an interrupted turn stopped")
+    inspected_pid = None
     try:
         for entry in proc.iterdir():
             if not entry.name.isdecimal() or int(entry.name) in shells or int(entry.name) == os.getpid():
                 continue
+            inspected_pid = entry.name
             try:
                 if entry.stat().st_uid != os.getuid():
                     continue
                 process = _process_stat(entry, int(entry.name), int(entry.name))
                 if not process.live or process.kernel:
                     continue
-                cwd = Path(os.readlink(entry / "cwd"))
-                argv = os.fsdecode((entry / "cmdline").read_bytes())
-                references = [os.readlink(fd) for fd in (entry / "fd").iterdir()]
-                if (cwd.is_relative_to(path) or str(path) in argv
-                        or any(Path(p.removesuffix(" (deleted)")).is_relative_to(path) for p in references)):
-                    raise TaskError(f"Process {entry.name} may still use the task checkout; stop it before --abort")
+                # Bound exit/descriptor races without accepting PID replacement.
+                for attempt in range(3):
+                    try:
+                        _check_loop_references(path, process)
+                        break
+                    except (OSError, ValueError, IndexError) as error:
+                        try:
+                            current = _process_stat(entry, int(entry.name), int(entry.name))
+                        except FileNotFoundError:
+                            try:
+                                entry.stat()
+                            except FileNotFoundError:
+                                break  # Process actually exited, not merely hidden evidence.
+                            raise
+                        # Death may empty cmdline/remove references while an
+                        # unreaped zombie retains its PID directory. Match all
+                        # original identity fields, allowing only liveness to change.
+                        if replace(current, state=process.state).identity != process.identity:
+                            raise ValueError("process identity changed during reference inspection")
+                        if not current.live:
+                            break
+                        if not isinstance(error, FileNotFoundError) or attempt == 2:
+                            raise
             except FileNotFoundError:
-                if entry.exists():
-                    raise
+                try:
+                    entry.stat()
+                except FileNotFoundError:
+                    continue
+                raise
         if stopped_execution([path], shells, proc=proc) != proof:
             raise ValueError("shell identity changed")
     except (OSError, ValueError, IndexError):
-        raise TaskError("Cannot prove task processes stopped; run --abort on Herdr's host with readable /proc") from None
+        raise TaskError(f"Cannot prove task processes stopped (last inspected PID: {inspected_pid}); "
+                        "process identity or task-relevant /proc evidence "
+                        "is unavailable. Keep the original panes open, quit task jobs, and retry --abort "
+                        "on Herdr's host") from None
     return proof
+
+
+def _check_loop_references(path, process):
+    entry = process.entry
+    argv = (entry / "cmdline").read_bytes()
+    if not argv or not argv.endswith(b"\0") or not argv.split(b"\0")[0]:
+        raise ValueError("unattributable userspace process")
+    references, inaccessible = [], False
+    try:
+        references.append(os.readlink(entry / "cwd"))
+    except PermissionError:
+        inaccessible = True
+    try:
+        for fd in (entry / "fd").iterdir():
+            try:
+                references.append(os.readlink(fd))
+            except FileNotFoundError:
+                # A closed descriptor is not missing process identity. If the
+                # number was reused, retry the whole observation within its bound.
+                try:
+                    fd.lstat()
+                except FileNotFoundError:
+                    continue
+                raise
+            except PermissionError:
+                inaccessible = True
+    except PermissionError:
+        inaccessible = True
+    if (os.fsencode(path) in argv or any(Path(p.removesuffix(" (deleted)")).is_relative_to(path)
+                                       for p in references)):
+        raise TaskError(f"Process {entry.name} may still use the task checkout; stop it before --abort")
+    # Age, argv and family/session membership cannot exclude a live worker's
+    # private checkout references. Missing evidence must fail closed.
+    if inaccessible:
+        raise ValueError("inaccessible potentially relevant process")
+    current = _process_stat(entry, int(entry.name), int(entry.name))
+    if (current.identity != process.identity or (entry / "cmdline").read_bytes() != argv
+            or entry.stat().st_uid != os.getuid()):
+        raise ValueError("process identity/argv changed during reference inspection")

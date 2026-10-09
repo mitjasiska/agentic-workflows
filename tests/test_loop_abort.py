@@ -406,6 +406,215 @@ class LoopProcessTests(unittest.TestCase):
                 import shutil
                 shutil.rmtree(root)
 
+    def nonterminal_process(self, pid, *, started=6, parent=1):
+        self.process(pid, parent, self.proc, argv="service\0", started=started)
+        stat = self.proc / str(pid) / "stat"
+        fields = stat.read_text().rpartition(") ")[2].split()
+        fields[4] = "0"
+        stat.write_text(f"{pid} (service) " + " ".join(fields))
+
+    def deny_private_references(self, pids):
+        original_link, original_iter = os.readlink, Path.iterdir
+        entries = {self.proc / str(pid) for pid in pids}
+        def readlink(path, *args, **kwargs):
+            if Path(path).parent in entries and Path(path).name == "cwd":
+                raise PermissionError("private process cwd")
+            return original_link(path, *args, **kwargs)
+        def iterdir(path):
+            if path.parent in entries and path.name == "fd":
+                raise PermissionError("private process descriptors")
+            return original_iter(path)
+        self.enterContext(patch("os.readlink", side_effect=readlink))
+        self.enterContext(patch.object(Path, "iterdir", iterdir))
+
+    def test_older_services_require_readable_private_references(self):
+        self.process(123, 1, self.checkout)
+        for pid, name in enumerate(("systemd", "sd-pam", "ssh-agent", "sshd"), 20):
+            self.nonterminal_process(pid)
+            (self.proc / str(pid) / "cmdline").write_bytes(name.encode() + b"\0")
+        self.assertEqual(stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc), {"123": 7})
+        self.deny_private_references(range(20, 24))
+        with self.assertRaisesRegex(TaskError, "Cannot prove task processes stopped"):
+            stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+
+    def test_older_live_worker_with_inaccessible_checkout_descriptor_refuses(self):
+        self.process(123, 1, self.checkout)
+        self.nonterminal_process(124)
+        descriptor = self.proc / "124" / "fd" / "8"
+        descriptor.symlink_to(self.checkout / "work.txt")
+        original = os.readlink
+        def denied(path, *args, **kwargs):
+            if Path(path) == descriptor:
+                raise PermissionError("live worker's checkout descriptor is private")
+            return original(path, *args, **kwargs)
+        with patch("os.readlink", side_effect=denied) as reads, \
+                self.assertRaisesRegex(TaskError, "Cannot prove task processes stopped"):
+            stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+        self.assertIn(descriptor, [call.args[0] for call in reads.call_args_list])
+
+    def test_inaccessible_newer_or_unknown_identity_is_never_assumed_unrelated(self):
+        for kind in ("newer", "same_tick", "terminal", "argv", "stat", "child", "session", "unknown_session"):
+            with self.subTest(kind=kind):
+                case = LoopProcessTests(); case.setUp()
+                try:
+                    case.process(123, 1, case.checkout)
+                    case.nonterminal_process(124, started=8 if kind == "newer" else 7 if kind == "same_tick" else 6,
+                                             parent=123 if kind == "child" else 1)
+                    if kind in {"terminal", "session", "unknown_session"}:
+                        stat = case.proc / "124" / "stat"
+                        fields = stat.read_text().rpartition(") ")[2].split()
+                        fields[4 if kind == "terminal" else 3] = "0" if kind == "unknown_session" else "123"
+                        stat.write_text("124 (service) " + " ".join(fields))
+                    case.deny_private_references([124])
+                    if kind in {"argv", "stat"}:
+                        name = "cmdline" if kind == "argv" else "stat"
+                        method = "read_bytes" if kind == "argv" else "read_text"
+                        original = getattr(Path, method)
+                        def denied(path, *args, **kwargs):
+                            if path == case.proc / "124" / name:
+                                raise PermissionError("identity denied")
+                            return original(path, *args, **kwargs)
+                        case.enterContext(patch.object(Path, method, denied))
+                    with case.assertRaises(TaskError):
+                        stopped_loop_execution(case.checkout, case.shells(123), proc=case.proc)
+                finally:
+                    case.doCleanups()
+
+    def test_accessible_checkout_evidence_overrides_older_private_process(self):
+        self.process(123, 1, self.checkout)
+        self.nonterminal_process(124)
+        (self.proc / "124" / "cmdline").write_bytes(os.fsencode(f"worker\0{self.checkout}\0"))
+        self.deny_private_references([124])
+        with self.assertRaisesRegex(TaskError, "Process 124"):
+            stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+
+    def test_descriptor_closing_during_scan_is_not_missing_process_identity(self):
+        self.process(123, 1, self.checkout)
+        self.process(124, 1, self.proc)
+        descriptor = self.proc / "124" / "fd" / "8"
+        descriptor.symlink_to(self.proc / "unrelated")
+        original = os.readlink
+        def closing(path, *args, **kwargs):
+            if Path(path) == descriptor:
+                descriptor.unlink()
+                raise FileNotFoundError("descriptor closed")
+            return original(path, *args, **kwargs)
+        with patch("os.readlink", side_effect=closing):
+            self.assertEqual(stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc), {"123": 7})
+
+    def test_disappearing_process_is_tolerated_but_missing_live_cwd_is_bounded(self):
+        self.process(123, 1, self.checkout)
+        self.process(124, 1, self.proc)
+        original = os.readlink
+        def exited(path, *args, **kwargs):
+            if Path(path) == self.proc / "124" / "cwd":
+                import shutil
+                shutil.rmtree(self.proc / "124")
+                raise FileNotFoundError("process exited")
+            return original(path, *args, **kwargs)
+        with patch("os.readlink", side_effect=exited):
+            self.assertEqual(stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc), {"123": 7})
+        self.process(124, 1, self.proc)
+        (self.proc / "124" / "cwd").unlink()
+        with patch("os.readlink", wraps=original) as reads, self.assertRaises(TaskError):
+            stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+        self.assertEqual(sum(c.args[0] == self.proc / "124" / "cwd" for c in reads.call_args_list), 3)
+
+    def test_private_process_pid_reuse_during_observation_refuses(self):
+        self.process(123, 1, self.checkout)
+        self.nonterminal_process(124)
+        original = os.readlink
+        def replaced(path, *args, **kwargs):
+            if Path(path) == self.proc / "124" / "cwd":
+                stat = self.proc / "124" / "stat"
+                fields = stat.read_text().rpartition(") ")[2].split()
+                fields[19] = "8"
+                stat.write_text("124 (replacement) " + " ".join(fields))
+                raise PermissionError("changed")
+            return original(path, *args, **kwargs)
+        with patch("os.readlink", side_effect=replaced), self.assertRaises(TaskError):
+            stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+
+    def test_zombie_transition_during_reference_inspection_is_verified(self):
+        self.process(123, 1, self.checkout)
+        self.nonterminal_process(124)
+        entry = self.proc / "124"
+        stat = entry / "stat"
+        original_stat = stat.read_text()
+        read_bytes, readlink, iterdir = Path.read_bytes, os.readlink, Path.iterdir
+        for stage in ("cmdline", "final_cmdline", "cwd", "private_cwd", "fd"):
+            with self.subTest(stage=stage):
+                stat.write_text(original_stat)
+                (entry / "cmdline").write_bytes(b"worker\0")
+                cmdline_reads = 0
+                def terminate():
+                    fields = original_stat.rpartition(") ")[2].split()
+                    fields[0] = "Z"
+                    stat.write_text("124 (worker) " + " ".join(fields))
+                    (entry / "cmdline").write_bytes(b"")
+                def command(path, *args, **kwargs):
+                    nonlocal cmdline_reads
+                    if path == entry / "cmdline":
+                        cmdline_reads += 1
+                        if (stage == "cmdline" or stage == "final_cmdline" and cmdline_reads == 2):
+                            terminate()
+                    return read_bytes(path, *args, **kwargs)
+                def link(path, *args, **kwargs):
+                    if Path(path) == entry / "cwd" and stage in {"cwd", "private_cwd"}:
+                        terminate()
+                        if stage == "private_cwd":
+                            raise PermissionError("process terminated during cwd inspection")
+                        raise FileNotFoundError("zombie has no cwd")
+                    return readlink(path, *args, **kwargs)
+                def descriptors(path):
+                    if path == entry / "fd" and stage == "fd":
+                        terminate()
+                        raise FileNotFoundError("process terminated during descriptor inspection")
+                    return iterdir(path)
+                with patch.object(Path, "read_bytes", command), patch("os.readlink", side_effect=link), \
+                        patch.object(Path, "iterdir", descriptors):
+                    self.assertEqual(stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc),
+                                     {"123": 7})
+                self.assertTrue(entry.is_dir())  # An unreaped zombie keeps its PID directory.
+                self.assertEqual((entry / "cmdline").read_bytes(), b"")
+
+    def test_failed_reference_scan_rejects_live_reused_or_unverifiable_process(self):
+        self.process(123, 1, self.checkout)
+        self.nonterminal_process(124)
+        entry = self.proc / "124"
+        stat = entry / "stat"
+        original_stat, read_bytes = stat.read_text(), Path.read_bytes
+        for fault in ("live", "reused_live", "reused_zombie", "changed_parent", "changed_session",
+                      "malformed_stat", "missing_stat", "denied_stat"):
+            with self.subTest(fault=fault):
+                stat.write_text(original_stat)
+                observed = False
+                read_text = Path.read_text
+                def command(path, *args, **kwargs):
+                    nonlocal observed
+                    if path == entry / "cmdline":
+                        observed = True
+                        fields = original_stat.rpartition(") ")[2].split()
+                        fields[0] = "S" if fault in {"live", "reused_live"} else "Z"
+                        if fault.startswith("reused"):
+                            fields[19] = "8"
+                        if fault in {"changed_parent", "changed_session"}:
+                            fields[1 if fault == "changed_parent" else 3] = "999"
+                        stat.write_text("bad stat" if fault == "malformed_stat"
+                                        else "124 (worker) " + " ".join(fields))
+                        if fault == "missing_stat":
+                            stat.unlink()
+                        return b""
+                    return read_bytes(path, *args, **kwargs)
+                def identity(path, *args, **kwargs):
+                    if path == stat and observed and fault == "denied_stat":
+                        raise PermissionError("cannot verify process termination")
+                    return read_text(path, *args, **kwargs)
+                with patch.object(Path, "read_bytes", command), patch.object(Path, "read_text", identity), \
+                        self.assertRaisesRegex(TaskError, "Cannot prove task processes stopped"):
+                    stopped_loop_execution(self.checkout, self.shells(123), proc=self.proc)
+                self.assertTrue(observed)
+
 
 class StoppedProviderTests(unittest.TestCase):
     setUp = provider.ProviderCompletionTests.setUp

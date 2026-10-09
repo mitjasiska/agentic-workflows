@@ -13,7 +13,7 @@ import time
 from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
-from . import AgentNotReady, TaskError
+from . import AgentNotReady, HerdrResponseError, TaskError
 from .codex_rpc import CodexRPC, validate_readiness_only
 from .config import AgentConfig
 from .linear import Issue
@@ -175,7 +175,7 @@ class HerdrAgentAdapter:
                 raise ValueError("unexpected response")
             return result
         except (ValueError, KeyError, TypeError):
-            raise TaskError(f"Unexpected Herdr {group} {operation} response") from None
+            raise HerdrResponseError(f"Unexpected Herdr {group} {operation} response") from None
 
     def validate_agent(self, agent: dict, workspace: Workspace, *, review: bool = False,
                        allow_absent: bool = False) -> None:
@@ -190,7 +190,7 @@ class HerdrAgentAdapter:
                              f"pane={agent.get('pane_id')!r}, terminal={agent.get('terminal_id')!r}, "
                              f"cwd={agent.get('cwd')!r}, foreground_cwd={agent.get('foreground_cwd')!r}")
 
-    def check_target(self, workspace: Workspace, *, review: bool = False) -> None:
+    def check_target(self, workspace: Workspace, *, review: bool = False) -> dict:
         panes = self.command("pane", "list", "--workspace", workspace.workspace_id)["panes"]
         if not isinstance(panes, list):
             raise ValueError("invalid panes")
@@ -205,6 +205,7 @@ class HerdrAgentAdapter:
         if (len(targets) != 1 or (not review and targets[0]["tab_id"] != workspace.tab_id)
                 or targets[0].get("agent")):
             raise ValueError("confirmed pane is no longer present")
+        return targets[0]
 
     def agent_name(self, workspace: Workspace) -> str:
         # A bounded unique name, independent of issue title and shell syntax.
@@ -544,13 +545,37 @@ class CodexAdapter(HerdrAgentAdapter):
             time.sleep(min(0.25, remaining))
         run(["herdr", "pane", "send-keys", workspace.pane_id, "ctrl+c"])
 
-    def startup_process(self, workspace: Workspace, args: list[str], *, timeout=120) -> tuple[int, int, int]:
+    def startup_command(self, group, operation, *args, deadline):
+        """Retry malformed observation envelopes only, inside the pre-queue budget.
+
+        Callers must still verify process, terminal, session and provider history.
+        Invalid identity fields are not transient and never reach this retry.
+        """
+        last_error = None
+        while True:
+            try:
+                remaining = self.startup_remaining(deadline)
+            except TaskError as expired:
+                if last_error is None:
+                    raise
+                raise TaskError(f"{expired}; last observation: {last_error}") from None
+            try:
+                result = self.command(group, operation, *args, timeout=remaining)
+            except HerdrResponseError as error:
+                last_error = error
+                time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                continue
+            self.startup_remaining(deadline)
+            return result
+
+    def startup_process(self, workspace: Workspace, args: list[str], *, deadline) -> tuple[int, int, int]:
         """Bind a delayed launch to its exact native argv, checkout and OS process.
 
         This is process evidence only; it never establishes a provider session or
         authorizes a prompt. Platforms without argv/cwd evidence fail closed.
         """
-        info = self.command("pane", "process-info", "--pane", workspace.pane_id, timeout=timeout)["process_info"]
+        info = self.startup_command("pane", "process-info", "--pane", workspace.pane_id,
+                                    deadline=deadline)["process_info"]
         processes = info["foreground_processes"]
         if (info["pane_id"] != workspace.pane_id or not isinstance(processes, list)
                 or any(not isinstance(p, dict) for p in processes)):
@@ -567,12 +592,12 @@ class CodexAdapter(HerdrAgentAdapter):
             raise ValueError("startup process identity/checkout mismatch")
         return identity
 
-    def startup_blocker(self, workspace: Workspace, *, timeout=120) -> str | None:
+    def startup_blocker(self, workspace: Workspace, *, deadline) -> str | None:
         # Use only the visible viewport, never scrollback or a loose word search.
         # These signatures match Codex's onboarding widgets. Unknown versions,
         # clipped menus and later approval dialogs are deliberately unsupported.
-        view = self.command("pane", "read", workspace.pane_id, "--source", "visible", "--format", "text",
-                            timeout=timeout)["read"]
+        view = self.startup_command("pane", "read", workspace.pane_id, "--source", "visible", "--format", "text",
+                                    deadline=deadline)["read"]
         if (any(view[k] != v for k, v in dict(pane_id=workspace.pane_id,
                 workspace_id=workspace.workspace_id, tab_id=workspace.tab_id,
                 source="visible", format="text").items())
@@ -621,7 +646,7 @@ class CodexAdapter(HerdrAgentAdapter):
     def startup_remaining(deadline: float) -> float:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TaskError("Timed out reconciling Codex readiness after user action; "
+            raise TaskError("Timed out reconciling Codex readiness during startup; "
                             "inspect the retained context. No task prompt was sent")
         return remaining
 
@@ -629,11 +654,11 @@ class CodexAdapter(HerdrAgentAdapter):
         """Poll only observations of the original runtime within one shared budget."""
         workspace = execution.workspace
         while True:
-            if self.startup_process(workspace, args, timeout=self.startup_remaining(deadline)) != process:
+            if self.startup_process(workspace, args, deadline=deadline) != process:
                 raise TaskError("Codex startup process changed during user action; no task prompt was sent")
-            observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id,
-                timeout=self.startup_remaining(deadline))["agent"], observed, expected_session=expected_session)
-            blocker = self.startup_blocker(workspace, timeout=self.startup_remaining(deadline))
+            observed = self.observe_agent(execution, self.startup_command("agent", "get", workspace.pane_id,
+                deadline=deadline)["agent"], observed, expected_session=expected_session)
+            blocker = self.startup_blocker(workspace, deadline=deadline)
             remaining = self.startup_remaining(deadline)  # Reject even ready observations returned late.
             if blocker is not None or observed["agent_status"] in {"idle", "done", "working"}:
                 return observed, blocker
@@ -641,20 +666,27 @@ class CodexAdapter(HerdrAgentAdapter):
                 raise TaskError("Codex runtime state is unsupported after user action; no task prompt was sent")
             time.sleep(min(0.25, remaining))
 
-    def recover_startup(self, execution: AgentExecution, args: list[str], previous=None) -> tuple[dict, tuple[int, int, int], float]:
+    def recover_startup(self, execution: AgentExecution, args: list[str], previous=None, *, allow_ready=False) -> tuple[dict, tuple[int, int, int], float]:
         """Observation and human reconciliation only, reachable strictly pre-queue."""
         workspace = execution.workspace
-        observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id)["agent"], previous)
-        process = self.startup_process(workspace, args)
+        deadline = time.monotonic() + self.POST_TRUST_READY_TIMEOUT
+        observed = self.observe_agent(execution, self.startup_command("agent", "get", workspace.pane_id,
+            deadline=deadline)["agent"], previous)
+        process = self.startup_process(workspace, args, deadline=deadline)
         while True:
-            blocker = self.startup_blocker(workspace)
+            blocker = self.startup_blocker(workspace, deadline=deadline)
+            if allow_ready and blocker is None and observed["agent_status"] in {"idle", "done", "working"}:
+                # Trust may finish while Herdr's response is unavailable. This
+                # only advances to provider/history proof, never straight to queue.
+                return observed, process, deadline
             if blocker is None or observed["agent_status"] not in {"blocked", "unknown", "idle"}:
                 raise TaskError("Codex startup blocker is ambiguous or unsupported; inspect the exact pane/session. "
                                 "No task prompt was sent")
             # A session may already be known before setup finishes. Keep it
             # bound across every observation, including the human wait.
-            observed = self.confirm_target(execution, observed)
-            if self.startup_process(workspace, args) != process:
+            observed = self.observe_agent(execution, self.startup_command("agent", "get", workspace.pane_id,
+                deadline=deadline)["agent"], observed)
+            if self.startup_process(workspace, args, deadline=deadline) != process:
                 raise TaskError("Codex startup identity changed during blocker inspection")
             if execution.runtime_observer:
                 execution.runtime_observer(dict(state="awaiting_user"))
@@ -702,6 +734,11 @@ class CodexAdapter(HerdrAgentAdapter):
             seen.add(cursor)
         if users != 1:
             raise TaskError("Codex readiness history disappeared after user action; no task prompt was sent")
+        queue = rpc.request("thread/queue/list", dict(threadId=thread_id, limit=1),
+                            timeout=self.startup_remaining(deadline))
+        if queue["data"] != [] or queue["nextCursor"] is not None:
+            raise TaskError("Codex has pending or uncertain input during startup; inspect the session. "
+                            "No task prompt will be replayed")
 
     def launch(self, execution: AgentExecution) -> LaunchResult:
         self.validate_execution(execution)
@@ -712,8 +749,17 @@ class CodexAdapter(HerdrAgentAdapter):
         recovered = False
         startup_identity = None
         startup_deadline = None
+        queue_attempted = False
+
+        def recovery_guidance():
+            delivery = ("Delivery may have occurred; never resend the task prompt." if queue_attempted else
+                        "No task prompt was sent by this launch; READY alone is not delivery evidence.")
+            return (f"Workspace {workspace.workspace_id} left intact. {delivery} "
+                    f"Inspect task contexts {execution.issue.identifier} --all and the exact pane/session. "
+                    "For an interrupted loop, quit the agent and its jobs to the original shell, keep the pane open, "
+                    f"then run task loop {execution.issue.identifier} --abort from outside the checkout.")
         try:
-            self.check_target(workspace, review=execution.purpose in {"review", "integration"})
+            original_pane = self.check_target(workspace, review=execution.purpose in {"review", "integration"})
             self.clear_shell_input(workspace)
             # A native, single-line readiness turn survives Codex startup dialogs.
             # Its nonce binds the returned Codex thread to this precise launch.
@@ -726,14 +772,15 @@ class CodexAdapter(HerdrAgentAdapter):
             with CodexRPC(workspace.path) as rpc:
                 phase = "startup launch/runtime confirmation"
                 try:
-                    observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose in {"review", "integration"}))
-                except AgentNotReady as error:
+                    observed = self.observe_agent(execution, self.start_agent(workspace, args, review=execution.purpose in {"review", "integration"}), original_pane)
+                except (AgentNotReady, HerdrResponseError) as error:
                     # Persist the validated launch report before any later read
                     # can omit or conflict with its provider/terminal identity.
-                    observed = self.observe_agent(execution, error.agent) if error.agent is not None else None
+                    report = error.agent if isinstance(error, AgentNotReady) else None
+                    observed = self.observe_agent(execution, report, original_pane) if report is not None else original_pane
                     if observed and observed.get("_session_reference") is not None:
                         thread_id = observed["_session_reference"]["value"]
-                    observed, startup_identity, startup_deadline = self.recover_startup(execution, args, observed)
+                    observed, startup_identity, startup_deadline = self.recover_startup(execution, args, observed, allow_ready=True)
                     recovered = True
                 phase = "readiness confirmation"
                 try:
@@ -758,6 +805,12 @@ class CodexAdapter(HerdrAgentAdapter):
                 # this exact session's persisted readiness turn.
                 if execution.runtime_observer:
                     execution.runtime_observer(dict(resumability="yes"))
+                if not recovered:
+                    try:
+                        observed = self.confirm_target(execution, observed, expected_session=provider_session)
+                    except HerdrResponseError:
+                        observed, startup_identity, startup_deadline = self.recover_startup(execution, args, observed, allow_ready=True)
+                        recovered = True
                 if recovered:
                     while True:
                         observed, blocker = self.reconcile_startup(execution, args, startup_identity, observed,
@@ -766,10 +819,10 @@ class CodexAdapter(HerdrAgentAdapter):
                             raise TaskError("Codex setup reappeared after provider discovery; inspect the session. "
                                             "No task prompt was sent")
                         self.confirm_no_task_input(rpc, thread_id, bootstrap, deadline=startup_deadline)
-                        if self.startup_process(workspace, args, timeout=self.startup_remaining(startup_deadline)) != startup_identity:
+                        if self.startup_process(workspace, args, deadline=startup_deadline) != startup_identity:
                             raise TaskError("Codex startup process/readiness changed before delivery; no task prompt was sent")
-                        observed = self.observe_agent(execution, self.command("agent", "get", workspace.pane_id,
-                            timeout=self.startup_remaining(startup_deadline))["agent"], observed,
+                        observed = self.observe_agent(execution, self.startup_command("agent", "get", workspace.pane_id,
+                            deadline=startup_deadline)["agent"], observed,
                             expected_session=provider_session)
                         remaining = self.startup_remaining(startup_deadline)
                         if observed["agent_status"] in {"idle", "done", "working"}:
@@ -782,12 +835,11 @@ class CodexAdapter(HerdrAgentAdapter):
                     if execution.runtime_observer:
                         execution.runtime_observer(dict(state="launching"))
                     self.startup_remaining(startup_deadline)
-                else:
-                    observed = self.confirm_target(execution, observed, expected_session=provider_session)
                 phase = "prompt queue"
                 inputs = [{"type": "text", "text": prompt, "text_elements": []}]
                 if execution.delivery_observer:
                     execution.delivery_observer(provider_session, message_id, execution.handoff)
+                queue_attempted = True
                 queued = rpc.request("thread/queue/add", {"threadId": thread_id,
                                      "clientUserMessageId": message_id, "input": inputs})["queuedSubmission"]
                 if (queued["clientUserMessageId"] != message_id or queued["input"] != inputs
@@ -801,13 +853,13 @@ class CodexAdapter(HerdrAgentAdapter):
         except (KeyError, TypeError, ValueError, OSError) as error:
             raise TaskError(f"Codex {phase} was not confirmed in pane {workspace.pane_id}; "
                             f"last check: {error}. Inspect it before retrying. Session: {thread_id or 'not yet observed'}. "
-                            "Workspace left intact") from None
+                            f"{recovery_guidance()}") from None
         except TaskError as error:
             # A timeout may follow successful delivery. Never auto-resubmit or
             # kill a possibly working agent, and never create a fallback session.
             raise TaskError(f"Codex {phase} failed in pane {workspace.pane_id}: {error}. "
                             f"Session: {thread_id or 'not yet observed'}. "
-                            "Workspace left intact; inspect the pane before retrying") from None
+                            f"{recovery_guidance()}") from None
 
     def verify_stopped_session(self, workspace, reference, receipt=None):
         verified = self.verify_session(workspace, reference)
