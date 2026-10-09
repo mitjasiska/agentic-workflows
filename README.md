@@ -150,7 +150,8 @@ task start DEV-7 --slice exporter
 Each slice has its own branch and workspace. Without `--slice`, start can reuse
 exactly one candidate and retains its recorded scope. Multiple candidates require
 an explicit slice; ambiguous or historical workspaces are refused. Review and
-cleanup have no slice selector and refuse multiple task worktrees/slices. See
+ordinary cleanup refuse multiple task worktrees/slices; forced cleanup can select
+a proven merged execution with `--branch`. See
 [workspace reuse and slices](docs/lifecycle.md#workspace-lifecycle-and-slices)
 for legacy workspaces, remote branches, and PR-history restrictions.
 
@@ -340,14 +341,18 @@ Linear. Dirty, ambiguous, or unproven state is preserved. GitHub squash/rebase
 merges are supported when their evidence matches the local task and base. See
 [cleanup requirements and retries](docs/lifecycle.md#task-cleanup).
 
-To discard a never-published local execution without changing its Linear status,
+To discard an unpublished or proven merged local execution without changing its Linear status,
 quit its agents, then run `task cleanup DEV-7 --force` from outside the task
 workspace. `--force` is explicit authorization to delete dirty task contents and
 retained integration checkouts/output, close the proven task workspace, and retire
 contexts while preserving bounded provenance and context history. Live registered
-execution, another execution's resource claim, unrelated panes, publication
-evidence, or uncertain identity cause refusal. Abandoned integrations still own
-their retained artifacts. V1 protects workflow ownership; stop unmanaged processes
+execution, another execution's resource claim, unrelated panes, unmerged publication,
+or uncertain identity cause refusal. Merged recovery also supports a manually
+registered worktree without scope metadata when exact Git/Herdr identity and merge
+evidence agree on one local execution. Abandoned integrations still own
+their retained artifacts. If multiple local executions remain, select a proven
+merged one with `task cleanup DEV-7 --force --branch <exact-local-branch>`.
+V1 protects workflow ownership; stop unmanaged processes
 using the files yourself. Ordinary cleanup without `--force` still requires a
 completed, merged task. See
 [forced local-execution disposal](docs/lifecycle.md#forced-local-execution-disposal).

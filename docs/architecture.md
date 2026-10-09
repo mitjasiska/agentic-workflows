@@ -328,6 +328,9 @@ refusal, repeat runs, and partial-failure reporting.
 dirty reviewed task and uncertain/abandoned integration disposal, unrelated-state
 preservation, publication and process refusals, archival ordering, interruption
 recovery and path-reuse checks. Process checks use a synthetic Linux process filesystem.
+[`test_merged_cleanup.py`](../tests/test_merged_cleanup.py) covers merged manual
+worktrees without scope metadata, exact GitHub/ancestry proof, ambiguity and
+ownership refusals, concurrent changes and recovery at each removal boundary.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
 
 For forced-cleanup review, run focused cleanup and integration-recovery coverage

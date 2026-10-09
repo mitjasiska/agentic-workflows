@@ -1,4 +1,4 @@
-"""Forced unpublished execution disposal using the existing retirement model.
+"""Forced unpublished or proven merged execution disposal using the retirement model.
 
 The common Git directory retains a bounded journal after linked-worktree metadata
 is removed. Every destructive step is claimed durably before it starts; retries
@@ -6,13 +6,14 @@ accept absence only for a claimed step and never reconstruct execution state.
 """
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import stat
 import sys
 from uuid import UUID, uuid4
@@ -25,7 +26,7 @@ from .github import pull_requests, repository_name
 from .integration_process import shell_executable, stopped_execution
 from .integration_state import IntegrationStore, abandoned_context, evidence_digest, integration_tombstone
 from .integrate import history_identity
-from .publication_state import PublicationStore
+from .publication_state import PublicationStore, verify_publication_history
 from .loop_state import LoopStore
 from .pass_delivery import FILES as PASS_FILES, check_directory, read_private, validate_delivery
 from .publish import remote_identity, verify_remote_identity
@@ -289,6 +290,55 @@ def never_published(git, base, identifier, branch, publication=None, *, worktree
     return identity
 
 
+def scope_digest(git, path):
+    scope = git.scope_file(path)
+    if not os.path.lexists(scope):
+        return None
+    if scope.is_symlink() or not scope.is_file():
+        raise TaskError("Workspace scope metadata is not a regular file")
+    return sha256(scope.read_bytes()).hexdigest()
+
+
+def merged_publication(git, base, identifier, target, saved):
+    """A separate positive proof, never an exemption from never_published()."""
+    identity = remote_identity(git, base, target.branch)
+    verify_remote_identity(Git(target.path), base, target.branch, identity)
+    binding = dict(issue=identifier, repository=str(git.repo), worktree=str(target.path),
+                   branch=target.branch, base_branch=base)
+    for key in ("acceptance", "rebase"):
+        evidence = saved[key]
+        if evidence is not None:
+            actual = evidence.get("binding") if key == "rebase" else evidence
+            if not isinstance(actual, dict) or any(actual.get(k) != v for k, v in binding.items()):
+                raise TaskError("Private review/integration identity differs from the selected execution")
+    history = saved["publication_history"]
+    if history == "unknown":
+        raise TaskError("Legacy publication intent lacks exact execution identity; finish task pr reconciliation first")
+    verify_publication_history(history, binding, identity)
+    if saved["intent"] is not None:
+        intent = saved["intent"]
+        if (saved["acceptance"] is None or intent.get("remote") != identity["remote"]
+                or intent.get("repository") != identity["repository"]
+                or intent.get("pass_id") != saved["acceptance"].get("pass_id")):
+            raise TaskError("Private publication intent differs from the selected execution")
+    proof = asdict(git.cleanup_merge(base, target.branch, identifier))
+    if (history is not None and history["head"] != proof["branch_commit"]
+            or saved["intent"] is not None and saved["intent"].get("publishing_head") != proof["branch_commit"]):
+        raise TaskError("Private publication head differs from the proven merged tip; reconcile that publication before cleanup")
+    return identity, dict(proof=proof, scope_sha256=scope_digest(git, target.path))
+
+
+def cleanup_recovery(identifier, repo):
+    return (f"Run task contexts {identifier} --all, git -C {shlex.quote(str(repo))} worktree list, "
+            f"and herdr worktree list --cwd {shlex.quote(str(repo))} to locate the conflicting execution. "
+            "Quit its agents and resolve the reported Git/Herdr identity or merge conflict before retrying "
+            f"task cleanup {identifier} --force. For multiple candidates, select a merged execution with "
+            f"task cleanup {identifier} --force --branch <exact-local-branch>, then clean the remaining execution. "
+            "The selector still requires one exact Git/Herdr match and positive merge proof; "
+            "it does not infer slice scope or accept a path or label as authorization. "
+            "Keep private evidence intact; do not create scope metadata to bypass recovery checks.")
+
+
 def runtime_released(context):
     """Retirement ends a runtime binding, not necessarily its artifact claim."""
     return (context["state"] == "retired" and bool(context["retired_at"])
@@ -477,6 +527,28 @@ def integration_evidence(store, registry, binding, contexts):
     return roots, tombstones
 
 
+def separate_workspace(record, herdr, entry):
+    """An explicit selection may leave another independently bound slice open."""
+    git = Git(herdr.repo)
+    location = entry.get("worktree") or {}
+    trees = [tree for tree in git.worktrees() if tree["worktree"] == location.get("checkout_path")]
+    if len(trees) != 1:
+        return False
+    branch = trees[0].get("branch", "").removeprefix("refs/heads/")
+    if branch == record["branch"] or not belongs_to_issue(branch, record["issue"]):
+        return False
+    target = herdr.resolve_task(git, record["issue"], branch=branch, include_remotes=False, disposing=True)
+    if (target is None or str(target.path) != location.get("checkout_path")
+            or target.open_workspace_id != entry["workspace_id"]):
+        return False
+    # A different registered path alone cannot prove disjoint ownership: its
+    # checkout might point back into the selected execution's private Git dir.
+    git.check_cleanup_target(record["base"], target, record["issue"], require_clean=False,
+                             allow_missing_scope=True)
+    herdr.retirement(target, record["issue"], record["base"])
+    return True
+
+
 def runtime(record, herdr, identities):
     """Only the exact task workspace, exact context terminals and stopped shells."""
     if identities.endpoint() != record["endpoint"]:
@@ -534,6 +606,11 @@ def runtime(record, herdr, identities):
         if entry is not None and (type(entry.get("pane_count")) is not int or entry["pane_count"] != len(panes)
                 or entry["label"] not in {record["issue"], record["workspace_label"]}):
             raise TaskError("Herdr workspace membership changed or snapshot is incomplete")
+        if entry is not None and "merged" in record and any(
+                entry["worktree"][key] != value for key, value in (
+                    ("repo_root", record["repository"]), ("repo_key", str(common)),
+                    ("checkout_path", record["path"]))):
+            raise TaskError("Merged cleanup requires canonical Herdr repository and checkout paths")
         if entry is None and panes:
             raise TaskError("Herdr workspace disappeared but its terminals remain")
     else:
@@ -542,7 +619,11 @@ def runtime(record, herdr, identities):
         if other["workspace_id"] == record["workspace_id"]:
             continue
         location = other.get("worktree") or {}
-        if other["label"] == record["issue"] or location.get("checkout_path") in allowed:
+        issue_label = re.fullmatch(re.escape(record["issue"]) + r"(?:\s*/\s*.+)?", other["label"], re.IGNORECASE)
+        label_claim = other["label"] == record["issue"] or "merged" in record and issue_label
+        if label_claim and "selected_branch" in record and separate_workspace(record, herdr, other):
+            label_claim = False
+        if label_claim or location.get("checkout_path") in allowed:
             raise TaskError("Another Herdr workspace claims this execution; disposal refused")
     closed_shells = (record.get("runtime") or {}).get("shells") if entry is None else None
     paths = [Path(record["path"]), Path(record["git_dir"]), *(Path(r["path"]) for r in record["roots"])]
@@ -553,8 +634,27 @@ def runtime(record, herdr, identities):
                 panes=sorted(panes, key=lambda p: p["pane_id"]), shells=proof)
 
 
-def prepare_record(issue, project, repo, git, herdr, registry, identities, target, publication, execution_id):
-    git.check_cleanup_target(project.base_branch, target, issue.identifier, require_clean=False)
+def prepare_record(issue, project, repo, git, herdr, registry, identities, target, publication, execution_id,
+                   *, branch=None):
+    saved = publication.read()
+    merged = None
+    missing_scope = scope_digest(git, target.path) is None
+    if missing_scope or branch is not None:
+        if missing_scope and target.open_workspace_id is None:
+            raise TaskError("Merged orphan recovery requires an exact open Herdr workspace ID. "
+                            f"Open the registered checkout with herdr worktree open --cwd {shlex.quote(str(repo))} "
+                            f"--path {shlex.quote(str(target.path))}, quit its agents, then retry --force")
+        remote, merged = merged_publication(git, project.base_branch, issue.identifier, target, saved)
+    else:
+        try:
+            remote = never_published(git, project.base_branch, issue.identifier, target.branch, saved, worktree=target.path)
+        except TaskError as unpublished_error:
+            try:
+                remote, merged = merged_publication(git, project.base_branch, issue.identifier, target, saved)
+            except TaskError as merged_error:
+                raise TaskError(f"{unpublished_error}. Merged recovery also refused: {merged_error}") from None
+    git.check_cleanup_target(project.base_branch, target, issue.identifier, require_clean=False,
+                             allow_missing_scope=merged is not None)
     _, journals, _, _ = ownership_inventory(registry, repo)
     integration_ids = {(i.get("context") or {}).get("context_id")
                        for i in IntegrationStore(publication_store=publication).disposal_records()}
@@ -568,8 +668,6 @@ def prepare_record(issue, project, repo, git, herdr, registry, identities, targe
                 or context["workspace_id"] != target.open_workspace_id and context["workspace_id"] in live_workspaces
                 or context["role"] != "integration" and context["worktree"] != str(target.path)):
             raise TaskError("Issue contexts do not identify a single local task execution")
-    saved = publication.read()
-    remote = never_published(git, project.base_branch, issue.identifier, target.branch, saved, worktree=target.path)
     binding = dict(issue=issue.identifier, repository=str(repo), worktree=str(target.path), branch=target.branch,
                    base_branch=project.base_branch, endpoint=endpoint, workspace_id=target.open_workspace_id)
     roots, integrations = integration_evidence(publication, registry, binding, contexts)
@@ -599,6 +697,10 @@ def prepare_record(issue, project, repo, git, herdr, registry, identities, targe
                   contexts=contexts, integrations=integrations, roots=roots,
                   publication_sha256=evidence_digest(saved), at=now(),
                   workspace_state="pending", worktree_state="pending", branch_state="pending")
+    if merged is not None:
+        record["merged"] = merged
+    if branch is not None:
+        record["selected_branch"] = branch
     if loop_evidence is not None:
         record["loop"] = loop_evidence
     if retirement:
@@ -623,6 +725,28 @@ def validate_record(record, issue, project, repo, registry):
             fields.add("execution_id")
             if str(UUID(record["execution_id"])) != record["execution_id"]:
                 raise ValueError("invalid execution identity")
+        if "selected_branch" in record:
+            fields.add("selected_branch")
+            if "merged" not in record or record["selected_branch"] != record["branch"]:
+                raise ValueError("invalid cleanup selection")
+        if "merged" in record:
+            fields.add("merged")
+            merged = record["merged"]
+            proof = merged["proof"]
+            if (record["version"] != 2 or set(merged) != {"proof", "scope_sha256"}
+                    or set(proof) != {"branch_commit", "base_commit", "pull"}
+                    or proof["branch_commit"] != record["head"]
+                    or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", proof["base_commit"])
+                    or merged["scope_sha256"] is not None
+                    and not re.fullmatch(r"[0-9a-f]{64}", merged["scope_sha256"])):
+                raise ValueError("invalid merged disposal proof")
+            pull = proof["pull"]
+            if pull is not None and (set(pull) != {"repository", "number", "head_commit", "merge_commit"}
+                    or pull["repository"] != record["remote"]["repository"]
+                    or type(pull["number"]) is not int or pull["number"] <= 0
+                    or pull["head_commit"] != record["head"]
+                    or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", pull["merge_commit"])):
+                raise ValueError("invalid retained PR proof")
         if "loop" in record:
             fields.add("loop")
             retained = record["loop"]
@@ -826,6 +950,21 @@ def verify_contexts(record, registry):
             continue
         if conflicts([path]):
             raise TaskError("Another registered worktree/private Git directory claims a cleanup target")
+        if repo is not None and path.exists():
+            # Registration lists the expected private directory, but the
+            # checkout's .git pointer may actually use another execution's.
+            # Check every existing registered checkout, independent of issue,
+            # Herdr label or open state, on each disposal guard/retry.
+            try:
+                git_dir = Path(Git(path).command("rev-parse", "--absolute-git-dir").strip())
+                if not git_dir.is_absolute():
+                    raise TaskError("Git directory is not absolute")
+            except TaskError:
+                raise TaskError(f"Cannot verify Git metadata used by registered checkout {path}; "
+                                "restore its Git checkout binding before retrying --force") from None
+            if conflicts([git_dir]):
+                raise TaskError(f"Another registered checkout uses cleanup Git metadata: {path}; "
+                                "restore its independent Git checkout binding before retrying --force")
     for directory in stores:
         if directory == Path(record["git_dir"]):
             continue  # Own provenance is frozen and checked by the disposal guard.
@@ -848,12 +987,21 @@ def verify_contexts(record, registry):
                 raise TaskError("Another integration provenance claim owns a cleanup target")
 
 
+def disposal_branches(record, git):
+    branches = git.branches(record["issue"])
+    return [b for b in branches if b == record["selected_branch"]] if "selected_branch" in record else branches
+
+
 def check_task(record, git, herdr, *, closed):
+    if "merged" in record:
+        base = git.command("rev-parse", "--verify", f"refs/heads/{record['base']}^{{commit}}").strip()
+        if base != record["merged"]["proof"]["base_commit"]:
+            raise TaskError("Base branch changed during merged cleanup; preserve the journal and stop concurrent base updates")
     path = Path(record["path"])
     present = directory_identity(path)
     trees = [t for t in git.worktrees() if Path(t["worktree"]).resolve() == path
              or t.get("branch") == f"refs/heads/{record['branch']}"]
-    branches = git.branches(record["issue"])
+    branches = disposal_branches(record, git)
     if branches not in ([], [record["branch"]]):
         raise TaskError("Another task branch appeared; forced cleanup refused")
     if present is None:
@@ -864,10 +1012,14 @@ def check_task(record, git, herdr, *, closed):
     else:
         if present != record["identity"] or record["worktree_state"] == "removed":
             raise TaskError("Task checkout path was reused or replaced; cleanup refused")
-        target = herdr.resolve_task(git, record["issue"], include_remotes=False, disposing=True)
+        target = herdr.resolve_task(git, record["issue"], include_remotes=False, disposing=True,
+                                    branch=record.get("selected_branch"))
         if target != TaskWorktree(record["branch"], path, None if closed else record["workspace_id"]):
             raise TaskError("Exact Git/Herdr task target changed; cleanup refused")
-        git.check_cleanup_target(record["base"], target, record["issue"], require_clean=False)
+        git.check_cleanup_target(record["base"], target, record["issue"], require_clean=False,
+                                 allow_missing_scope="merged" in record)
+        if "merged" in record and scope_digest(git, path) != record["merged"]["scope_sha256"]:
+            raise TaskError("Workspace scope changed during merged cleanup")
         if (str(PublicationStore(path).directory) != record["git_dir"]
                 or directory_identity(Path(record["git_dir"])) != record["git_identity"]):
             raise TaskError("Task Git metadata identity changed")
@@ -908,8 +1060,16 @@ def finish(record, journal, git, herdr, registry, identities):
             evidence = [integration_tombstone(r) for r in IntegrationStore(Path(record["path"])).disposal_records()]
             if evidence != [{k: v for k, v in i.items() if k != "output_sha256"} for i in record["integrations"]]:
                 raise TaskError("Integration provenance changed during forced cleanup")
-        if never_published(git, record["base"], record["issue"], record["branch"], saved,
-                           worktree=Path(record["path"]) if present else None) != record["remote"]:
+        if "merged" in record:
+            verify_remote_identity(git, record["base"], record["branch"], record["remote"])
+            if present:
+                verify_remote_identity(Git(Path(record["path"])), record["base"], record["branch"], record["remote"])
+            proof = git.cleanup_merge(record["base"], record["branch"], record["issue"], head=record["head"],
+                                      require_pull=not branch and record["merged"]["proof"]["pull"] is not None)
+            if asdict(proof) != record["merged"]["proof"]:
+                raise TaskError("Task, base branch or merge evidence changed during merged cleanup")
+        elif never_published(git, record["base"], record["issue"], record["branch"], saved,
+                             worktree=Path(record["path"]) if present else None) != record["remote"]:
             raise TaskError("Remote repository identity changed during forced cleanup")
         verify_contexts(record, registry)
         check_roots(record, git)
@@ -972,7 +1132,7 @@ def finish(record, journal, git, herdr, registry, identities):
         _, branch, _ = guard()
         if branch:
             git.command("update-ref", "--no-deref", "-d", f"refs/heads/{record['branch']}", record["head"])
-        if git.branches(record["issue"]):
+        if disposal_branches(record, git):
             raise TaskError("Selected task branch removal is uncertain")
         record["branch_state"] = "removed"
         journal.write(record)
@@ -985,7 +1145,7 @@ def finish(record, journal, git, herdr, registry, identities):
 
 
 @ownership_operation(exclusive=True)
-def discard_execution(issue, project, repo):
+def discard_execution(issue, project, repo, *, branch=None):
     if any(k in os.environ for k in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
                                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")):
         raise TaskError("Unset Git routing environment overrides before forced cleanup")
@@ -993,6 +1153,10 @@ def discard_execution(issue, project, repo):
     registry, identities = ContextRegistry(), HerdrContexts()
     git.check_base(project.base_branch)
     try:
+        if branch is not None:
+            if not belongs_to_issue(branch, issue.identifier) or branch == project.base_branch:
+                raise TaskError("Cleanup --branch must name an exact local branch belonging to this issue")
+            git.command("check-ref-format", f"refs/heads/{branch}")
         # All execution journals share the issue directory's lock. Completed
         # journals are immutable history, never a claim on a later execution.
         lock = DisposalStore(git, issue.identifier)
@@ -1010,16 +1174,29 @@ def discard_execution(issue, project, repo):
                 raise TaskError("Multiple forced-disposal execution claims are pending; inspect without deleting evidence")
             if pending:
                 journal, record = pending[0]
+                if branch is not None and branch != record["branch"]:
+                    raise TaskError(f"Pending cleanup owns {record['branch']!r}; finish it with "
+                                    f"task cleanup {issue.identifier} --force before selecting another branch")
+                if branch is not None and "selected_branch" not in record:
+                    if "merged" not in record:
+                        raise TaskError("Pending unpublished disposal must resume without --branch; selection requires merge proof")
+                    # New explicit authorization narrows discovery, never changes
+                    # the frozen execution or its proof. All guards still run.
+                    record["selected_branch"] = branch
+                    journal.write(record)
             else:
-                target = herdr.resolve_task(git, issue.identifier, include_remotes=False, disposing=True)
+                target = herdr.resolve_task(git, issue.identifier, include_remotes=False, disposing=True, branch=branch)
+                matching_journals = [(j, r) for j, r in journals if branch is None or r["branch"] == branch]
                 if target is not None:
                     journal = DisposalStore(git, issue.identifier, str(uuid4()))
                     if journal.read() is not None:
                         raise TaskError("Forced cleanup execution identity already exists")
                     record = None
-                elif journals:
-                    journal, record = max(journals, key=lambda item: (item[1]["at"], item[0].path.name))
+                elif matching_journals:
+                    journal, record = max(matching_journals, key=lambda item: (item[1]["at"], item[0].path.name))
                 else:
+                    if branch is not None:
+                        raise TaskError(f"No registered local execution or completed disposal matches branch {branch!r}")
                     if selected_contexts(registry, issue.identifier) or herdr.stale_retirement(git, issue.identifier, project.base_branch):
                         raise TaskError("Selected execution lacks its exact Git provenance; inspect retained state manually")
                     return f"{issue.identifier}: no local execution to discard"
@@ -1038,10 +1215,11 @@ def discard_execution(issue, project, repo):
             with publication.locked() if publication else nullcontext():
                 if record is None:
                     record = prepare_record(issue, project, repo, git, herdr, registry, identities, target,
-                                            publication, journal.path.stem)
+                                            publication, journal.path.stem, branch=branch)
                     journal.write(record)
                 if record["state"] == "complete":
-                    if selected_contexts(registry, issue.identifier, [r for _, r in journals]):
+                    remaining = selected_contexts(registry, issue.identifier, [r for _, r in journals])
+                    if any(branch is None or c["worktree"] == record["path"] for c in remaining):
                         raise TaskError("Unreleased task contexts lack their exact Git execution; inspect retained ownership")
                     # Completed selectors are release evidence, not continuing
                     # reservations on paths, panes or IDs that may have been reused.
@@ -1055,3 +1233,5 @@ def discard_execution(issue, project, repo):
     except OSError:
         raise TaskError(f"Forced cleanup was interrupted by a filesystem error; preserve its journal and "
                         f"rerun task cleanup {issue.identifier} --force after inspection") from None
+    except TaskError as error:
+        raise TaskError(f"{error}\n{cleanup_recovery(issue.identifier, repo)}") from None

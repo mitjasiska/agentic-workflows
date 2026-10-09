@@ -1249,9 +1249,11 @@ class CleanupInputTests(unittest.TestCase):
 
     def test_cleanup_supports_explicit_force_and_rejects_unrelated_options(self):
         args = cli.parser().parse_args(["cleanup", "dev-7"])
-        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=False))
+        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=False, branch=None))
         args = cli.parser().parse_args(["cleanup", "dev-7", "--force"])
-        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=True))
+        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=True, branch=None))
+        args = cli.parser().parse_args(["cleanup", "dev-7", "--force", "--branch", "dev-7-api-slice"])
+        self.assertEqual(vars(args), dict(command="cleanup", issue="DEV-7", force=True, branch="dev-7-api-slice"))
         for extra in ("--slice", "--no-agent", "--agent", "--unknown", "-D"):
             with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 cli.parser().parse_args(["cleanup", "DEV-7", extra])

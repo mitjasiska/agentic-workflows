@@ -1456,10 +1456,52 @@ task cleanup DEV-30 --force
 ```
 
 `--force` is destructive authorization to discard one selected,
-**never-published local execution**, including modified, staged, untracked and
+**never-published or proven merged local execution**, including modified, staged, untracked and
 ignored task files. This authorization is independent of the Linear issue state:
 the issue may remain In Progress, and cleanup does not update its status. Without
 `--force`, the completed-task contract above is unchanged.
+
+Merged recovery uses the same [merge evidence](#merge-evidence) as ordinary
+cleanup, including exact local tip, PR repository/head/base and reachable merge
+result checks. It never treats Done, a pushed branch or a closed PR as merge
+proof. The unpublished disposal path retains its publication exclusions; a
+published execution must pass the separate positive merge proof.
+
+A manually registered linked worktree can qualify even when
+`agentic-workflows-scope.json` was never written. Git's worktree registration,
+local issue-prefixed branch, checkout root, symbolic HEAD, common/private Git
+directories and metadata backlink must agree with Herdr's worktree registration
+and exact open workspace ID, repository key and checkout. No scope file is
+created. Existing scope and private execution evidence must remain consistent.
+Missing scope is not inferred as either default or sliced. Without an explicit
+selector, discovery covers all local issue branches/worktrees and requires
+exactly one candidate. A branch prefix, label or path alone never proves ownership.
+
+If no workspace is open, use `herdr worktree open --cwd <permanent-repo> --path
+<registered-checkout>`, quit its agents, and retry. For conflicting candidates,
+`task contexts ISSUE --all`, `git -C <permanent-repo> worktree list` and
+`herdr worktree list --cwd <permanent-repo>` identify the conflicting contexts,
+branches, paths and workspace IDs. Select one proven merged execution using its
+exact local branch name:
+
+```sh
+task cleanup DEV-7 --force --branch dev-7-api-slice
+task cleanup DEV-7 --force
+```
+
+The first command removes only that execution; the second can remove the remaining
+unique execution. Repeat explicit selection if more than one still remains.
+`--branch` requires `--force` and positive merge proof, including for an unpublished
+selected branch. It narrows discovery without assigning default/slice scope or
+bypassing Git registration, exact Herdr identity, foreign resource claims, stopped
+runtime or filesystem checks. Duplicate or inconsistent matches for the selected
+branch still refuse. Other independently bound workspaces and contexts remain
+intact, including a running agent in another execution. Cleanup checks the actual
+Git directory used by every existing registered sibling checkout, even if its
+Herdr workspace is renamed or closed. A sibling pointing into the selected
+execution's metadata blocks removal, including on final revalidation and retries.
+Keep private metadata intact. A stale base requires a separate update in the
+permanent checkout, as described above.
 
 Quit the execution's agents before running this command from outside all
 task/integration checkouts. Empty shells in the exact task workspace may
@@ -1525,7 +1567,8 @@ outside this disposal operation.
 
 The permanent checkout must be clean and on the configured base. Exact Git
 registration, task scope, branch, checkout and stable Herdr workspace identity
-must agree. Multiple branches/worktrees/slices, unsafe or aliased paths, nested
+must agree. Multiple branches/worktrees/slices require explicit `--branch`
+selection for a proven merged execution. Ambiguous selected targets, unsafe or aliased paths, nested
 repositories (including bare repositories), mounts, and identity drift refuse
 disposal. Cleanup reads Linux
 `/proc/self/mountinfo` before traversal and rechecks all deletion trees before
@@ -1536,7 +1579,7 @@ claims exposed through different mount views; it is not used to enumerate host
 process references through arbitrary external aliases. Cleanup rechecks direct
 mount boundaries before deletion. Unreadable or malformed mount information
 refuses cleanup. Dirty task files
-are allowed only on this explicit path. Live remote task refs, retained task tracking
+are allowed only on this explicit path. For **unpublished disposal**, live remote task refs, retained task tracking
 refs/configuration, any GitHub PR history (including open or closed PRs), or private
 publication history/intent also refuse. Cached refs are resolved against complete
 remote names (including slashes) and effective fetch configuration in both
@@ -1575,6 +1618,24 @@ They do not preserve the full conflicted files, result reports, or checkout.
 The journal is limited to 4 MiB and at most 101 integration record inputs;
 exceeding those bounds refuses automatic disposal. Review/loop/private task
 metadata disappears with the task's linked Git directory.
+
+Merged journals additionally retain the exact tip/base and PR merge proof (or
+ancestry proof), plus a digest of the original scope file or its absence. Every
+removal boundary revalidates this evidence, exact target identity, ownership,
+filesystem roots and stopped runtime. The proof survives worktree and branch
+removal, so `task cleanup ISSUE --force` can finish an interrupted workspace
+close, worktree removal, branch deletion or context retirement without creating
+scope metadata or repeating a confirmed deletion. New or changed proof, reused
+paths, new claims and runtime uncertainty stop further removal. Remote refs,
+GitHub PRs and Linear state are never changed.
+
+The journal retains an explicit branch selection through retries. Resume with the
+same command or `task cleanup ISSUE --force`; a different requested branch refuses
+until the pending disposal finishes. After a squash head's local branch is removed,
+retry uses its retained SHA to recheck the exact GitHub PR/head/merge proof and the
+merge result's reachability from the configured base. It does not require the
+now-unreferenced head object to survive Git garbage collection. Missing or changed
+PR evidence still refuses retirement.
 
 Cleanup takes an exclusive machine-local ownership lock beside the context
 registry. Workflow controllers, preparation, context mutations and integration
