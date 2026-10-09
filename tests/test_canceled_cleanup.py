@@ -14,7 +14,7 @@ from unittest.mock import call, patch
 from uuid import uuid4
 from types import SimpleNamespace
 
-from task_start import TaskError, cli
+from task_start import HerdrResponseError, TaskError, cli
 from task_start.cleanup import DisposalStore, check_contents, check_mounts, mount_points, read_mounts, overlapping
 from task_start.contexts import ContextRegistry, now
 from task_start.integrate import history_identity
@@ -1086,6 +1086,75 @@ class ForcedCleanupTests(unittest.TestCase):
         self.assert_preserved()
         self.assertTrue(extra.exists())
         self.assertTrue(self.workspace_active)
+
+    def test_unexpected_close_response_with_verified_closure_finishes_once(self):
+        self.retained_loop()
+        original = self.workspace_commands
+        def uncertain(operation, *args):
+            result = original(operation, *args)
+            if operation == "close":
+                raise HerdrResponseError("Unexpected Herdr workspace close response")
+            return result
+        self.herdr_workspace.side_effect = uncertain
+        cli.cleanup("DEV-7", force=True)
+        self.assert_disposed()
+        before = self.journal_path().read_bytes()
+        self.assertIn("already discarded", cli.cleanup("DEV-7", force=True))
+        self.assertEqual(self.journal_path().read_bytes(), before)
+        self.assertEqual(sum(c.args[0] == "close" for c in self.herdr_workspace.call_args_list), 1)
+
+    def test_close_response_missing_identity_requires_authoritative_closure(self):
+        original = self.workspace_commands
+        def incomplete(operation, *args):
+            result = original(operation, *args)
+            if operation == "close":
+                result.pop("workspace_id")
+            return result
+        self.herdr_workspace.side_effect = incomplete
+        cli.cleanup("DEV-7", force=True)
+        self.assert_disposed()
+        self.assertEqual(sum(c.args[0] == "close" for c in self.herdr_workspace.call_args_list), 1)
+
+    def test_unexpected_close_response_without_closure_keeps_pending_claim(self):
+        self.workspace_close_error = HerdrResponseError("Unexpected Herdr workspace close response")
+        with self.assertRaisesRegex(TaskError, "exact workspace closure is unconfirmed"):
+            cli.cleanup("DEV-7", force=True)
+        self.assert_preserved()
+        self.assertEqual((self.journal()["state"], self.journal()["workspace_state"]), ("pending", "closing"))
+        self.assertEqual(sum(c.args[0] == "close" for c in self.herdr_workspace.call_args_list), 1)
+        self.workspace_close_error = None
+        cli.cleanup("DEV-7", force=True)
+        self.assert_disposed()
+
+    def test_uncertain_closure_rejects_replacement_endpoint_git_and_terminal_evidence(self):
+        for kind in ("workspace", "endpoint", "git", "terminal", "wrong_result", "unreadable"):
+            with self.subTest(kind=kind), ForcedCleanupTests() as case:
+                original = case.workspace_commands
+                def uncertain(operation, *args):
+                    result = original(operation, *args)
+                    if operation != "close":
+                        if kind == "unreadable" and not case.workspace_active:
+                            raise TaskError("Workspace listing unavailable")
+                        return result
+                    if kind == "workspace":
+                        case.extra_workspaces.append(case.workspace_entry("replacement"))
+                    elif kind == "endpoint":
+                        case.identities.endpoint.return_value = "/different.sock"
+                    elif kind == "git":
+                        case.command(case.path, "branch", "-m", "dev-7-replaced")
+                    elif kind == "terminal":
+                        case.panes.append(dict(workspace_id=case.workspace_id, pane_id="p1", terminal_id="term1",
+                                               cwd=str(case.path), tab_id="t1"))
+                    elif kind == "wrong_result":
+                        return dict(type="workspace_closed", workspace_id="other")
+                    raise HerdrResponseError("Unexpected Herdr workspace close response")
+                case.herdr_workspace.side_effect = uncertain
+                with case.assertRaises(TaskError):
+                    cli.cleanup("DEV-7", force=True)
+                case.assertTrue(case.path.exists())
+                case.assertEqual(case.journal()["state"], "pending")
+                case.assertEqual(case.journal()["workspace_state"], "closing")
+                case.assertTrue(case.registry.list("DEV-7"))
 
     def test_close_result_lost_is_recovered_without_recreating_execution(self):
         original = self.workspace_commands

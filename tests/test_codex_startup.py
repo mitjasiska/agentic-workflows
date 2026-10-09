@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from task_start import AgentNotReady, TaskError, cli
-from task_start.agent import AgentOptions, Codex
+from task_start import AgentNotReady, HerdrResponseError, TaskError, cli
+from task_start.agent import AgentOptions, Codex, HerdrAgentAdapter
 from task_start.contexts import ContextRegistry, HerdrContexts
 from task_start.handoff import implementation_handoff
 from task_start.workspace import Workspace
@@ -190,6 +190,145 @@ class FreshCodexStartTests(unittest.TestCase):
         self.enterContext(patch('task_start.agent.sys.stdin', SimpleNamespace(
             isatty=lambda: interactive, readline=action)))
         return self.enterContext(patch('task_start.agent.sys.stderr', new_callable=io.StringIO))
+
+    def transient_observation(self, operation, *, count=1, when=lambda: True, change=lambda: None):
+        transport = self.transport
+        attempts = []
+        def command(group, op, *args, **kwargs):
+            if (group, op) == operation and when() and len(attempts) < count:
+                attempts.append(True)
+                change()
+                raise HerdrResponseError(f"Unexpected Herdr {group} {op} response")
+            return transport.herdr(group, op, *args, **kwargs)
+        transport.command.side_effect = command
+        return attempts
+
+    def test_unrecognized_observation_envelope_has_distinct_recoverable_error(self):
+        adapter = Codex(AgentOptions("codex"))
+        for response in ("not json", '{"result":{"type":"unavailable"}}', '{"error":"temporarily unavailable"}'):
+            with self.subTest(response=response), patch("task_start.agent.run", return_value=response):
+                with self.assertRaisesRegex(HerdrResponseError, "Unexpected Herdr pane read response"):
+                    HerdrAgentAdapter.command(adapter, "pane", "read", "p1")
+
+    def test_transient_viewport_after_trust_continues_original_launch_once(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), "\n")[1])
+        attempts = self.transient_observation(("pane", "read"), when=lambda: t.blocker is None)
+        cli.start("DEV-7")
+        self.assertEqual(attempts, [True])
+        self.assertEqual(self.registry.get("DEV-7-I1")["session_id"], t.thread_id)
+        t.assert_effects(1, 1)
+
+    def test_transient_setup_observations_retry_only_reads(self):
+        for operation in (("pane", "read"), ("pane", "process-info"), ("agent", "get")):
+            with self.subTest(operation=operation):
+                case = FreshCodexStartTests(); case.setUp()
+                try:
+                    t = case.transport
+                    t.blocker = TRUST_SCREEN
+                    case.human_input(lambda: (t.accept_setup(), "\n")[1])
+                    case.transient_observation(operation, count=2, when=lambda: t.started_at is not None)
+                    cli.start("DEV-7")
+                    t.assert_effects(1, 1)
+                finally:
+                    case.doCleanups()
+
+    def test_lost_start_response_reconciles_native_nonce_without_relaunch(self):
+        t = self.transport
+        def command(group, operation, *args, **kwargs):
+            response = t.herdr(group, operation, *args, **kwargs)
+            if (group, operation) == ("agent", "start"):
+                raise HerdrResponseError("Unexpected Herdr agent start response")
+            return response
+        t.command.side_effect = command
+        cli.start("DEV-7")
+        t.assert_effects(1, 1)
+        self.assertEqual(len(self.registry.list()), 1)
+
+    def test_prequeue_target_read_error_requires_full_history_reconciliation(self):
+        t = self.transport
+        self.transient_observation(("agent", "get"))
+        cli.start("DEV-7")
+        t.assert_effects(1, 1)
+        self.assertGreaterEqual(sum(c.args[0] == "thread/items/list" for c in t.rpc.request.call_args_list), 3)
+
+    def test_persistent_post_trust_read_error_preserves_undelivered_context(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), "\n")[1])
+        self.transient_observation(("pane", "read"), count=100, when=lambda: t.blocker is None)
+        with patch.object(Codex, "POST_TRUST_READY_TIMEOUT", 0.5), self.assertRaisesRegex(
+                TaskError, "Timed out.*No task prompt was sent"):
+            cli.start("DEV-7")
+        t.assert_effects(1, 0)
+        self.assertEqual(self.registry.get("DEV-7-I1")["state"], "awaiting_user")
+
+    def test_identity_conflicts_after_transient_observation_still_refuse(self):
+        for kind in ("process", "terminal", "session", "checkout", "input"):
+            with self.subTest(kind=kind):
+                case = FreshCodexStartTests(); case.setUp()
+                try:
+                    t = case.transport
+                    t.blocker = TRUST_SCREEN
+                    case.human_input(lambda: (t.accept_setup(), "\n")[1])
+                    def change():
+                        if kind == "process":
+                            t.process_pid += 1
+                        elif kind == "terminal":
+                            t.pane["terminal_id"] = "replacement"
+                        elif kind == "session":
+                            t.get_changes["agent_session"] = dict(agent="codex", kind="id", value="wrong")
+                        elif kind == "checkout":
+                            t.pane["foreground_cwd"] = "/different"
+                        else:
+                            t.extra_items = [dict(turnId="other", item=dict(type="userMessage",
+                                content=[dict(type="text", text="external task input")]))]
+                    case.transient_observation(("pane", "read"), when=lambda: t.blocker is None, change=change)
+                    with case.assertRaises(TaskError):
+                        cli.start("DEV-7")
+                    t.assert_effects(1, 0)
+                finally:
+                    case.doCleanups()
+
+    def test_recovery_refuses_pending_provider_queue_before_first_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), "\n")[1])
+        def request(method, params, **kwargs):
+            if method == "thread/queue/list":
+                return dict(data=[dict(id="external-input")], nextCursor=None)
+            return t.request(method, params, **kwargs)
+        t.rpc.request.side_effect = request
+        with self.assertRaisesRegex(TaskError, "pending or uncertain input"):
+            cli.start("DEV-7")
+        t.assert_effects(1, 0)
+
+    def test_late_successful_read_after_transient_error_cannot_authorize_delivery(self):
+        t = self.transport
+        t.blocker = TRUST_SCREEN
+        self.human_input(lambda: (t.accept_setup(), "\n")[1])
+        reads = []
+        def command(group, operation, *args, **kwargs):
+            if (group, operation) == ("pane", "read") and t.blocker is None:
+                reads.append(kwargs["timeout"])
+                if len(reads) == 1:
+                    raise HerdrResponseError("Unexpected Herdr pane read response")
+                t.advance(kwargs["timeout"])
+            return t.herdr(group, operation, *args, **kwargs)
+        t.command.side_effect = command
+        with patch.object(Codex, "POST_TRUST_READY_TIMEOUT", 1), self.assertRaisesRegex(TaskError, "Timed out"):
+            cli.start("DEV-7")
+        self.assertEqual(reads, [1, 0.75])
+        t.assert_effects(1, 0)
+
+    def test_transient_looking_queue_error_never_retries_or_reconciles_startup(self):
+        t = self.transport
+        t.queue_error = HerdrResponseError("unexpected queue response")
+        with self.assertRaisesRegex(TaskError, "prompt queue"):
+            cli.start("DEV-7")
+        t.assert_effects(1, 1)
+        self.assertFalse(any(c.args[:2] == ("pane", "read") for c in t.command.call_args_list))
 
     def test_trust_before_identity_continues_original_launch_and_context(self):
         t = self.transport

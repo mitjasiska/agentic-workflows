@@ -13,10 +13,10 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from task_start import TaskError, cli
+from task_start import HerdrResponseError, TaskError, cli
 from task_start.agent import AgentOptions, Codex, LaunchResult, Pi, adapter_for
 from task_start.config import IssueStructureConfig, load_local
-from task_start.contexts import ContextRegistry, context_reference
+from task_start.contexts import ContextRegistry, context_reference, now
 from task_start.handoff import implementation_handoff
 from task_start.integration_process import verify_shell_process
 from task_start.loop import loop, LoopRuntime
@@ -81,7 +81,7 @@ class PiInitialTransport:
         if (group, operation) == ('agent', 'start'):
             state, _ = test.store.read()
             test.assertEqual((state['status'], state['pass_count'], state['review_count']), ('running', 1, 0))
-            test.assertEqual(state['active_pass']['context_id'], 'DEV-7-I1')
+            test.assertEqual(state['active_pass']['context_id'], getattr(test, 'expected_implementation', 'DEV-7-I1'))
             test.assertIsNotNone(state['active_pass']['pass_id'])
             test.assertIn('--extension', args)
             self.history(messages=False)
@@ -138,7 +138,7 @@ class InitialAdapter(ImplementationAdapter):
         test = self.test
         state, _ = test.store.read()
         test.assertEqual((state['status'], state['pass_count'], state['review_count']), ('running', 1, 0))
-        test.assertEqual(state['active_pass']['context_id'], 'DEV-7-I1')
+        test.assertEqual(state['active_pass']['context_id'], getattr(test, 'expected_implementation', 'DEV-7-I1'))
         test.assertIsNotNone(state['active_pass']['pass_id'])
         test.assertIn('fresh conversation', execution.handoff)
         test.assertNotIn('Continue in YOUR existing', execution.handoff)
@@ -1171,6 +1171,35 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual(self.store.read()[0]['implementation']['session']['value'], transport.thread_id)
         transport.assert_effects(1, 1)
 
+    def test_initial_ready_with_persistent_read_error_retains_claim_without_receipt_or_replay(self):
+        transport = self.codex_transport()
+        transport.blocker = TRUST_SCREEN
+        def command(group, operation, *args, **kwargs):
+            if (group, operation) == ("pane", "read") and transport.blocker is None:
+                raise HerdrResponseError("Unexpected Herdr pane read response")
+            return transport.herdr(group, operation, *args, **kwargs)
+        transport.command.side_effect = command
+        with patch('task_start.agent.sys.stdin') as stdin, \
+                patch('task_start.agent.sys.stderr', new_callable=io.StringIO), \
+                patch.object(Codex, "POST_TRUST_READY_TIMEOUT", 0.5):
+            stdin.isatty.return_value = True
+            stdin.readline.side_effect = lambda: (transport.accept_setup(), "\n")[1]
+            result = self.run_loop()
+        self.assertEqual(result.state, "escalated", result.render())
+        state, _ = self.store.read()
+        self.assertIsNotNone(state["active_pass"])
+        self.assertIsNone(state["delivery"]["receipt"])
+        self.assertIn("Unexpected Herdr pane read", result.data["reason"])
+        self.assertIn("task loop DEV-7 --abort", result.data["reason"])
+        self.assertEqual(self.prompts, [])
+        with self.assertRaisesRegex(TaskError, "no durable delivery proof"):
+            loop("DEV-7")
+        self.assertEqual(self.store.read()[0], state)
+        for action in ("continue", "new"):
+            with self.assertRaises(TaskError):
+                loop("DEV-7", action=action)
+        transport.assert_effects(1, 0)
+
     def test_codex_uncertain_queue_preserves_observed_identity_and_never_requeues(self):
         transport = self.codex_transport()
         transport.queue_error = TaskError('Queue acknowledgement lost')
@@ -1596,6 +1625,116 @@ class BootstrapLoopTests(unittest.TestCase):
             self.run_loop()
         self.assertNotIn('open', self.preparation)
         self.assertEqual(self.launches, [])
+
+    def dispose_initial(self, *, interrupted=False):
+        """Real disposal journals/Git/registry, synthetic remote and Herdr proof."""
+        from task_start.cleanup import discard_execution
+        closed = False
+        original_panes = copy.deepcopy(self.panes)
+        def worktrees(operation, *args):
+            value = self.worktrees(operation, *args)
+            if closed and operation == "list":
+                for tree in value["worktrees"]:
+                    tree["open_workspace_id"] = None
+            return value
+        def workspaces():
+            return [] if closed else [dict(workspace_id="w1", label="DEV-7", pane_count=len(self.panes),
+                worktree=dict(repo_root=str(self.repo), repo_key=str(self.repo / ".git"), repo_name=self.repo.name,
+                              checkout_path=str(self.path), is_linked_worktree=True))]
+        def close(operation, workspace):
+            nonlocal closed
+            self.assertEqual((operation, workspace), ("close", "w1"))
+            if interrupted:
+                raise TaskError("Interrupted close")
+            closed = True
+            self.panes.clear()
+            return dict(workspace_id="w1")
+        with patch("task_start.cleanup.ContextRegistry", return_value=self.registry), \
+                patch("task_start.cleanup.HerdrContexts", return_value=self.identities), \
+                patch("task_start.cleanup.never_published", return_value={"repository": "example/test"}), \
+                patch("task_start.cleanup.stopped_execution", return_value={}), \
+                patch.object(Herdr, "command", side_effect=worktrees), \
+                patch.object(Herdr, "workspaces", side_effect=workspaces), \
+                patch.object(Herdr, "workspace_command", side_effect=close):
+            discard_execution(fixture.ISSUE, fixture.Project(fixture.ISSUE.project, self.repo.name, "main"), self.repo)
+        self.panes[:] = original_panes
+        self.expected_implementation = "DEV-7-I2"
+        return self.git.disposal_files("DEV-7")[0]
+
+    def test_completed_disposal_allows_fresh_loop_and_preserves_history_and_ordinal(self):
+        self.pause_before_launch()
+        path = self.dispose_initial()
+        journal = path.read_bytes()
+        retired = self.registry.get("DEV-7-I1")
+        self.assertEqual(retired["state"], "retired")
+        self.assertFalse(self.path.exists())
+        result = self.run_loop()
+        self.assertEqual(result.state, "clean", result.render())
+        self.assertEqual(result.data["implementation_context"], "DEV-7-I2")
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(self.registry.get("DEV-7-I1"), retired)
+        self.assertEqual(path.read_bytes(), journal)
+        self.assertEqual([c["ordinal"] for c in self.registry.list("DEV-7", include_retired=True)
+                          if c["role"] == "implementation"], [1, 2])
+
+    def test_prelaunch_recovery_after_disposal_reuses_new_reservation_only(self):
+        self.pause_before_launch()
+        path = self.dispose_initial()
+        before = path.read_bytes()
+        # A second launch's pre-handoff interruption must tolerate the same
+        # validated retired history when checking its reserved empty shell.
+        self.pause_before_launch()
+        self.assertEqual(self.registry.get("DEV-7-I2")["state"], "launching")
+        result = self.continue_loop()
+        self.assertEqual(result.state, "clean", result.render())
+        self.assertEqual(result.data["implementation_context"], "DEV-7-I2")
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_restart_refuses_pending_disposal_before_preparation(self):
+        self.pause_before_launch()
+        with self.assertRaisesRegex(TaskError, "Interrupted close"):
+            self.dispose_initial(interrupted=True)
+        before = list(self.preparation)
+        with self.assertRaises(TaskError):
+            self.run_loop()
+        self.assertEqual(self.preparation, before)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(self.path.exists())
+        self.assertEqual(self.registry.get("DEV-7-I1")["state"], "launching")
+
+    def test_restart_requires_exact_complete_journal_and_no_conflicting_history(self):
+        for kind in ("missing", "pending", "wrong_context", "incomplete", "live_claim", "foreign_history"):
+            with self.subTest(kind=kind):
+                case = BootstrapLoopTests(); case.setUp()
+                try:
+                    case.pause_before_launch()
+                    path = case.dispose_initial()
+                    record = json.loads(path.read_text())
+                    if kind == "missing":
+                        path.unlink()
+                    elif kind == "live_claim":
+                        case.registry.allocate("DEV-7", "review", agent="codex", repository=str(case.repo),
+                                               worktree=str(case.path))
+                    elif kind == "foreign_history":
+                        context = case.registry.allocate("DEV-7", "review", agent="codex")
+                        case.registry.retire_execution([case.registry.get(context)], now())
+                    else:
+                        if kind == "pending":
+                            record.update(state="pending", runtime=dict(process_proof=1, workspace=False, panes=[], shells={}))
+                        elif kind == "wrong_context":
+                            record["contexts"][0]["pane_id"] = "stale-pane"
+                        else:
+                            record["branch_state"] = "pending"
+                        path.write_text(json.dumps(record))
+                    before = list(case.preparation)
+                    with case.assertRaises(TaskError):
+                        case.run_loop()
+                    case.assertEqual(case.preparation, before)
+                    case.assertEqual(case.launches, [])
+                    case.assertFalse(case.path.exists())
+                finally:
+                    case.doCleanups()
 
     def test_retired_context_history_and_from_review_do_not_bootstrap(self):
         self.prepared_workspace()

@@ -24,6 +24,7 @@ from .review_result import parse_verdict, publication_fingerprint
 from .pass_delivery import PassDelivery, dispose, object_digest
 from .review_state import snapshot
 from .workspace import Git, Herdr
+from .cleanup import disposed_context_history
 
 
 def fingerprint(value):
@@ -39,8 +40,7 @@ def environment(identifier, *, allow_bootstrap=False, pending_implementation=Non
     env = SimpleNamespace(local=local, issue=issue, project=project, repo=repo, registry=registry,
                           identities=identities, workspace=None)
     if allow_bootstrap and not any(c["role"] == "implementation" for c in registry.list(issue.identifier)):
-        if registry.list(issue.identifier, include_retired=True):
-            raise TaskError("Context history exists without an established implementation; inspect it before starting")
+        env.disposed_history = disposed_context_history(registry, issue.identifier, repo)
         return env
     env.workspace, env.anchor, env.base, env.endpoint = resolve_review_workspace(
         issue, project, repo, registry, identities, pending_implementation=pending_implementation,
@@ -177,7 +177,8 @@ def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_r
     else:
         # Reserve before checkpoint creation so all controls can locate the run.
         # An interruption in this gap leaves a launching context, never a retry.
-        if env.registry.list(env.issue.identifier, include_retired=True):
+        history = disposed_context_history(env.registry, env.issue.identifier, env.repo)
+        if history != getattr(env, "disposed_history", []):
             raise TaskError("Context history changed before initial allocation; inspect before starting")
         if LoopStore(env.workspace.path).path.exists():
             raise TaskError("Loop checkpoint already exists; no replacement implementation was reserved")
