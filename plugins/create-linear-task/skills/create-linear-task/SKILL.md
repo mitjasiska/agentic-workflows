@@ -31,8 +31,12 @@ Use a concise, human-readable title that can produce a descriptive branch name. 
 
 - `Context / why` is optional; explain why the work exists, not its execution plan.
 - `Scope / outcome` is required and must stand on its own.
-- `Done when` is required and contains practical, verifiable completion conditions.
+- `Done when` is required and expresses testable behavior and relevant regression coverage as practical, verifiable completion conditions.
 - `Boundaries` is optional; include it when preventing adjacent changes matters.
+
+For behavioral changes, expect thorough automated coverage of requirements, regressions, risk-driven edge cases, failure paths, and invariants, with meaningful assertions. Focused validation limits repeated execution, not the number of valuable tests to create; do not reduce coverage to save execution time or set arbitrary test-count targets or caps. Avoid artificial tests for non-testable work.
+
+Default to relevant focused test execution and proportionate cheap checks. Use test-first development when useful; do not automatically insert strict red–green–refactor, blanket full-suite, or "all tests pass locally" obligations. Preserve explicit user and project requirements, including stricter test methodology or local/per-pass execution instructions. Distinguish "full regression must pass before merge" from "this agent must run the full suite locally": merge-time regression may be satisfied externally where permitted, while explicit local obligations still apply. External repository CI / GitHub Actions is the preferred broad-regression owner, but do not assume it exists. Require an honest report of actual commands/results and outstanding checks; without an established external gate, surface pending final validation for human verification. A clean code review does not establish that unrun regression passed. Lite ends at a PR for human review and manual merge.
 
 Classify these separate facts:
 
@@ -57,7 +61,7 @@ Put only execution-relevant details in the collapsed `Agent instructions` block:
 - the configured stop condition;
 - task kind, primary category, Research modifier, intended workflow labels, and change type.
 
-The block must state that it addresses the implementation agent executing the issue. Do not repeat the human specification there. The default stop condition is to finish the requested work and validation, then stop ready for review without committing, pushing, or opening a PR unless another workflow explicitly requests it.
+The block must state that it addresses the implementation agent executing the issue. Do not repeat the human specification there. The default stop condition is to finish the requested work and relevant focused validation, honor explicit local/per-pass requirements, and honestly report outstanding checks, then stop ready for independent review without committing, pushing, or opening a PR unless another workflow explicitly requests it. It does not automatically require a full-suite run before handoff or treat pending merge-time checks as satisfied.
 
 Render the collapsed block with Linear's API Markdown delimiters: `+++ Agent instructions` to open and `+++` to close. Preserve this API representation. `>>>` is only the interactive-editor shortcut and must not be emitted in an API description.
 

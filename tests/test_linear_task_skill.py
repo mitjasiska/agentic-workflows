@@ -1,4 +1,5 @@
 import importlib.util
+from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -239,6 +240,61 @@ class LinearTaskSkillTests(unittest.TestCase):
         self.assertIn("- Intended workflow labels: `Feature`", description)
         self.assertIn("- Change type: `feat`", description)
         self.assertIn(settings.stop_condition, description)
+
+    def test_skill_guidance_separates_thorough_coverage_from_focused_execution(self):
+        # These are instruction-contract checks, not a live model authoring evaluation.
+        skill = (ROOT / "skills/create-linear-task/SKILL.md").read_text()
+        for guidance in (
+            'expresses testable behavior and relevant regression coverage',
+            'thorough automated coverage', 'failure paths, and invariants, with meaningful assertions',
+            'Focused validation limits repeated execution, not the number of valuable tests to create',
+            'do not reduce coverage', 'arbitrary test-count targets or caps',
+            'Avoid artificial tests for non-testable work',
+            'do not automatically insert strict red–green–refactor, blanket full-suite, or "all tests pass locally" obligations',
+            'Preserve explicit user and project requirements',
+            'explicit local obligations still apply', 'do not assume it exists',
+            'actual commands/results and outstanding checks',
+            'pending final validation for human verification',
+        ):
+            with self.subTest(guidance=guidance):
+                self.assertIn(guidance, skill)
+
+    def test_distributed_default_stop_preserves_behavioral_outcomes_without_blanket_tests(self):
+        for skill in (ROOT / 'skills/create-linear-task', ROOT / 'plugins/create-linear-task/skills/create-linear-task'):
+            with self.subTest(skill=skill):
+                settings = preparer.load_settings(skill / 'config.toml')
+                target = preparer.resolve_target(settings, ROOT, None)
+                for kind, outcomes, validation in (
+                    ('feature', ['Retries stop at the configured limit.', 'Tests cover exhausted retries and worker failures.'],
+                     'Run the focused retry tests.'),
+                    ('docs', ['The setup guide links to the configuration reference.'], 'Verify the relative link target.'),
+                ):
+                    value = draft(primary_category=kind, done_when=outcomes,
+                                  agent=dict(repository_context=[], guidance=[], constraints=[], validation=[validation]))
+                    description = preparer.prepare_issue(settings, target, value)['issue']['description']
+                    self.assertEqual(description.split('## Done when\n\n')[1].split('\n\n+++')[0],
+                                     '\n'.join(f'- {outcome}' for outcome in outcomes))
+                    self.assertIn(settings.stop_condition, description)
+                    for guidance in ('relevant focused validation', 'explicit local/per-pass requirements',
+                                     'Report actual commands/results and outstanding checks honestly',
+                                     'pending merge-time validation for CI or human verification',
+                                     'do not assume an external gate exists', 'ready for independent review'):
+                        self.assertIn(guidance, description)
+                    for blanket in ('full suite', 'full-suite', 'all tests pass locally', 'red-green-refactor'):
+                        self.assertNotIn(blanket, description)
+
+    def test_stricter_author_requirements_and_configured_stop_survive_rendering(self):
+        requirement = 'Full regression must pass before merge.'
+        local = 'This agent must run the full suite locally before handoff.'
+        methodology = 'Use strict red-green-refactor for this fix.'
+        stop = 'Run all tests locally, then stop ready for review. Do not commit.'
+        settings = replace(self.settings(), stop_condition=stop)
+        description = self.prepare(
+            settings, done_when=[requirement],
+            agent=dict(repository_context=[], guidance=[methodology], constraints=[], validation=[local]),
+        )['issue']['description']
+        for text in (requirement, local, methodology, stop):
+            self.assertEqual(description.count(text), 1)
 
     def test_generated_issue_remains_valid_full_task_context_in_every_mode(self):
         description = self.prepare(self.settings())["issue"]["description"]

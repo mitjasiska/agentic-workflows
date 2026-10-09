@@ -172,9 +172,13 @@ workspace; a workspace prepared only with `--no-agent` is not sufficient. Review
 does not advance the base or change Linear. Keep the checkout stable during a
 pass: observed changes invalidate the result.
 
-Validation guidance defaults to focused tests and complete findings batches,
-deferring expensive full-suite checks on findings passes. Otherwise-clean reviews
-still require final testing specified by the issue and repository. Configure
+Agents create thorough behavioral and regression tests, use focused validation
+on implementation and review passes, and batch review findings. TDD is optional.
+External repository CI is the preferred owner of broad regression; its existence
+and results are never assumed. Explicit local/per-pass checks remain required,
+and unrun merge-time checks stay visible for CI or human verification. A clean
+code review is not CI approval. Lite ends at a PR for human review and manual merge.
+See [validation guidance](docs/lifecycle.md#validation-guidance). Configure
 [`review.validation.strategy`](docs/configuration.md#review-validation) as
 `exhaustive` to request full validation on every pass.
 

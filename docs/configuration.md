@@ -250,14 +250,17 @@ strategy = "focused_first" # focused_first | exhaustive
 ```
 
 `focused_first` is the default: inspect the full diff, batch actionable findings,
-and use targeted tests; defer expensive full-suite validation on findings passes.
+and use targeted tests on both findings and clean passes without automatically
+escalating to a full suite. Focused execution does not limit valuable test creation.
 `exhaustive` requests full validation on every review pass, even with findings.
 Both preserve explicit Linear issue and repository test requirements and read-only
 review safety. Invalid tables or strategy values are rejected before execution
 mutation. Workspace-only start (`--no-agent`) and cleanup skip this execution setting.
-The implementation handoff always prefers test-first work where practical and
-focused local tests; there is no configurable methodology setting.
-See [validation guidance](lifecycle.md#validation-guidance) for final checks and reporting.
+The implementation handoff calls for thorough tests, focused execution, and optional
+TDD; there is no configurable methodology setting. Explicit local/per-pass checks
+remain required; merge-time regression may be satisfied externally where permitted
+and remains pending until evidenced. See [validation guidance](lifecycle.md#validation-guidance)
+for CI ownership, human verification, and honest reporting.
 
 ## Codex permissions for trusted repositories
 
