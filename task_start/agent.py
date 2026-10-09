@@ -19,6 +19,7 @@ from .config import AgentConfig
 from .linear import Issue
 from .integration_process import stopped_checkout
 from .sessions import SessionInvalid, merge_session, same_session, session_identity
+from .review_result import unique_object
 from .workspace import Workspace, run
 
 
@@ -103,6 +104,8 @@ class AgentAdapter(Protocol):
     def review_status(self, execution: AgentExecution, terminal_id: str, reference: dict | None) -> str: ...
 
     def verify_session(self, workspace: Workspace, reference: dict) -> dict: ...
+
+    def verify_stopped_session(self, workspace, reference, receipt=None): ...
 
     def resume(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult: ...
 
@@ -263,6 +266,9 @@ class HerdrAgentAdapter:
     # Keep the review entry points compatible with existing callers/adapters.
     def verify_session(self, workspace: Workspace, reference: dict) -> dict:
         return self.verify_review_session(workspace, reference)
+
+    def verify_stopped_session(self, workspace, reference, receipt=None):
+        raise TaskError(f"Stopped-session verification is unsupported for {self.display_name}")
 
     def resume(self, execution: AgentExecution, reference: dict, *, recreate: bool) -> LaunchResult:
         return self.resume_review(execution, reference, recreate=recreate)
@@ -803,6 +809,81 @@ class CodexAdapter(HerdrAgentAdapter):
                             f"Session: {thread_id or 'not yet observed'}. "
                             "Workspace left intact; inspect the pane before retrying") from None
 
+    def verify_stopped_session(self, workspace, reference, receipt=None):
+        verified = self.verify_session(workspace, reference)
+        try:
+            with CodexRPC(workspace.path) as rpc:
+                thread = rpc.request("thread/read", {"threadId": reference["value"]})["thread"]
+                if (thread["id"] != reference["value"] or Path(thread["cwd"]).resolve() != workspace.path
+                        or thread.get("forkedFromId") is not None or thread.get("parentThreadId") is not None):
+                    raise ValueError("different thread")
+                queue = rpc.request("thread/queue/list", dict(threadId=reference["value"], limit=1))
+                page = rpc.request("thread/turns/list", dict(threadId=reference["value"],
+                    sortDirection="desc", limit=1, itemsView="full"))
+                if queue["data"] != [] or queue["nextCursor"] is not None:
+                    raise ValueError("pending input")
+                if not isinstance(page["data"], list) or len(page["data"]) != 1:
+                    raise ValueError("missing latest turn")
+                turn = page["data"][0]
+                if turn["status"] not in {"completed", "interrupted", "failed"} or turn["itemsView"] != "full":
+                    raise ValueError("possibly running or unverifiable turn")
+                if receipt:
+                    users = [item for item in turn["items"] if item["type"] == "userMessage"]
+                    delivered = (len(users) == 1 and users[0]["clientId"] == receipt["message_id"]
+                        and len(users[0]["content"]) == 1 and users[0]["content"][0]["type"] == "text"
+                        and hashlib.sha256(users[0]["content"][0]["text"].encode()).hexdigest() == receipt["prompt_sha256"])
+                    if not delivered:
+                        # A receipt is persisted before submission. Absence from
+                        # the latest turn is insufficient: inspect every full
+                        # turn and the durable queue twice, without sending input.
+                        before = self.prove_not_delivered(rpc, reference, receipt, page)
+                        if self.prove_not_delivered(rpc, reference, receipt) != before:
+                            raise ValueError("history changed during non-delivery proof")
+            return verified
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise TaskError("Codex stopped-turn evidence is ambiguous, live, or has pending input; abort refused") from None
+
+    def prove_not_delivered(self, rpc, reference, receipt, page=None):
+        """Complete, stable provider history is required to release an unsent receipt."""
+        turns, ids, cursors = [], set(), set()
+        while True:
+            if page is None:
+                page = rpc.request("thread/turns/list", dict(threadId=reference["value"],
+                    sortDirection="desc", limit=100, itemsView="full"))
+            if not isinstance(page["data"], list) or not page["data"]:
+                raise ValueError("incomplete history")
+            for turn in page["data"]:
+                if (not isinstance(turn["id"], str) or not turn["id"] or turn["id"] in ids
+                        or turn["status"] not in {"completed", "interrupted", "failed"}
+                        or turn["itemsView"] != "full" or not isinstance(turn["items"], list)):
+                    raise ValueError("ambiguous full history")
+                ids.add(turn["id"])
+                for item in turn["items"]:
+                    if item["type"] == "userMessage":
+                        content = item["content"]
+                        if (not isinstance(content, list) or len(content) != 1 or content[0]["type"] != "text"
+                                or not isinstance(content[0]["text"], str)):
+                            raise ValueError("unverifiable input")
+                        if (item["clientId"] == receipt["message_id"] or
+                                hashlib.sha256(content[0]["text"].encode()).hexdigest() == receipt["prompt_sha256"]):
+                            raise ValueError("claimed input exists or conflicts in history")
+                    elif item["type"] not in {"agentMessage", "reasoning", "commandExecution", "fileChange",
+                                              "mcpToolCall", "webSearch", "imageView", "plan"}:
+                        raise ValueError("unsupported or compacted history")
+                turns.append(turn)
+            cursor = page["nextCursor"]
+            if cursor is None:
+                break
+            if not isinstance(cursor, str) or not cursor or cursor in cursors or len(cursors) >= 1000:
+                raise ValueError("ambiguous history pagination")
+            cursors.add(cursor)
+            page = rpc.request("thread/turns/list", dict(threadId=reference["value"],
+                sortDirection="desc", limit=100, itemsView="full", cursor=cursor))
+        queue = rpc.request("thread/queue/list", dict(threadId=reference["value"], limit=1))
+        if queue["data"] != [] or queue["nextCursor"] is not None:
+            raise ValueError("pending input")
+        return turns
+
     def observe_delivery(self, execution, reference, receipt, completion):
         """Read the exact latest turn and empty queue; never submit or resume."""
         try:
@@ -926,8 +1007,17 @@ class PiAdapter(HerdrAgentAdapter):
         except (OSError, ValueError, KeyError, TypeError):
             raise TaskError("Pi delivery needs its exact persisted session header; no prompt was sent") from None
 
-    def observe_delivery(self, execution, reference, receipt, completion):
-        verified = self.verify_session(execution.workspace, reference)
+    def verify_stopped_session(self, workspace, reference, receipt=None):
+        if receipt:
+            from types import SimpleNamespace
+            self.observe_delivery(SimpleNamespace(workspace=workspace), reference, receipt, None, abandoning=True)
+            return self.delivery_session(workspace, reference)
+        else:
+            return self.verify_session(workspace, reference)
+
+    def observe_delivery(self, execution, reference, receipt, completion, *, abandoning=False):
+        verified = (self.delivery_session(execution.workspace, reference) if abandoning else
+                    self.verify_session(execution.workspace, reference))
         if verified != reference:
             raise TaskError("Pi conversation changed during saved pass")
         try:
@@ -959,10 +1049,54 @@ class PiAdapter(HerdrAgentAdapter):
                         final = (message["role"] == "assistant" and message.get("stopReason") == "stop"
                                  and (completion is None or text == completion))
             if not found:
-                raise ValueError("claimed prompt not found")
-            return bool(final)
+                if not abandoning:
+                    raise ValueError("claimed prompt not found")
+                before = self.prove_not_delivered(execution.workspace, reference, receipt)
+                if self.prove_not_delivered(execution.workspace, reference, receipt) != before:
+                    raise ValueError("history changed during non-delivery proof")
+            return abandoning or bool(final)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             raise TaskError("Pi history does not prove the exact saved pass; preserve its claim for inspection") from None
+
+    def prove_not_delivered(self, workspace, reference, receipt):
+        """Pi has no durable input queue; stopped-runtime proof is owned by the caller.
+
+        Require the entire native file, with an intact linear entry chain. A
+        missing prompt after compaction, branching, truncation or unsupported
+        records cannot establish non-delivery.
+        """
+        self.delivery_session(workspace, reference)
+        with Path(reference["value"]).open("rb") as source:
+            raw = source.read(64 * 1024 * 1024 + 1)
+        if not raw.endswith(b"\n") or len(raw) > 64 * 1024 * 1024:
+            raise ValueError("incomplete or oversized history")
+        lines = raw.splitlines()
+        if any(not line or len(line) > 2 * 1024 * 1024 for line in lines):
+            raise ValueError("incomplete history entries")
+        entries = [json.loads(line, object_pairs_hook=unique_object) for line in lines]
+        header = entries[0]
+        if (header["type"] != "session" or header["id"] != reference["conversation_id"]
+                or Path(header["cwd"]).resolve() != workspace.path):
+            raise ValueError("session changed")
+        parent, ids = None, set()
+        for entry in entries[1:]:
+            if (entry["type"] not in {"message", "model_change", "thinking_level_change"}
+                    or not isinstance(entry["id"], str) or not entry["id"] or entry["id"] in ids
+                    or entry["parentId"] != parent):
+                raise ValueError("unsupported, compacted or branched history")
+            parent = entry["id"]
+            ids.add(parent)
+            if entry["type"] == "message":
+                message = entry["message"]
+                if message["role"] == "user":
+                    content = message["content"]
+                    text = (content if isinstance(content, str) else content[0]["text"]
+                            if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text" else None)
+                    if not isinstance(text, str) or hashlib.sha256(text.encode()).hexdigest() == receipt["prompt_sha256"]:
+                        raise ValueError("unverifiable or previously delivered input")
+                elif message["role"] not in {"assistant", "toolResult"}:
+                    raise ValueError("unknown history message")
+        return hashlib.sha256(raw).hexdigest()
 
     def validate_options(self) -> None:
         mode = "off" if self.options.mode == "none" else self.options.mode

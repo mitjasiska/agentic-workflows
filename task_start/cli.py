@@ -61,7 +61,10 @@ def parser() -> argparse.ArgumentParser:
                     "Configured use needs only task loop ISSUE: [agent] selects initial implementation and "
                     "[reviewer] selects review. Optional --i-* and --r-* flags override those roles. "
                     "Both selections require explicit resolved model and mode. Repeat task loop ISSUE after "
-                    "controller interruption to observe its original pass without sending another prompt.")
+                    "controller interruption to observe its original pass without sending another prompt. "
+                    "If an agent turn was interrupted, stop the waiting controller with Ctrl+C first. "
+                    "For deliberate abandonment, quit task agents to their original shells, keep panes open, "
+                    "then run --abort outside the task checkout on Herdr's host.")
     loop_command.add_argument("issue", type=issue_identifier)
     controls = loop_command.add_mutually_exclusive_group()
     controls.add_argument("--pause-after-current", dest="action", action="store_const", const="pause",
@@ -72,6 +75,8 @@ def parser() -> argparse.ArgumentParser:
                           help="Inspect checkpoint without resuming or contacting Linear")
     controls.add_argument("--new", dest="action", action="store_const", const="new",
                           help="Explicitly replace a stopped loop after inspection, with a fresh reviewer")
+    controls.add_argument("--abort", dest="action", action="store_const", const="abort",
+                          help="Abandon a proven stopped unfinished pass, preserving checkout and session history; Ctrl+C alone does not abort")
     loop_command.set_defaults(action="run")
     loop_command.add_argument("--from-review", action="store_true",
                               help="Start a new loop with fresh review of the completed implementation")
@@ -301,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result.as_dict(), ensure_ascii=True) if args.json else result.render())
             if args.action in {"pause", "status"}:
                 return 0
-            return {"clean": 0, "paused": 3, "escalated": 3, "interrupted": 130}.get(result.state, 1)
+            return {"clean": 0, "aborted": 0, "paused": 3, "escalated": 3, "interrupted": 130}.get(result.state, 1)
         elif args.command == "pr":
             print(publish(args.issue))
         elif args.command == "integrate":
@@ -325,7 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"task: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        if args.command == "loop":
+        if args.command == "loop" and args.action == "abort":
+            print(f"task: abort interrupted; checkout preserved. Repeat task loop {args.issue} --abort "
+                  "to finish reconciliation before resuming task agents", file=sys.stderr)
+        elif args.command == "loop":
             print(f"task: controller interrupted; the original agent may still be working. "
                   f"Repeat task loop {args.issue} to reconcile its saved boundary", file=sys.stderr)
         else:

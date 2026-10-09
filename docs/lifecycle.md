@@ -431,6 +431,7 @@ task loop DEV-20 --i-agent codex --i-model gpt-6-astra --i-mode high
 task loop DEV-20 --pause-after-current
 task loop DEV-20 --status --json
 task loop DEV-20 --continue
+task loop DEV-20 --abort
 ```
 
 With no implementation context or context history, `task loop ISSUE` prepares
@@ -473,7 +474,7 @@ implementation context for later fixes. The human selects the starting boundary;
 idle status alone never establishes completion. Existing-context entries never
 adopt an arbitrary running turn or create a replacement implementation context.
 Let its current turn finish before starting. `--from-review` can accompany `--new`,
-but cannot accompany `--continue`, `--status`, or `--pause-after-current`.
+but cannot accompany `--continue`, `--status`, `--abort`, or `--pause-after-current`.
 
 The first review uses the existing fresh review primitive with a newly allocated
 independent reviewer. It receives current requirements and actual repository
@@ -573,7 +574,74 @@ pass. Review-start reports include only passes actually run: a clean first revie
 counts as one pass, with no initial implementation summary or validation claim.
 Run/continue exit codes are 0 for clean, 3 for pause/escalation, 130 for
 caught interruption, and 1 for preflight/storage errors. Successful pause/status
-requests exit 0; their reported state remains authoritative.
+requests exit 0; their reported state remains authoritative. Successful abort
+also exits 0, with state `aborted`, never `clean`.
+
+### Explicit abort without discarding work
+
+Ctrl+C interrupts the controller; it does **not** authorize abandonment or stop
+the terminal-owned agent. Repeating `task loop ISSUE` observes the original pass.
+An interrupted agent turn may leave that controller waiting for a result that
+will never arrive. To deliberately abandon that pass:
+
+1. Press Ctrl+C in the **controller's terminal** if it is still waiting. There is
+   no need to wait for the pass timeout. If only the controller stopped and the
+   agent is still working, ordinary recovery remains available instead.
+2. Quit the task's Codex/Pi runtimes, including an interrupted session still open
+   at an idle prompt, back to their original shells. Keep those panes open and
+   stop their child/background jobs. Quitting retains persisted conversations.
+3. From outside the task checkout, on Herdr's host/PID namespace, run
+   `task loop ISSUE --abort`. Inspect `task loop ISSUE --status --json` as needed.
+
+Abort uses the task lock and exclusive workflow ownership gate. Another active
+controller refuses it. It requires exact saved issue/checkout/branch, context,
+provider, pane and terminal identities; positive idle-shell executable, argv,
+TTY, PID/start-time and process-family evidence; and readable Linux `/proc`.
+It also rejects observable detached same-user processes with checkout cwd,
+arguments or open files. This is local process evidence, not a supervisor for
+remote hosts or arbitrary external access. A missing pane or an `idle` label
+alone never proves stoppage. Codex additionally requires a terminal provider turn
+and an empty queue; delivered claims must match the latest input. Pi verifies the
+immutable persisted conversation and claimed prompt's history chain. Pending
+input, provider uncertainty, changed identities and conflicting claims refuse.
+If interruption occurred after saving the receipt but before submission, abort
+requires complete, stable history proving the claimed input absent: every full
+Codex turn plus an empty queue, or Pi's intact linear session file, including a
+header-only conversation. Compacted, partial or ambiguous history refuses this
+non-delivery proof. A Pi locator is reconciled only with the conversation identity
+already pinned in that receipt and verified against the original session file.
+No command sends cancellation, kills processes or deletes files for this flow.
+
+Implementation edits may be incomplete, so abort preserves their current staged,
+unstaged and untracked content without declaring completion. HEAD/base changes
+refuse abort; an interrupted review also requires its entire pinned snapshot to
+remain unchanged, with no recorded review drift. Verification is repeated before
+revocation. Observed review drift durably invalidates the original pass and
+revokes its matching acceptance even when abort refuses; restoring files cannot
+make that review acceptable later. The private loop database retains an
+abandonment journal with the original run/pass, delivery, contexts, Git snapshot
+and process proof. Result directories and context identity history remain intact. Revocation precedes
+context reconciliation; if interrupted, state `aborting` requires another
+`--abort`. Repeated completed abort is a no-op. Late results cannot be sealed,
+recovered or accepted, including after a replacement loop. No SQLite edits are
+part of the operator sequence. Historical stale-reviewer reconciliation remains
+separate; abort only retires the reviewer of its exact unfinished loop pass.
+
+After abort, resume the saved implementation conversation in its original pane
+using the provider's native session selector, without submitting new work yet.
+The abort/status report prints that exact session ID or path; `task contexts ISSUE`
+locates its pane and recorded settings, without requiring private database edits.
+For an aborted review/re-review, `task loop ISSUE --new --from-review` starts a
+fresh independent reviewer after rechecking the preserved completion boundary.
+For interrupted implementation/fixes, inspect the preserved work and run
+`task loop ISSUE --new` to explicitly continue implementation and validation;
+`--from-review` refuses to infer completion. A proven undelivered, sessionless
+initial reservation can likewise use `--new` in its original empty shell.
+A Pi session containing only its startup header requires explicit native
+implementation input first, before `--new` can verify reusable conversation
+history. The loop does not infer completed implementation from that header.
+An abort never publishes a PR or changes manual approval. `cleanup --force`
+remains a separate, destructive choice that can discard implementation files.
 
 ### Checkpoint and interruption recovery
 
@@ -704,23 +772,25 @@ and retain the original claim. A seal written within the saved timeout may be
 collected after controller downtime; restarting never extends an unfinished
 pass's deadline. Restore transient provider access or the original runtime's
 observable identity, then repeat the command. Do not edit evidence, infer success
-from a transcript, reset a checkpoint, or resend a claimed prompt. If proof is
-irretrievably lost, preserve valuable work and stop the agents; explicit
-[forced local-execution disposal](#forced-local-execution-disposal) is the supported
-way to discard a never-published execution before starting over. Published or
-otherwise ambiguous executions require manual inspection. `--new` refuses every
-active claim, including escalated or interrupted ones.
+from a transcript, reset a checkpoint, or resend a claimed prompt. Use the
+[explicit abort sequence](#explicit-abort-without-discarding-work) to abandon a
+proven stopped pass while preserving work. If its required identity/process
+evidence is unavailable, inspection is still required. Explicit
+[forced local-execution disposal](#forced-local-execution-disposal) is the separate
+destructive path for a never-published execution. `--new` refuses every unresolved
+active claim, including escalated, interrupted or partially aborted ones.
 
-Retention is bounded to one unresolved pass destination per task checkout. The
+Retention is bounded to one unresolved pass destination per task checkout, plus
+explicitly abandoned destinations retained with their private journals. The
 result is limited to 1 MiB, the completion seal to 16 KiB, and no unknown directory
 entries are accepted. Accepted output is removed after its result is durably in
 the checkpoint and before another pass; interrupted disposal is retried without
 reaccepting the result. Forced disposal includes unresolved loop artifacts in its
 existing journal and stopped-runtime checks. Temporary-root eviction or missing
 artifacts fail closed; configure host cleanup accordingly for long-lived tasks.
-The checkpoint still stores only the current bounded run (at most 40 passes),
-not historical reports. `--new` after a clean or explicitly paused run requests a
-new loop with a fresh reviewer and replaces that checkpoint.
+The checkpoint stores the current bounded run (at most 40 passes); abandonment
+journals survive its replacement. `--new` after a clean, explicitly paused or
+fully aborted run requests a new loop with a fresh reviewer.
 
 ## Task pr
 

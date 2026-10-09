@@ -302,3 +302,39 @@ def stopped_execution(paths, shells, *, closed_shells=None, own_lock=None, proc=
         return {str(pid): graph[pid].started for pid in shells}
     except (OSError, ValueError, IndexError):
         raise TaskError("Cannot prove registered execution processes have stopped; nothing further was removed") from None
+
+
+def stopped_loop_execution(path, shells, *, proc=Path("/proc")):
+    """Require original idle shells plus no observable task users on this host.
+
+    The controller must run outside the checkout. In addition to registered
+    ancestry, reject detached same-user processes with checkout cwd, arguments,
+    or open files. Inaccessible evidence refuses; no process is ever signalled.
+    """
+    proof = stopped_execution([path], shells, proc=proc)
+    if not shells:
+        raise TaskError("Missing original task shells cannot prove an interrupted turn stopped")
+    try:
+        for entry in proc.iterdir():
+            if not entry.name.isdecimal() or int(entry.name) in shells or int(entry.name) == os.getpid():
+                continue
+            try:
+                if entry.stat().st_uid != os.getuid():
+                    continue
+                process = _process_stat(entry, int(entry.name), int(entry.name))
+                if not process.live or process.kernel:
+                    continue
+                cwd = Path(os.readlink(entry / "cwd"))
+                argv = os.fsdecode((entry / "cmdline").read_bytes())
+                references = [os.readlink(fd) for fd in (entry / "fd").iterdir()]
+                if (cwd.is_relative_to(path) or str(path) in argv
+                        or any(Path(p.removesuffix(" (deleted)")).is_relative_to(path) for p in references)):
+                    raise TaskError(f"Process {entry.name} may still use the task checkout; stop it before --abort")
+            except FileNotFoundError:
+                if entry.exists():
+                    raise
+        if stopped_execution([path], shells, proc=proc) != proof:
+            raise ValueError("shell identity changed")
+    except (OSError, ValueError, IndexError):
+        raise TaskError("Cannot prove task processes stopped; run --abort on Herdr's host with readable /proc") from None
+    return proof

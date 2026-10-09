@@ -219,6 +219,34 @@ class ContextRegistry:
             db.execute("UPDATE contexts SET state='abandoned', retired_at=? WHERE context_id=?",
                        (timestamp, context["context_id"]))
 
+    def reconcile_loop_abort(self, contexts, reconciled):
+        """CAS the exact stopped claims; preserve provider and terminal history.
+
+        Retry accepts only the original rows or the journal's exact resulting rows.
+        Reviewer retirement is local to the explicitly abandoned loop pass, not
+        general stale-reviewer reconciliation.
+        """
+        if len(contexts) != len(reconciled):
+            raise TaskError("Abort context evidence is incomplete")
+        with self.connection(write=True) as db:
+            for before, after in zip(contexts, reconciled):
+                current = db.execute("SELECT * FROM contexts WHERE context_id=?", (before["context_id"],)).fetchone()
+                if current is None or dict(current) not in (before, after):
+                    raise TaskError("Context changed during abort; no claim was released")
+                if any(before[k] != after[k] for k in before if k not in {"state", "retired_at", "resumability", "herdr_session"}):
+                    raise TaskError("Abort cannot replace a context identity")
+                if before["herdr_session"] != after["herdr_session"]:
+                    prior, refined = context_reference(before), context_reference(after)
+                    try:
+                        if (prior is None or refined is None or
+                                merge_session(prior, refined, before["agent"]) != merge_session(None, refined, before["agent"])):
+                            raise ValueError("not an identity refinement")
+                    except ValueError:
+                        raise TaskError("Abort cannot replace a context identity") from None
+            for after in reconciled:
+                db.execute("UPDATE contexts SET state=?, retired_at=?, resumability=?, herdr_session=? WHERE context_id=?",
+                           (after["state"], after["retired_at"], after["resumability"], after["herdr_session"], after["context_id"]))
+
     def retire(self, issue: str, repository: Path, worktree: Path, *,
                endpoint: str, workspace_id: str | None) -> None:
         if not self.path.exists():

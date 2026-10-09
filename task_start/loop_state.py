@@ -21,7 +21,7 @@ from .workspace import Git
 
 
 PHASES = {"initial_implementation", "implementation", "review", "fixes", "rereview"}
-STATES = {"ready", "running", "paused", "clean", "escalated", "interrupted"}
+STATES = {"ready", "running", "paused", "clean", "escalated", "interrupted", "aborting", "aborted"}
 
 
 def startup_recovery_blocker(state):
@@ -47,6 +47,20 @@ def validate_checkpoint(state):
               "reviewer_options", "status", "reason", "next_phase", "active_pass", "pass_count",
               "review_count", "max_reviews", "max_passes", "timeout", "snapshot", "findings", "seen", "records"}
     initial_phase = "implementation"  # Version 1 always starts with completion.
+    abandoned = state.get("abandonment")
+    if abandoned is not None:
+        fields.add("abandonment")
+        if (set(abandoned) != {"claim", "review_ready", "timestamp"}
+                or state["status"] != "aborted" or state["active_pass"] is not None
+                or state.get("delivery") is not None or state["next_phase"] is not None
+                or type(abandoned["review_ready"]) is not bool
+                or not isinstance(abandoned["timestamp"], str)
+                or set(abandoned["claim"]) != {"phase", "context_id", "pass_id"}
+                or abandoned["claim"]["phase"] not in PHASES
+                or abandoned["review_ready"] != (abandoned["claim"]["phase"] in {"review", "rereview"})):
+            raise ValueError("invalid abandonment boundary")
+    elif state["status"] == "aborted":
+        raise ValueError("missing abandonment evidence")
     if "delivery" in state:
         fields.add("delivery")
         validate_delivery(state["delivery"], state)
@@ -82,12 +96,12 @@ def validate_checkpoint(state):
             raise ValueError("invalid context selector")
         if (key == "implementation" and state["version"] == 3 and set(context) == {"context_id"}):
             if (state["records"] or state["reviewer"] is not None or state["review_count"] != 0
-                    or state["next_phase"] != "initial_implementation"
+                    or state["next_phase"] != "initial_implementation" and not abandoned
                     or state["status"] == "clean"):
                 raise ValueError("missing established implementation")
             continue  # Reservation is durable before any provider/session exists.
         if (key == "reviewer" and set(context) == {"context_id"}
-                and state["status"] in {"running", "escalated", "interrupted"}):
+                and state["status"] in {"running", "escalated", "interrupted", "aborting", "aborted"}):
             continue  # Allocation is recorded even before provider receipt exists.
         if (set(context) != {"context_id", "agent", "model", "mode", "session"}
                 or any(not isinstance(context[k], str) or not context[k] for k in ("agent", "model", "mode"))
@@ -113,7 +127,7 @@ def validate_checkpoint(state):
         raise ValueError("invalid active pass")
     if state["status"] == "running" and active is None:
         raise ValueError("missing handoff claim")
-    if state["pass_count"] != len(records) + (active is not None):
+    if state["pass_count"] != len(records) + (active is not None) + bool(abandoned):
         raise ValueError("missing pass evidence")
     reviews = 0
     next_phase = initial_phase
@@ -149,8 +163,11 @@ def validate_checkpoint(state):
             elif record["context_id"] != state["reviewer"]["context_id"]:
                 raise ValueError("reviewer changed")
             next_phase = "fixes" if record["state"] == "findings" else None
-    if state["review_count"] != reviews + bool(active and active["phase"] in {"review", "rereview"}):
+    counted = active or (abandoned["claim"] if abandoned else None)
+    if state["review_count"] != reviews + bool(counted and counted["phase"] in {"review", "rereview"}):
         raise ValueError("missing review evidence")
+    if abandoned and abandoned["claim"]["phase"] != next_phase:
+        raise ValueError("abandoned pass sequence changed")
     if (state["status"] in {"ready", "paused", "running"} or active is not None
             or records and state["next_phase"] is not None):
         if state["next_phase"] != next_phase:
@@ -243,16 +260,57 @@ class LoopStore:
                 if not replace:
                     raise TaskError("A loop checkpoint already exists; use --status, --continue for a pause, "
                                     "or explicitly --new after inspecting the previous run")
-                if old["status"] in {"ready", "running"} or old["active_pass"] is not None or old.get("delivery"):
+                if old["status"] in {"ready", "running", "aborting"} or old["active_pass"] is not None or old.get("delivery"):
                     raise TaskError("An unfinished handoff exists; inspect its contexts before replacing the checkpoint")
+                if old["status"] == "aborted" and self.abort_journal(old["run_id"]) is None:
+                    raise TaskError("Abandonment archive is missing; no replacement loop is safe")
             db.execute("INSERT OR REPLACE INTO checkpoint VALUES (1, ?, 0)", (json.dumps(state),))
 
     def save(self, state):
         with self.connection(write=True) as db:
             current, _ = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
-            if current["run_id"] != state["run_id"]:
+            if current["run_id"] != state["run_id"] or current["status"] in {"aborting", "aborted"}:
                 raise TaskError("Loop identity changed; no state was overwritten")
             db.execute("UPDATE checkpoint SET payload=? WHERE id=1", (json.dumps(state),))
+
+    def begin_abort(self, expected, journal):
+        """Commit revocation before releasing any operational context claim.
+
+        The archive survives checkpoint replacement. An interrupted transaction
+        changes neither; an interrupted reconciliation remains explicitly aborting.
+        """
+        with self.connection(write=True) as db:
+            current, _ = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
+            if current != expected or current["active_pass"] is None:
+                raise TaskError("Loop claim changed before abort; nothing was abandoned")
+            db.execute("CREATE TABLE IF NOT EXISTS abandonments (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            db.execute("INSERT INTO abandonments VALUES (?, ?)", (expected["run_id"], json.dumps(journal)))
+            current.update(status="aborting", reason="Abort recorded; rerun --abort to finish reconciliation")
+            db.execute("UPDATE checkpoint SET payload=? WHERE id=1", (json.dumps(current),))
+
+    def abort_journal(self, run_id):
+        with self.connection() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='abandonments'").fetchone()
+            row = db.execute("SELECT payload FROM abandonments WHERE run_id=?", (run_id,)).fetchone() if exists else None
+        if row is None:
+            return None
+        try:
+            journal = json.loads(row[0], object_pairs_hook=unique_object)
+            if (set(journal) != {"original", "contexts", "reconciled", "snapshot", "processes", "publication", "timestamp"}
+                    or journal["original"]["run_id"] != run_id):
+                raise ValueError("invalid archive")
+            self.decode((json.dumps(journal["original"]), 0))
+            return journal
+        except (KeyError, TypeError, ValueError):
+            raise TaskError("Malformed abandonment archive; preserve it for inspection") from None
+
+    def finish_abort(self, expected, state):
+        self.decode((json.dumps(state), 0))
+        with self.connection(write=True) as db:
+            current, _ = self.decode(db.execute("SELECT payload, pause FROM checkpoint WHERE id=1").fetchone())
+            if current != expected or current["status"] != "aborting":
+                raise TaskError("Abort checkpoint changed; no state was overwritten")
+            db.execute("UPDATE checkpoint SET payload=?, pause=0 WHERE id=1", (json.dumps(state),))
 
     def pause(self):
         with self.connection(write=True) as db:

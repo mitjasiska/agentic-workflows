@@ -27,7 +27,7 @@ from .workspace import Git, Herdr, Workspace
 
 
 def resolve_review_workspace(issue, project, repo, registry, identities, *, pending_implementation=None,
-                             local_only=False, recovery_implementation=None):
+                             local_only=False, recovery_implementation=None, abort_implementation=None):
     git, herdr = Git(repo), Herdr(repo)
     if local_only:
         git.check_repository()
@@ -44,7 +44,7 @@ def resolve_review_workspace(issue, project, repo, registry, identities, *, pend
     if any(c["repository"] != str(repo) or (c["role"] != "integration" and c["worktree"] != str(target.path))
            or c["endpoint"] != endpoint or c["workspace_id"] != target.open_workspace_id for c in contexts):
         raise TaskError("Issue context repository/worktree/Herdr mappings are inconsistent")
-    bound = [c for c in contexts if recovery_implementation or c["state"] in {"active", "reviewing"}]
+    bound = [c for c in contexts if recovery_implementation or abort_implementation or c["state"] in {"active", "reviewing"}]
     for index, context in enumerate(bound):
         for other in bound[:index]:
             shared_runtime = any(context[key] and context[key] == other[key] for key in ("pane_id", "terminal_id"))
@@ -56,7 +56,9 @@ def resolve_review_workspace(issue, project, repo, registry, identities, *, pend
     implementation_state = "launching" if pending_implementation else "active"
     implementations = [c for c in contexts if c["role"] == "implementation" and
                        (c["state"] == implementation_state or recovery_implementation == c["context_id"]
-                        and c["state"] in {"launching", "uncertain"})]
+                        and c["state"] in {"launching", "uncertain"}
+                        or abort_implementation == c["context_id"]
+                        and c["state"] in {"launching", "uncertain", "awaiting_user"})]
     if len(implementations) != 1:
         raise TaskError("Review requires exactly one active implementation context mapping")
     if pending_implementation and (len(contexts) != 1 or implementations[0]["context_id"] != pending_implementation):
