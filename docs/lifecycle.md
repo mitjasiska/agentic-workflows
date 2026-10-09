@@ -37,12 +37,14 @@ then starts the selected adapter in the returned pane and sends the same workflo
 owned handoff: current identifier, title, exact description, resolved checkout,
 branch, optional slice, and standard implementation instructions. Both agents
 are told to read repository instructions, inspect before editing, implement the
-requested scope, prefer test-first / red-green-refactor for testable behavior and
-fixes where practical, and use focused tests (including new or changed tests) plus
-inexpensive syntax/lint/diff checks during implementation. TDD is optional for docs,
-UI/visual work, research, and other unsuitable tasks. Expensive full suites are not
-the default during iteration; explicit issue/repository requirements still govern
-final validation. Agents stop for independent review without
+requested scope, create thorough behavioral and regression tests with meaningful
+assertions, and use focused subsets (including new or changed tests) plus
+proportionate inexpensive syntax/lint/diff checks during development and before
+handoff. Test-first development is useful when appropriate; TDD is optional.
+Focused execution does not mean reducing coverage or adding artificial tests for
+non-testable work. Ending implementation does not routinely require a full suite.
+Explicit local/per-pass requirements remain authoritative; pending merge-time
+validation is reported for CI or human verification. Agents stop for independent review without
 committing, pushing, merging, or opening a PR. The Python workflow owns the Linear
 lookup; the execution agent is told not to contact Linear or read its credentials.
 No task description file is written into the worktree.
@@ -276,30 +278,41 @@ capabilities do not authorize task writes during review.
 Fresh reviews and same-reviewer re-reviews share the
 [review validation strategy](configuration.md#review-validation), defaulting to
 `focused_first`. Reviewers inspect the full diff and requirements, assess test
-quality (meaningful assertions and missing edge cases), and collect a complete
+quality (meaningful assertions and missing behavioral, regression, edge-case,
+failure-path, and invariant coverage proportionate to risk), and collect a complete
 batch of substantive actionable findings. They continue inspecting after a defect
-and run targeted tests needed to investigate potential problems.
+and run targeted, adversarial tests needed to investigate potential problems.
+Focused execution does not limit the number of valuable tests to create: there
+are no test-count targets or caps, and coverage must not be reduced to save runtime.
 
-On a findings pass, `focused_first` skips expensive full-suite validation before
-reporting the batch; checks explicitly required on every pass still apply.
+Under `focused_first`, both findings and clean passes use relevant focused checks;
+an otherwise-clean review does not trigger a full-suite run. Checks explicitly
+required locally or on every pass still apply.
 The implementer fixes the batch and reruns relevant tests, then the same reviewer
 rechecks fixes and regressions (`task review --resume` or the loop's automatic
 re-review). `exhaustive` requests full validation even on findings passes, with
 the same inspection and batching obligations.
 
-When otherwise clean, reviewers run all final validation required by the Linear
-issue and repository policy, including a full suite when required. Explicit
-requirements such as "all tests must pass" are never weakened. Enforced, evidenced
-CI may serve as a separately identified final merge gate where those requirements
-permit it; reviewers cannot assume CI exists or silently substitute it for checks.
+Explicit issue/repository requirements remain authoritative. "Full regression must
+pass before merge" or "all tests must pass" does not by itself require this agent
+to execute the full suite locally. External repository CI / GitHub Actions is the
+preferred broad-regression owner where requirements permit it; explicit local or
+per-pass execution requirements cannot be replaced by CI. Agents never assume an
+external gate exists or has passed. Without an established gate, pending final
+validation is surfaced for human verification. Lite ends at a PR for human review
+and manual merge; a clean independent code review is not CI approval.
 
 Tests must not mutate tracked or untracked Git-visible task state. If a check
 cannot run safely, reviewers record `not_run` and explain why; restoring test
 mutations afterward does not make the test safe. Existing `checks` entries report
 commands, observed results, failures, skipped checks and reasons, and evidence for
-any separate CI gate. An unrun check cannot be reported as passed, and missing
-required final validation without a permitted, evidenced gate cannot be claimed
-as a clean review.
+any separate CI gate. Independently evidenced results identify their source and
+applicable revision without implying local execution. Unrun merge-time checks
+remain `not_run` and appear as pending limitations in the summary and
+`publication.validation` when present, including on clean reviews. A clean review
+does not claim unrun regression passed. If explicit local/per-pass checks or
+`exhaustive` validation cannot run safely, record the reason and report blocked
+rather than clean.
 
 This is prompt guidance, not controller-enforced proof of command execution. The
 existing result/publication acceptance and Git snapshot safety contracts remain

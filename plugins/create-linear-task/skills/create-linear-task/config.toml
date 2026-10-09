@@ -3,7 +3,7 @@
 
 [task_creation]
 task_kinds = ["implementation", "research", "experiment"]
-default_stop_condition = "Finish the requested work and validation, then stop ready for review. Do not commit, push, or open a PR unless another workflow explicitly requests it."
+default_stop_condition = "Finish the requested work and relevant focused validation, honoring explicit local/per-pass requirements. Report actual commands/results and outstanding checks honestly, including pending merge-time validation for CI or human verification; do not assume an external gate exists. Then stop ready for independent review. Do not commit, push, or open a PR unless another workflow explicitly requests it."
 
 [task_creation.primary_categories.feature]
 linear_label = "Feature"

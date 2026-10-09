@@ -15,11 +15,13 @@ IMPLEMENTATION_INSTRUCTIONS = """- Treat the complete Linear issue above as the 
 - Read AGENTS.md and other repository instructions first.
 - Inspect the existing implementation before changing anything.
 - Implement only the requested scope.
-- Prefer test-first / red-green-refactor where practical for testable behavior and fixes; this is a preference, not mandatory for docs, UI/visual work, research, or other unsuitable tasks.
-- Use focused tests throughout implementation, including new or changed tests, plus inexpensive syntax/lint/diff checks as applicable. Do not run an expensive full suite by default during iteration.
-- Explicit Linear issue and repository validation requirements remain authoritative; complete required final validation before reporting ready for review.
+- Create and maintain thorough automated tests for behavioral requirements, regressions, risk-driven edge cases, failure paths, and invariants, with meaningful assertions. Focused execution does not mean fewer valuable tests; do not reduce coverage to make validation faster or use arbitrary test-count targets or caps. Avoid artificial tests for non-testable work.
+- Use test-first / red-green-refactor when useful; TDD is optional, not a universal mandate.
+- Run focused subsets, including new or changed tests, plus proportionate inexpensive syntax/lint/diff checks during development and before handoff. Do not routinely run the full suite merely to end the implementation pass.
+- Explicit Linear issue and repository validation requirements remain authoritative. Distinguish "full regression must pass before merge" or "all tests must pass" from "this agent must run the full suite locally". Complete checks explicitly required locally or for this pass before reporting ready; if unable, report the blocker honestly. Merge-time requirements may be satisfied externally where permitted, and remain pending until evidenced.
+- External repository CI / GitHub Actions is the preferred owner of broad regression, but never assume CI exists. Report required validation left for CI or human verification; if no external gate is established, surface pending final validation to the human. Lite ends at a PR for human review and manual merge.
 - When review findings are supplied, fix the complete batch and rerun relevant tests before the same reviewer rechecks fixes and regressions.
-- Report exactly what was run, skipped, or failed and why; use the existing checks fields when a structured result is requested. Never report an unrun check as passed.
+- Report exactly what was run, skipped, or failed and why; use the existing checks fields when a structured result is requested. Never report an unrun check as passed; independently evidenced results must identify their source and applicable revision, not imply local execution.
 - Do not commit, push, merge, or open a PR.
 - Do not use sudo or destructive Git operations.
 - Stop when the implementation is ready for independent review.
@@ -59,30 +61,40 @@ file counts, or filenames.
 
 
 REVIEW_VALIDATION_INSTRUCTIONS = """Inspect the full diff and requirements, and assess test quality, including
-meaningful assertions and missing edge cases. Collect a complete batch of substantive actionable findings.
-Do not stop at the first defect. Run targeted tests needed to investigate potential problems.
+meaningful assertions and missing behavioral, regression, edge-case, failure-path, and invariant coverage
+proportionate to risk. Focused execution does not mean fewer valuable tests; do not discourage thorough
+test creation or use arbitrary test-count targets or caps. Avoid artificial tests for non-testable work.
+Collect a complete batch of substantive actionable findings. Do not stop at the first defect.
+Run targeted tests, including adversarial checks, needed to investigate potential problems.
 The implementer fixes the batch and reruns relevant tests; the same reviewer rechecks fixes and regressions.
-Explicit Linear issue and repository validation requirements remain authoritative under either strategy,
-including requirements such as "all tests must pass"; this guidance never weakens them.
-When otherwise clean, run all final validation required by the Linear issue and repository policy,
-including a full suite when required. Enforced, evidenced CI may serve as a separately identified final merge gate
-where permitted by those requirements. Never assume CI exists or substitute unevidenced CI for required checks.
+Explicit Linear issue and repository validation requirements remain authoritative under either strategy.
+Distinguish "full regression must pass before merge" or "all tests must pass" from "this agent must run the
+full suite locally". Complete checks explicitly required locally or on this pass; external CI cannot replace
+those obligations. If unable, record not_run with the reason and report blocked rather than clean.
+Merge-time requirements may be satisfied externally where permitted, and remain pending until evidenced.
+External repository CI / GitHub Actions is the preferred owner of broad regression. Never assume CI exists
+or substitute unevidenced CI for required checks. If no external gate is established, surface pending final
+validation to the human. Lite ends at a PR for human review and manual merge.
 Validation must not mutate tracked or untracked Git-visible task state. Do not run unsafe tests and then
 restore their changes; if a check cannot run safely, record it as not_run with the reason.
 Use the existing checks fields to record exactly what was run, skipped, or failed and why, including commands,
-observed results, and evidence for any separate CI gate. Never report an unrun check as passed.
-If required final validation cannot be completed safely and no permitted, evidenced merge gate covers it,
-report the limitation and do not claim a clean review.
+observed results, and evidence for any separate CI gate. Never report an unrun check as passed; independently
+evidenced results must identify their source and applicable revision, not imply local execution.
+A clean independent code review is not CI approval or a claim that unrun final regression passed.
+Record unrun merge-time checks as not_run and carry pending limitations into the summary and publication.validation
+when present, even for a clean review. No established external gate means human verification is still pending.
 """
 
 REVIEW_VALIDATION_STRATEGIES = {
     "focused_first": """Start with focused validation on both initial review and same-reviewer re-review.
-Once actionable findings are gathered, skip expensive full-suite validation and report the complete batch.
+Use relevant focused checks on clean passes too; do not escalate to a full suite merely because review is otherwise clean.
+On findings passes, skip expensive full-suite validation and report the complete batch.
 Continue inspecting for other defects and running targeted investigative tests before reporting;
-finding a defect does not end the full-diff review. Checks explicitly required on every pass still apply.
+finding a defect does not end the full-diff review. Checks explicitly required locally or on every pass still apply.
 """,
     "exhaustive": """Run full validation on every review pass, even with actionable findings.
 Continue full-diff inspection and collect the complete findings batch before reporting.
+If full validation cannot run safely, record not_run with the reason and report blocked rather than clean.
 """,
 }
 

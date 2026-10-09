@@ -152,6 +152,8 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.impl_prompts), 1)
         self.assertEqual(len(self.prompts), 1)
         self.assertIn("fresh independent review", self.prompts[0])
+        self.assertIn("Use relevant focused checks on clean passes too", self.prompts[0])
+        self.assertIn("Do not routinely run the full suite merely to end the implementation pass", self.impl_prompts[0])
         self.assertIn("Current requirements", self.prompts[0])
         self.assertNotIn("Controlled implementation checks", self.prompts[0])
         self.assertNotIn("Implementation completed and validated", self.prompts[0])
@@ -226,6 +228,10 @@ class LoopIntegrationTests(unittest.TestCase):
                          ["DEV-7-R1", self.implementation, "DEV-7-R1"])
         for prompt in self.prompts:
             self.assertIn('REVIEW VALIDATION POLICY: focused_first', prompt)
+            self.assertIn('Use relevant focused checks on clean passes too', prompt)
+            self.assertIn('On findings passes, skip expensive full-suite validation', prompt)
+            self.assertIn('same reviewer rechecks fixes and regressions', prompt)
+        self.assertIn('fix the complete batch and rerun relevant tests', self.impl_prompts[0])
 
     def test_exhaustive_policy_reaches_loop_review_and_rereview(self):
         self.local = replace(self.local, review_validation=ReviewValidationConfig('exhaustive'))
@@ -237,6 +243,23 @@ class LoopIntegrationTests(unittest.TestCase):
             self.assertIn('REVIEW VALIDATION POLICY: exhaustive', prompt)
             self.assertIn('full validation on every review pass, even with actionable findings', prompt)
         self.assertIn('YOUR existing conversation', self.prompts[1])
+
+    def test_clean_rereview_keeps_pending_regression_visible_to_human(self):
+        pending = dict(name='Full regression', result='not_run',
+                       details='Required before merge; no external gate established. Pending human verification.')
+        self.impl_overrides = dict(checks=[pending])
+        self.review_results = [findings(finding(1), finding(2)), dict(
+            checks=[pending], summary='No remaining findings; full regression pending human verification.')]
+        result = self.run_loop(from_review=True)
+        self.assertEqual(result.state, 'clean', result.render())
+        self.assertIn(pending, result.data['validation'])
+        self.assertIn('Check Full regression: not_run', result.render())
+        self.assertIn(pending['details'], result.render())
+        self.assertEqual([item['finding_id'] for item in result.data['resolutions']], ['F1', 'F2'])
+        state, _ = self.store.read()
+        self.assertEqual([record['context_id'] for record in state['records']],
+                         ['DEV-7-R1', self.implementation, 'DEV-7-R1'])
+        self.assertEqual(state['records'][-1]['checks'], [pending])
 
     def test_from_review_initial_pause_status_and_continue_preserve_boundary(self):
         paused = self.pause_before_first_review()
