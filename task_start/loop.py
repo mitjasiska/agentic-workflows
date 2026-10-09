@@ -130,6 +130,12 @@ class LoopResult:
             lines.append(f"Next boundary: {value['next_phase']}")
         if value["pause_requested"]:
             lines.append("Pause-after-current requested (sticky).")
+        if value.get("abandonment"):
+            claim = value["abandonment"]["claim"]
+            lines.append(f"Abandoned: {claim['phase']} / {claim['context_id']} / {claim['pass_id']}")
+            if value.get("implementation_session"):
+                session = value["implementation_session"]
+                lines.append(f"Implementation session to resume: {session['agent']} ({session['kind']}) {session['value']}")
         return "\n".join("".join(c if c.isprintable() else "?" for c in line) for line in lines)
 
 
@@ -154,15 +160,20 @@ def report(state, pause=False):
         implementation=implementations, review_iterations=reviews, resolutions=resolutions, validation=checks,
         final_review_state=reviews[-1]["state"] if reviews else "not_run",
         human_action_required=state["status"] != "clean", next_phase=state["next_phase"],
-        pause_requested=pause, active_pass=state["active_pass"]))
+        pause_requested=pause, active_pass=state["active_pass"], abandonment=state.get("abandonment"),
+        implementation_session=state["implementation"].get("session") if state.get("abandonment") else None))
 
 
 def new_state(env, reviewer_options, max_reviews, max_passes, timeout, *, from_review=False,
-              initial_options=None):
+              initial_options=None, reserved_implementation=None):
     if initial_options is None:
         context, *_ = implementation_target(env)
         implementation = binding(context)
         idle_reviewers(env)
+    elif reserved_implementation is not None:
+        pending_launch(initial_execution(env, initial_options), reserved_implementation,
+                       env.registry, env.identities, require_idle=True)
+        implementation = dict(context_id=reserved_implementation)
     else:
         # Reserve before checkpoint creation so all controls can locate the run.
         # An interruption in this gap leaves a launching context, never a retry.
@@ -497,7 +508,9 @@ def drive(store, state, runtime, *, on_pass_result=None):
         state.update(status="paused", reason="Paused after collecting the current pass; use --continue explicitly")
     except (KeyboardInterrupt, SystemExit):
         state.update(status="interrupted", reason=f"Controller interrupted; the original agent may still be working. "
-                     f"Repeat task loop {runtime.identifier} to reconcile the saved pass; --continue only resumes a pause")
+                     f"Repeat task loop {runtime.identifier} to reconcile the saved pass; --continue only resumes a pause. "
+                     "To abandon instead, quit task agents to their original shells, then run "
+                     f"task loop {runtime.identifier} --abort from outside the task checkout")
         if state.get("delivery"):
             state["reason"] += f". Retained evidence: {state['delivery']['directory']}"
     except Exception as error:
@@ -505,8 +518,9 @@ def drive(store, state, runtime, *, on_pass_result=None):
         state.update(status="escalated", reason=f"{error}. Inspect contexts before recovery; no handoff was retried")
         if state["active_pass"] is not None:
             state["reason"] += (f". Preserve the checkpoint/output; repeat task loop {runtime.identifier} after resolving "
-                                "the reported evidence problem. If proof is lost, stop the agents and use task cleanup "
-                                f"{runtime.identifier} --force only to explicitly discard a never-published execution")
+                                "the reported evidence problem. To abandon, stop this controller with Ctrl+C, quit task "
+                                "agents to their original shells, and run "
+                                f"task loop {runtime.identifier} --abort from outside the checkout")
             if state.get("delivery"):
                 state["reason"] += f". Retained evidence: {state['delivery']['directory']}"
         if isinstance(error, LinearUnavailable) and startup_recovery_blocker(state) is None:
@@ -542,7 +556,7 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
          impl_agent_kind=None, impl_model=None, impl_mode=None):
     implementation_overrides = (impl_agent_kind, impl_model, impl_mode)
     overrides = (agent_kind, model, mode, max_reviews, max_passes, timeout, *implementation_overrides)
-    if action not in {"run", "new", "continue", "pause", "status"}:
+    if action not in {"run", "new", "continue", "pause", "status", "abort"}:
         raise TaskError("Unknown loop control action")
     if from_review and action not in {"run", "new"}:
         raise TaskError("--from-review only starts a new loop; controls preserve the saved boundary")
@@ -557,6 +571,13 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
             raise TaskError("--i-* options require a from-scratch loop, not --from-review")
     # Argument-only refusals create no ownership/checkpoint state. All runtime
     # observation and mutation, including control resolution, remain guarded.
+    if action == "abort":
+        from .loop_abort import abort_loop
+        try:
+            return abort_loop(identifier)
+        except TaskError as error:
+            raise TaskError(f"{error}. If the original controller is still waiting, press Ctrl+C in its terminal "
+                            "first; this stops only the controller. Then retry --abort after quitting task agents") from None
     return _loop(identifier, action=action, agent_kind=agent_kind, model=model, mode=mode,
                  max_reviews=max_reviews, max_passes=max_passes, timeout=timeout,
                  from_review=from_review, on_pass_result=on_pass_result,
@@ -586,11 +607,15 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
         store, path = existing
         with PublicationStore(path).locked() as publication:
             state, _ = store.read()
+            if state["status"] == "aborted":
+                return report(*store.read())
+            if state["status"] == "aborting":
+                raise TaskError("Abort reconciliation is pending; rerun --abort, never recover the revoked pass")
             if state["active_pass"] is not None and not (state.get("delivery") or {}).get("receipt"):
                 raise TaskError("Saved handoff claim has no durable delivery proof; inspect task contexts and retained "
                                 "output. Never replay it or reconstruct historical temporary output. "
-                                "If proof is lost, stop the agents and explicitly dispose the never-published execution "
-                                f"with task cleanup {identifier} --force")
+                                "To abandon without discarding work, stop the controller, quit task agents to their "
+                                f"original shells, then run task loop {identifier} --abort outside the checkout")
             if (state["active_pass"] is not None
                     or "delivery" in state and state["records"] and state["status"] != "paused"
                     and (state["next_phase"] is not None or state["records"][-1]["state"] == "clean"
@@ -636,14 +661,29 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
     max_reviews = 3 if max_reviews is None else max_reviews
     max_passes = 6 if max_passes is None else max_passes
     timeout = 1800 if timeout is None else timeout
-    env = environment(identifier, allow_bootstrap=not from_review)
+    reservation = None
+    if action == "new":
+        existing = control_store(identifier, optional=True)
+        if existing:
+            previous, _ = existing[0].read()
+            if previous["status"] == "aborted" and set(previous["implementation"]) == {"context_id"}:
+                if from_review:
+                    raise TaskError("Initial implementation was never completed; use --new to start implementation")
+                reservation = previous
+    env = environment(identifier, allow_bootstrap=not from_review,
+                      pending_implementation=reservation["implementation"]["context_id"] if reservation else None)
     options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode),
                                     section="reviewer", agent_flag="--r-agent")
     if options.model is None or options.mode is None:
         raise TaskError("Loop reviewer requires explicit model and mode ([reviewer] or --r-model/--r-mode)")
     adapter_for(options).check_available()
     initial_options = None
-    if env.workspace is None:
+    if reservation:
+        initial_options = AgentOptions(**reservation["implementation_options"])
+        if any(v is not None and v != getattr(initial_options, k) for k, v in
+               zip(("kind", "model", "mode"), implementation_overrides)):
+            raise TaskError("Aborted reservation retains its original implementation settings")
+    elif env.workspace is None:
         initial_options = resolve_agent_options(env.local.agent, AgentOverrides(*implementation_overrides),
                                                 agent_flag="--i-agent")
         if initial_options.model is None or initial_options.mode is None:
@@ -653,7 +693,24 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
         raise TaskError("--i-* options require a from-scratch loop; existing implementation settings are preserved")
     with PublicationStore(env.workspace.path).locked() as publication:
         store = LoopStore(env.workspace.path)
+        if action == "new" and store.path.exists():
+            previous, _ = store.read()
+            if previous["status"] == "aborting":
+                raise TaskError("Abort reconciliation is pending; rerun --abort before --new")
+            if previous["status"] == "aborted" and initial_options is None:
+                implementation_target(env, previous["implementation"])
+            if previous["status"] == "aborted" and from_review:
+                if not previous["abandonment"]["review_ready"]:
+                    raise TaskError("Implementation was interrupted; inspect and use --new without --from-review "
+                                    "to explicitly continue implementation first")
+                if (task_binding(env) != previous["binding"]
+                        or requirements(env) != previous["requirements"]
+                        or snapshot(env.workspace.path, env.base, env.workspace.branch).as_dict() != previous["snapshot"]):
+                    raise TaskError("Completed implementation boundary changed since abort; continue implementation "
+                                    "with --new before requesting review")
         state = new_state(env, options, max_reviews, max_passes, timeout, from_review=from_review,
-                          initial_options=initial_options)
+                          initial_options=initial_options,
+                          reserved_implementation=reservation["implementation"]["context_id"] if reservation else None)
         store.create(state, replace=action == "new")
-        return drive(store, state, LoopRuntime(identifier, publication), on_pass_result=on_pass_result)
+        return drive(store, state, LoopRuntime(identifier, publication, startup_recovery=bool(reservation)),
+                     on_pass_result=on_pass_result)

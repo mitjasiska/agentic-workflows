@@ -67,6 +67,7 @@ def atomic_private(path, raw):
 
 def seal(directory, run_id, pass_id, worktree, base, branch):
     """Agent's last tool: durably bind exact result bytes to final Git state."""
+    require_current_pass(worktree, run_id, pass_id)
     directory = Path(directory)
     raw = read_private(directory / "result.json")
     value = json.loads(raw, object_pairs_hook=unique_object)
@@ -80,6 +81,16 @@ def seal(directory, run_id, pass_id, worktree, base, branch):
                             snapshot=final, completed_at=time.time()), sort_keys=True).encode()
     atomic_private(directory / "completion.json", proof)
     return "TASK_PASS_COMPLETE " + pass_id + " " + digest(proof)
+
+
+def require_current_pass(worktree, run_id, pass_id):
+    from .loop_state import LoopStore
+    store = LoopStore(Path(worktree))
+    current, _ = store.read()
+    if (current["run_id"] != run_id or current["status"] in {"aborting", "aborted"}
+            or (current["active_pass"] or {}).get("pass_id") != pass_id
+            or store.abort_journal(run_id) is not None):
+        raise TaskError("Pass was abandoned or superseded; late completion cannot be accepted")
 
 
 def validate_delivery(value, state):
@@ -270,6 +281,7 @@ class PassDelivery:
 
     def verify(self, adapter, execution):
         value = self.evidence
+        require_current_pass(self.state["binding"]["worktree"], value["run_id"], value["pass_id"])
         if value["contexts_sha256"] != self.contexts_digest():
             raise TaskError("Task context set changed since delivery; an intervening execution cannot be adopted")
         if value["invalidated"]:
@@ -320,6 +332,7 @@ class PassDelivery:
         """Strict observation of the recorded runtime, never relocation/recreation."""
         from .agent import AgentExecution, AgentOptions, adapter_for
         value, env = self.evidence, self.env
+        require_current_pass(self.state["binding"]["worktree"], value["run_id"], value["pass_id"])
         expected = value["context"]
         if value["contexts_sha256"] != self.contexts_digest():
             raise TaskError("Task context set changed since delivery; an intervening execution cannot be adopted")

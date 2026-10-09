@@ -243,6 +243,12 @@ Run `--pause-after-current` from another terminal while the command is working.
 The current pass finishes; the next handoff waits for explicit `--continue`.
 `--status` only inspects. Ctrl+C leaves the agent's completion uncertain; ordinary
 `task loop DEV-7` reconciles it, while `--continue` remains exclusive to pauses.
+To deliberately abandon an interrupted pass, stop the waiting controller with
+Ctrl+C, quit task agents to their original shells while keeping panes open, then
+run `task loop DEV-7 --abort` from outside the checkout. It verifies stopped
+processes and preserves implementation files and session history. See the
+[abort sequence](docs/lifecycle.md#explicit-abort-without-discarding-work) for
+fresh review and incomplete-implementation continuation.
 Defaults are three reviews, six total passes,
 and 1800 seconds per delivered pass; use `--max-reviews`, `--max-passes`, and
 `--timeout` when starting the loop. The initial implementation counts as one pass;
