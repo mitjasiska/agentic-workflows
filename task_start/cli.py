@@ -36,16 +36,19 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--slice", type=parse_slice, help="Select an explicit implementation slice (branch suffix)")
     add_agent_options(start, include_no_agent=True)
     cleanup_command = commands.add_parser("cleanup",
-        help="Remove a completed, merged task, or discard an unpublished local execution with --force",
+        help="Remove a completed task, or force local cleanup of an unpublished or proven merged execution",
         description="Normally requires a completed issue and proven merge. --force instead authorizes destructive "
-                    "disposal of a selected never-published local execution, including dirty task contents, "
-                    "without changing its Linear status. "
+                    "disposal of one never-published or proven merged local execution, including dirty task contents, "
+                    "without changing its Linear status. Merged recovery can use exact Git/Herdr identity when "
+                    "legacy scope metadata is absent. Use --branch to select one proven merged execution "
+                    "when multiple default/sliced candidates exist. "
                     "Quit its agents first and run outside its checkouts; exact identity and stopped-process "
                     "proof for registered execution are required. Other executions retain their resource claims; "
                     "unmanaged host references are outside the V1 guarantee. Rerun --force to finish a partial disposal.")
     cleanup_command.add_argument("issue", type=issue_identifier)
     cleanup_command.add_argument("--force", action="store_true",
-        help="Destructively discard a never-published local execution without changing Linear status, including dirty files and retained integration/loop artifacts")
+        help="Discard one unpublished or proven merged local execution without changing Linear status, including dirty files and retained artifacts")
+    cleanup_command.add_argument("--branch", help="Select an exact local issue branch for proven merged cleanup (requires --force)")
     contexts = commands.add_parser("contexts", help="Inspect machine-local workflow contexts (read-only)")
     contexts.add_argument("issue", nargs="?", type=issue_identifier)
     contexts.add_argument("--all", action="store_true", help="Include retired contexts")
@@ -164,14 +167,16 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
 
 
 @ownership_operation(exclusive=True)
-def cleanup(identifier: str, *, force: bool = False) -> str:
+def cleanup(identifier: str, *, force: bool = False, branch: str | None = None) -> str:
+    if branch is not None and not force:
+        raise TaskError("Cleanup --branch requires --force and a proven merged execution")
     local = load_local(no_agent=True)
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
     if force:
         from .cleanup import discard_execution
-        return discard_execution(issue, project, repo)
+        return discard_execution(issue, project, repo, branch=branch)
     if issue.state_type != "completed":
         raise TaskError(f"{identifier} is not completed (Linear status: {issue.state_name}); nothing was removed")
     git, herdr = Git(repo), Herdr(repo)
@@ -281,7 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "cleanup":
-            print(cleanup(args.issue, force=args.force))
+            if args.branch is not None and not args.force:
+                raise TaskError("Cleanup --branch requires --force and a proven merged execution")
+            print(cleanup(args.issue, force=args.force, branch=args.branch))
         elif args.command == "contexts":
             print(inspect_contexts(args.issue, include_retired=args.all))
         elif args.command == "review":

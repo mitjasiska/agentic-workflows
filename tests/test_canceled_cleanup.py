@@ -76,6 +76,12 @@ class ForcedCleanupTests(unittest.TestCase):
 
     def setUp(self):
         completed.CleanupTests.setUp(self)
+        # This fixture exercises unpublished disposal, not completed cleanup.
+        # Keep a real unmerged local tip so publication evidence cannot qualify
+        # for the separate merged-execution recovery path.
+        self.command(self.path, "commit", "--allow-empty", "-m", "unpublished execution")
+        self.enterContext(patch("task_start.workspace.merged_pull",
+                                side_effect=TaskError("No verified merged PR in unpublished fixture")))
         self.mountinfo = self.repo.parent / "mountinfo"
         self.mountinfo.write_bytes(mount_table())
         self.enterContext(patch("task_start.cleanup.MOUNTINFO", self.mountinfo))
@@ -296,6 +302,23 @@ class ForcedCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not completed"):
             cli.cleanup("DEV-7")
         self.assert_preserved()
+
+    def test_branch_selector_never_promotes_unpublished_disposal(self):
+        with self.assertRaisesRegex(TaskError, "No verified merged PR"):
+            cli.cleanup("DEV-7", force=True, branch=self.branch)
+        self.assert_preserved()
+        self.assertTrue(self.workspace_active)
+        self.workspace_close_error = TaskError("close interrupted")
+        with self.assertRaisesRegex(TaskError, "close interrupted"):
+            cli.cleanup("DEV-7", force=True)
+        before = self.journal()
+        with self.assertRaisesRegex(TaskError, "Pending unpublished disposal must resume without --branch"):
+            cli.cleanup("DEV-7", force=True, branch=self.branch)
+        self.assertEqual(self.journal(), before)
+        self.assert_preserved()
+        self.workspace_close_error = None
+        cli.cleanup("DEV-7", force=True)
+        self.assert_disposed()
 
     def test_publication_evidence_refuses_before_workspace_close(self):
         saved = self.publication.read()

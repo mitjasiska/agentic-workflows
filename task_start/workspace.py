@@ -205,10 +205,15 @@ class Git:
             url = self.command("remote", "get-url", remote).strip()
         check_history(url, branch, existing=existing)
 
-    def cleanup_merge(self, base: str, branch: str, identifier: str) -> CleanupState:
-        head = self.command("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}").strip()
+    def cleanup_merge(self, base: str, branch: str, identifier: str, *, head: str | None = None,
+                      require_pull: bool = False) -> CleanupState:
+        # Disposal retries retain the exact tip after the local ref is removed.
+        if head is None:
+            head = self.command("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}").strip()
         base_commit = self.command("rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip()
-        if self.command("rev-list", "--count", f"{base_commit}..{head}").strip() == "0":
+        # A journaled squash head may have been pruned after ref deletion. Its
+        # SHA still binds the authoritative PR; only the merge result must exist.
+        if not require_pull and self.command("rev-list", "--count", f"{base_commit}..{head}").strip() == "0":
             return CleanupState(head, base_commit)
         try:
             if self.command("config", "--default", "", "--get", f"branch.{base}.merge").strip() != f"refs/heads/{base}":
@@ -285,7 +290,8 @@ class Git:
         return entries
 
     def check_cleanup_target(self, base: str, target: TaskWorktree, identifier: str,
-                             *, require_clean: bool = True, require_base: bool = True) -> None:
+                             *, require_clean: bool = True, require_base: bool = True,
+                             allow_missing_scope: bool = False) -> None:
         """Revalidate all local target identity and safety checks without external lookups."""
         if require_base:
             self.check_base(base)
@@ -309,7 +315,7 @@ class Git:
             raise TaskError("Another registered worktree is inside the cleanup target; nothing was removed")
         checkout = Git(path)
         git_dir = Path(checkout.command("rev-parse", "--absolute-git-dir").strip()).resolve()
-        if (not (path / ".git").is_file() or git_dir == common
+        if (not (path / ".git").is_file() or (path / ".git").is_symlink() or git_dir == common
                 or Path(checkout.command("rev-parse", "--show-toplevel").strip()).resolve() != path
                 or Path(checkout.command("rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve() != common
                 or checkout.command("symbolic-ref", "HEAD").strip() != f"refs/heads/{branch}"):
@@ -319,10 +325,16 @@ class Git:
                 raise TaskError("Cleanup checkout metadata points to another worktree; nothing was removed")
         except (OSError, UnicodeError):
             raise TaskError("Cannot verify cleanup checkout metadata; nothing was removed") from None
-        if not self.scope_file(path).is_file():
-            raise TaskError(f"Cleanup task identity is unknown for {branch!r}: workspace scope metadata is missing; "
-                            "inspect it manually; nothing was removed")
-        self.resolve_scope(path, branch, identifier, None)
+        scope = self.scope_file(path)
+        if not os.path.lexists(scope):
+            if not allow_missing_scope:
+                raise TaskError(f"Cleanup task identity is unknown for {branch!r}: workspace scope metadata is missing; "
+                                f"quit its agents and retry task cleanup {identifier} --force for verified merged "
+                                "recovery; nothing was removed")
+        else:
+            if scope.is_symlink() or not scope.is_file():
+                raise TaskError("Workspace scope metadata is not a regular file; nothing was removed")
+            self.resolve_scope(path, branch, identifier, None)
         if require_clean:
             self.check_task_clean(path, git_dir)
 
@@ -885,9 +897,10 @@ class Herdr:
         if not disposing:
             git.check_disposal(identifier)
         label = identifier if slice is None else f"{identifier} / {slice}"
+        exact_cleanup = disposing and branch is not None
 
         def selected(name: str) -> bool:
-            return name == branch if slice is not None else belongs_to_issue(name, identifier)
+            return name == branch if slice is not None or exact_cleanup else belongs_to_issue(name, identifier)
 
         result = self.command("list")
         try:
@@ -908,7 +921,7 @@ class Herdr:
                                                   or not workspace_id.strip()):
                     raise ValueError("invalid workspace ID")
             matches = [w for w in entries if selected(w.get("branch") or "")
-                       or w["label"].casefold() == label.casefold()]
+                       or not exact_cleanup and w["label"].casefold() == label.casefold()]
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TaskError("Unexpected Herdr worktree list") from None
         branches = [b for b in git.branches(identifier) if selected(b)]
@@ -921,8 +934,9 @@ class Herdr:
         paths = "; ".join(w["path"] for w in matches)
         if len(names) > 1:
             hint = ("Use --slice <branch suffix after the issue ID> to select one, or "
-                    "inspect/retire historical work manually." if include_remotes else
-                    "Inspect Git and Herdr manually.")
+                    "inspect/retire historical work manually." if include_remotes and not disposing else
+                    f"For a proven merged execution, use task cleanup {identifier} --force "
+                    "--branch <exact-local-branch> to select one.")
             raise TaskError(f"Ambiguous workspaces for {identifier}: {details}. Paths: {paths or '(none)'}. "
                             f"{hint} Nothing was deleted.")
         if not branches and not matches and not candidates:
@@ -936,6 +950,9 @@ class Herdr:
         branch = branches[0]
         match, tree = matches[0], candidates[0]
         path = Path(match["path"]).resolve()
+        if disposing and (Path(match["path"]) != path
+                          or Path(tree["worktree"]).resolve() != Path(tree["worktree"])):
+            raise TaskError("Git/Herdr cleanup paths are aliased; use the canonical registered checkout in Herdr")
         if path == self.repo or Path(tree["worktree"]).resolve() == self.repo:
             raise TaskError("The resolved task worktree is the permanent checkout; nothing was removed")
         if (match.get("branch") != branch or tree.get("branch") != f"refs/heads/{branch}"
