@@ -58,9 +58,16 @@
 
 ## Validation and handoff
 
-- Run checks appropriate to the change. The offline suite is
-  `python3.12 -m unittest discover -s tests -v`; it needs no credentials, network,
-  installed agents, or real Herdr workspaces. See [validation](docs/architecture.md#validation).
+- Run focused checks appropriate to the change during implementation and default
+  `focused_first` review, on both findings and clean passes. Preserve thorough test
+  coverage, full-diff review, targeted/adversarial checks, and complete findings
+  batches. Explicit local/per-pass requirements and `exhaustive` review remain
+  authoritative; see [validation guidance](docs/lifecycle.md#validation-guidance).
+- Full offline regression is required before human merge, through configured and
+  evidenced CI or human verification. It is not an automatic step after focused
+  agent checks. The suite is `python3.12 -m unittest discover -s tests -v`; it needs
+  no credentials, network, installed agents, or real Herdr workspaces. Record
+  unrun regression as pending, never passed; see [validation](docs/architecture.md#validation).
 - For project-mapping changes, check the generated skill snapshot with
   `python3.12 skills/create-linear-task/scripts/sync_config.py --check`.
   Component-specific validation remains documented with that component.
