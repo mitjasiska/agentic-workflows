@@ -313,9 +313,14 @@ continue its journaled removals. See
 
 ## Validation
 
-```sh
-python3.12 -m unittest discover -s tests -v
-```
+Agent-local implementation and default `focused_first` review use relevant focused
+checks and proportionate inexpensive validation. Both findings and clean review
+passes retain targeted testing without automatically triggering the full suite.
+Continue full-diff inspection and targeted/adversarial checks after finding a
+defect, then report the complete findings batch. Focused execution does not reduce
+thorough test coverage. Explicit issue/repository local or per-pass requirements
+remain authoritative, and `exhaustive` requests full validation on every review
+pass, even with findings. See [validation guidance](lifecycle.md#validation-guidance).
 
 Tests mock Linear, GitHub, Herdr, Codex RPC, and process boundaries and exercise Git
 safety and authoritative remote lookup in temporary repositories with a local fake
@@ -337,14 +342,27 @@ worktrees without scope metadata, exact GitHub/ancestry proof, ambiguity and
 ownership refusals, concurrent changes and recovery at each removal boundary.
 Tests need no API key, network access, agent installation, or real Herdr workspaces.
 
-For forced-cleanup review, run focused cleanup and integration-recovery coverage
-before the full offline suite:
+Focused implementation/review checks for forced cleanup include cleanup and
+integration-recovery coverage:
 
 ```sh
 python3.12 -m unittest discover -s tests -p 'test*cleanup.py' -v
 python3.12 -m unittest discover -s tests -p 'test_integration_abandon.py' -v
+```
+
+Final pre-merge gate: the full offline regression suite must pass before human
+merge, separately from agent-local focused validation:
+
+```sh
 python3.12 -m unittest discover -s tests -v
 ```
+
+Configured external CI is the preferred owner of this gate where requirements
+permit it; count it only with evidence identifying the source and applicable
+revision. Without an established external gate, report final regression as pending
+human verification. Record unrun checks as `not_run`; a clean review does not mean
+that unexecuted regression passed. CI does not replace explicit local/per-pass
+checks.
 
 Loop coverage uses real disposable Git worktrees, context registries, and private
 checkpoint databases with controlled agent/config/Linear boundaries. It covers
