@@ -130,13 +130,18 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
                 for name in workflow_labels
             ],
         }
+        from test_linear_task_skill import config_text
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        config = Path(temporary) / "config.local.toml"
+        config.write_text(config_text())
         completed = subprocess.run(
             [
                 sys.executable,
                 "-B",
                 str(BUNDLED_PREPARE_SCRIPT),
+                "--config", str(config),
                 "--repository",
-                str(ROOT),
+                str(Path(temporary) / "example-repo"),
             ],
             input=json.dumps(draft),
             cwd=ROOT,
@@ -153,7 +158,7 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
     def test_sync_check_detects_bundled_skill_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             bundled = Path(directory) / "create-linear-task"
-            shutil.copytree(PLUGIN / "skills" / "create-linear-task", bundled)
+            shutil.copytree(PLUGIN / "skills" / "create-linear-task", bundled, ignore=shutil.ignore_patterns("config.local.toml"))
             skill = bundled / "SKILL.md"
             skill.write_text(skill.read_text() + "\nDrift.\n")
 
@@ -214,10 +219,44 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_private_files_are_excluded_and_matching_private_snapshots_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical, bundled = root / "canonical", root / "skills/bundled"
+            shutil.copytree(synchronizer.CANONICAL_SKILL, canonical, ignore=shutil.ignore_patterns("config.local.toml"))
+            shutil.copytree(synchronizer.BUNDLED_SKILL, bundled, ignore=shutil.ignore_patterns("config.local.toml"))
+            with mock.patch.object(synchronizer, "CANONICAL_SKILL", canonical), \
+                    mock.patch.object(synchronizer, "BUNDLED_SKILL", bundled):
+                baseline = packager.build_archive()
+                for skill in (canonical, bundled):
+                    (skill / "config.local.toml").write_text('PRIVATE-MAPPING-SENTINEL')
+                self.assertEqual(packager.build_archive(), baseline)
+                self.assertNotIn(b'PRIVATE-MAPPING-SENTINEL', baseline)
+                with zipfile.ZipFile(io.BytesIO(baseline)) as archive:
+                    self.assertIn('skills/create-linear-task/config.example.toml', archive.namelist())
+                    self.assertFalse(any(name.endswith(('config.local.toml', '/config.toml', '/projects.toml'))
+                                         for name in archive.namelist()))
+                for skill in (canonical, bundled):
+                    public = skill / 'config.example.toml'
+                    public.write_text(public.read_text().replace('Example Application', 'PRIVATE-MAPPING-SENTINEL'))
+                with self.assertRaisesRegex(synchronizer.SyncError, 'private mappings cannot be packaged'):
+                    packager.build_archive()
+                with self.assertRaises(synchronizer.SyncError):
+                    synchronizer.synchronize(synchronizer.load_portable_manifest())
+
+    def test_old_populated_snapshot_cannot_be_distributed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundled = Path(directory) / 'bundled'
+            shutil.copytree(synchronizer.BUNDLED_SKILL, bundled, ignore=shutil.ignore_patterns("config.local.toml"))
+            (bundled / 'config.toml').write_text('PRIVATE-MAPPING-SENTINEL')
+            with mock.patch.object(synchronizer, 'BUNDLED_SKILL', bundled):
+                with self.assertRaisesRegex(synchronizer.SyncError, 'unsupported public skill file'):
+                    packager.build_archive()
+
     def test_ignored_skill_cache_files_cannot_affect_the_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             bundled = Path(directory) / "create-linear-task"
-            shutil.copytree(PLUGIN / "skills" / "create-linear-task", bundled)
+            shutil.copytree(PLUGIN / "skills" / "create-linear-task", bundled, ignore=shutil.ignore_patterns("config.local.toml"))
 
             with mock.patch.object(synchronizer, "BUNDLED_SKILL", bundled):
                 before = packager.build_archive()

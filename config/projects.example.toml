@@ -1,0 +1,16 @@
+# Synthetic examples only. Copy to projects.toml, replace the targets, and remove
+# example_only after configuring your own exact Linear names and repositories.
+example_only = true
+
+[projects.example-app]
+linear_project = "Example Application"
+linear_team = "EXAMPLE"
+repo_name = "example-app"
+base_branch = "main"
+replace_workflow_labels = false
+
+[projects.example-library]
+linear_project = "Example Library"
+linear_team = "EXAMPLE"
+repo_name = "example-library"
+base_branch = "main"

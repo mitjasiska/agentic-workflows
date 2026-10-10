@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -20,6 +21,10 @@ PORTABLE_MANIFEST = PLUGIN_ROOT / "plugin.json"
 COMPATIBILITY_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 IGNORED_PARTS = {"__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
+PUBLIC_FILES = {Path(name) for name in (
+    "SKILL.md", "config.example.toml", "agents/openai.yaml",
+    "scripts/prepare_issue.py", "scripts/sync_config.py",
+)}
 
 
 class SyncError(RuntimeError):
@@ -99,12 +104,27 @@ def skill_files(root: Path) -> dict[Path, bytes]:
             continue
         if path.suffix in IGNORED_SUFFIXES:
             continue
+        if relative == Path("config.local.toml"):
+            continue  # Private installed mappings never enter a public artifact.
         if path.is_symlink():
             raise SyncError(f"skill contains an unsupported symlink: {relative}")
         if path.is_file():
+            if relative not in PUBLIC_FILES:
+                raise SyncError(f"unsupported public skill file: {relative}")
             files[relative] = path.read_bytes()
     if Path("SKILL.md") not in files:
         raise SyncError("canonical skill does not contain SKILL.md")
+    # Byte parity alone could distribute private mappings copied into both trees.
+    # Require the public generator's marked example output as well.
+    spec = importlib.util.spec_from_file_location("public_config_sync", CANONICAL_SKILL / "scripts/sync_config.py")
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    try:
+        expected = generator.render(REPOSITORY_ROOT / "config/projects.example.toml").encode("utf-8")
+    except ValueError as error:
+        raise SyncError("cannot validate public example mappings") from error
+    if files.get(Path("config.example.toml")) != expected:
+        raise SyncError("public skill config must match generated examples; private mappings cannot be packaged")
     return files
 
 

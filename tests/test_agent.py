@@ -1007,18 +1007,18 @@ class HandoffOrchestrationTests(unittest.TestCase):
                 factory.assert_called_once_with(expected)
                 execution = self.agent.launch.call_args.args[0]
                 self.assertEqual(execution.options, expected)
-                self.assertEqual(execution.repository, Path("/projects/knowledge-base").resolve())
+                self.assertEqual(execution.repository, Path("/projects/example-repo").resolve())
                 self.assertEqual(execution.purpose, "implementation")
 
     def test_only_codex_gets_exact_repository_profile_policy(self):
         local = replace(LOCAL, codex_repository_profiles={
-            "knowledge-base": "knowledge-base-trusted",
+            "example-repo": "example-repo-trusted",
             "other-repository": "other-trusted",
         })
         with patch("task_start.cli.load_local", return_value=local):
             cli.start("DEV-7")
         execution = self.agent.launch.call_args.args[0]
-        self.assertEqual(execution.policy, {"codex_profile": "knowledge-base-trusted"})
+        self.assertEqual(execution.policy, {"codex_profile": "example-repo-trusted"})
 
         self.agent.reset_mock()
         self.agent.launch.return_value = LaunchResult("pi", "w7:p8", "working")

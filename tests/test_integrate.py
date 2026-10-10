@@ -223,6 +223,96 @@ class IntegrationTests(unittest.TestCase):
         self.assertIsNone(self.integration_store.read())
         self.assertEqual(self.integrator.launches, 0)
 
+    def assert_project_configuration_refused(self, message, **overrides):
+        from task_start.publication_rebase import integration_plan
+        saved = self.store.read()
+        contexts, panes = self.registry.list(), copy.deepcopy(self.panes)
+        with patch('task_start.integrate.integration_plan', wraps=integration_plan) as probe:
+            with self.assertRaisesRegex(TaskError, message):
+                integrate('DEV-7', **overrides)
+            probe.assert_not_called()
+        self.assert_untouched()
+        self.assertEqual(self.store.read(), saved)
+        self.assertEqual(self.registry.list(), contexts)
+        self.assertEqual(self.panes, panes)
+        self.assertIsNone(self.integration_store.read())
+        self.assertEqual(self.integrator.launches, 0)
+        self.assertFalse((self.registry.path.parent / 'integrations').exists())
+        self.assertEqual(list(self.result_root.iterdir()), [])
+        self.assertEqual(self.command(self.repo, 'rev-parse', 'HEAD'),
+                         self.command(self.remote, 'rev-parse', 'HEAD'))
+
+    def test_upstream_project_defaults_require_retry_before_integration_artifacts(self):
+        self.prepare_integration()
+        directory = self.remote / '.agentic-workflows-lite'
+        directory.mkdir()
+        (directory / 'config.toml').write_text('[agent]\nmodel="upstream-i"\nmode="medium"\n')
+        base = self.advance_remote(conflict=True)
+        self.assert_project_configuration_refused('Project defaults changed.*retry', mode='high')
+        self.assertIn('independent task review', integrate('DEV-7', mode='high'))
+        self.assertEqual(self.integrator.execution.options, AgentOptions('pi', 'upstream-i', 'high'))
+        record = self.integration_store.read()
+        self.assertEqual(record['options'], dict(kind='pi', model='upstream-i', mode='high'))
+        self.assertEqual(record['state'], 'installed')
+        self.assertEqual(self.integrator.launches, 1)
+        self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD^'), base)
+
+    def test_upstream_unsafe_configuration_precedes_integration_artifacts(self):
+        for name, content, message in (
+            ('config.toml', '[linear]\napi_key="synthetic-forbidden"', 'only agent, reviewer, and loop'),
+            ('config.local.toml', '[agent]\nmodel="implementer"', 'must not be tracked'),
+        ):
+            with self.subTest(file=name):
+                case = IntegrationTests(); case.setUp()
+                try:
+                    case.prepare_integration()
+                    directory = case.remote / '.agentic-workflows-lite'
+                    directory.mkdir()
+                    (directory / name).write_text(content)
+                    case.advance_remote(conflict=True)
+                    case.assert_project_configuration_refused(message)
+                    case.assertEqual((case.repo / '.agentic-workflows-lite' / name).read_text(), content)
+                    case.assertFalse((case.path / '.agentic-workflows-lite' / name).exists())
+                finally:
+                    case.doCleanups()
+
+    def test_upstream_shared_removal_does_not_keep_stale_integration_defaults(self):
+        from test_layered_config import install_lifecycle_layers
+        self.prepare_integration()
+        install_lifecycle_layers(self)
+        (self.remote / '.agentic-workflows-lite/config.toml').unlink()
+        base = self.advance_remote(conflict=True)
+        self.assert_project_configuration_refused('Project defaults changed.*retry')
+        self.assertIn('independent task review', integrate('DEV-7'))
+        self.assertEqual(self.integrator.execution.options, AgentOptions('pi', 'implementer', 'high'))
+        self.assertEqual(self.integration_store.read()['state'], 'installed')
+        self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD^'), base)
+        for checkout in (self.path, self.integrator.execution.workspace.path):
+            self.assertFalse((checkout / '.agentic-workflows-lite/config.local.toml').exists())
+
+    def test_project_changes_do_not_reload_proven_integration_recovery(self):
+        from test_layered_config import install_lifecycle_layers
+        self.prepare_integration()
+        local = install_lifecycle_layers(self)
+        self.advance_remote(conflict=True)
+        with patch('task_start.publication_rebase.install_checkout', side_effect=KeyboardInterrupt()), \
+                self.assertRaises(KeyboardInterrupt):
+            integrate('DEV-7')
+        before = self.integration_store.read()
+        self.assertEqual(before['state'], 'proven')
+        self.assertEqual(before['options'], dict(kind='pi', model='shared-i', mode='high'))
+        local.write_text('[linear]\napi_key="synthetic-forbidden"')
+        with self.assertRaisesRegex(TaskError, 'independent task review'):
+            publish('DEV-7')
+        after = self.integration_store.read()
+        self.assertEqual(after['state'], 'installed')
+        for field in ('pass_id', 'context', 'options', 'base'):
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(self.integrator.launches, 1)
+        for checkout in (self.path, self.integrator.execution.workspace.path):
+            self.assertFalse((checkout / '.agentic-workflows-lite/config.local.toml').exists())
+        self.assertFalse(self.operations('push'))
+
     def test_clean_deterministic_integration_does_not_launch_agent(self):
         self.prepare_integration()
         self.advance_remote()

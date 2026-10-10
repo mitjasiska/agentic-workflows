@@ -14,7 +14,7 @@ import tomllib
 from typing import Any
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.toml"
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.local.toml"
 COLLAPSE_MARKER = re.compile(r"(?m)^[ \t]*\+\+\+(?:[ \t].*)?$")
 CANONICAL_TASK_KINDS = ("implementation", "research", "experiment")
 CANONICAL_PRIMARY = {
@@ -103,6 +103,8 @@ def load_settings(path: Path) -> Settings:
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise PreparationError(f"cannot read valid task configuration: {path}") from error
 
+    if "example_only" in raw:
+        raise PreparationError("Example targets cannot be used for issue creation; install private configuration")
     creation = raw.get("task_creation")
     projects = raw.get("projects")
     if not isinstance(creation, dict) or not isinstance(projects, dict) or not projects:

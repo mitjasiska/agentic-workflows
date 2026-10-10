@@ -1,0 +1,19 @@
+# Copy into a managed permanent checkout as .agentic-workflows-lite/config.toml
+# and track that shared file. Every field/table below is optional.
+# For personal overrides, first ignore .agentic-workflows-lite/config.local.toml
+# in that repository's .gitignore, then create it with only the fields you need.
+# Credentials, mappings, paths, profiles, controller policies, and test commands
+# belong elsewhere; project files support only agent/reviewer/loop defaults.
+
+[agent]
+kind = "codex"
+model = "gpt-6-astra"
+mode = "high"
+
+[reviewer]
+kind = "codex"
+model = "gpt-6-astra"
+mode = "high"
+
+[loop]
+timeout = 1800 # > 0 and <= 86400 seconds

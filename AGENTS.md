@@ -48,7 +48,8 @@
 - Preserve exact issue, checkout, context, and session identity checks and safe
   refusal on ambiguity. See [architecture](docs/architecture.md) and the
   [lifecycle reference](docs/lifecycle.md) before changing these boundaries.
-- `config/projects.toml` is the human-edited project registry. Follow the
+- `config/projects.toml` is the private, Git-ignored human-edited project registry;
+  only synthetic `config/projects.example.toml` mappings belong in Git. Follow the
   [canonical skill's refresh instructions](skills/create-linear-task/SKILL.md#establish-context-and-target)
   when mappings change; do not edit installed/generated mappings directly.
 - Follow the [plugin's maintenance instructions](plugins/create-linear-task/README.md#synchronize-validate-and-package)

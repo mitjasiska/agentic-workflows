@@ -13,7 +13,8 @@ from . import TaskError
 from .ownership import ownership_operation
 from . import publish as publication
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
-from .config import load_local, load_projects, repository_path, resolve_project
+from .config import (check_project_settings_unchanged, load_local, load_projects, project_settings,
+                     repository_path, resolve_project)
 from .contexts import ContextRegistry, HerdrContexts, allocate_launch, context_observer, context_reference, launch_allocated, now, reconcile
 from .handoff import integration_handoff
 from .implementation_pass import binding
@@ -366,14 +367,16 @@ def integrate(identifier, *, agent_kind=None, model=None, mode=None, timeout=180
         raise TaskError("Integration timeout must be positive")
     check_git_environment()
     local = load_local()
+    issue = Linear(local.api_key).get_issue(identifier)
+    project = resolve_project(load_projects(), issue.project)
+    repo = repository_path(local, project)
+    global_settings = local
+    local = project_settings(global_settings, repo)
     options = resolve_agent_options(local.agent, AgentOverrides(agent_kind, model, mode))
     if options.model is None or options.mode is None:
         raise TaskError("Integration requires explicit model and mode in [agent] or --model/--mode")
     adapter = adapter_for(options)
     adapter.check_available()
-    issue = Linear(local.api_key).get_issue(identifier)
-    project = resolve_project(load_projects(), issue.project)
-    repo = repository_path(local, project)
     registry, identities = ContextRegistry(), HerdrContexts()
     workspace, anchor, _, endpoint = resolve_review_workspace(issue, project, repo, registry, identities)
     with PublicationStore(workspace.path).locked() as store:
@@ -448,6 +451,7 @@ def integrate(identifier, *, agent_kind=None, model=None, mode=None, timeout=180
                 raise TaskError("Unsupported publishing intent; inspect its original contract before integration")
         verify_source()
         publication.advance_base(git, permanent, identity, project.base_branch, workspace.branch, source["base_commit"], base)
+        check_project_settings_unchanged(global_settings, repo, local)
         verify_unpublished()
         verify_source()
         try:

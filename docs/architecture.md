@@ -232,7 +232,7 @@ that preserves existing rows and ordinals; read-only inspection accepts versions
 
 ### Registry allocation and lifecycle observations
 
-The machine-local registry is `~/.agentic-workflows/contexts.sqlite3`, separate from
+The machine-local registry is `~/.agentic-workflows-lite/contexts.sqlite3`, separate from
 project files and Linear. Python's SQLite support supplies atomic transactions and
 cross-process allocation locking without a service or dependency. The allocation
 commits before labeling or launching; failed and interrupted attempts consume their

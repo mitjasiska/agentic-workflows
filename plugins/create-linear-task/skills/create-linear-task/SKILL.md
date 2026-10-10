@@ -13,7 +13,7 @@ This optional skill produces a recommended, opinionated authoring convention. It
 
 1. Inspect the relevant repository instructions and enough existing implementation to make the issue actionable. Do not turn investigation into implementation.
 2. For a refinement, read the current issue including its exact team ID/name, project ID/name, description, and complete label IDs. Its current team and project are authoritative; do not include a team or project change in the mutation.
-3. Use the generated `config.toml` packaged beside this `SKILL.md` (or the explicit `--config` override) to establish the expected workflow target:
+3. Use the private generated `config.local.toml` installed beside this `SKILL.md` (or the explicit `--config` override) to establish the expected workflow target:
    - An explicit user choice must match one configured project entry.
    - Otherwise use the single entry whose `repo_name` matches the current repository.
    - `linear_project` and `linear_team` are exact selectors; resolve each to exactly one existing Linear object.
@@ -21,7 +21,36 @@ This optional skill produces a recommended, opinionated authoring convention. It
    - For a refinement, require the issue's current team/project names to exactly match that configured target, preserve the current IDs, and stop if they differ. A user-requested move has no automatic mechanism in this skill.
    - If the target is missing or ambiguous, ask. Never choose a similarly named team or project.
 
-The packaged config is an installation snapshot, not a second configuration owner. Repository developers change project mappings only in `config/projects.toml`, run `python3.12 skills/create-linear-task/scripts/sync_config.py` from the repository root, and refresh the installed directory by copying `skills/create-linear-task/.` over the installed `create-linear-task/` directory. Verify the refresh by comparing the source and installed `config.toml` files. Do not edit mappings in an installed copy; if its snapshot is missing a target, request synchronization/reinstallation.
+Public distribution contains only `config.example.toml`, marked `example_only = true`.
+It is documentation, never an issue-creation target. The renderer refuses marked
+examples even through `--config`. If private configuration is missing, stop and
+request setup; do not silently substitute the examples.
+
+The private installed config is a snapshot, not a second configuration owner.
+Repository developers copy `config/projects.example.toml` to the Git-ignored
+`config/projects.toml`, configure their exact targets, and remove `example_only`.
+After installing or refreshing the skill scripts, run from the source repository:
+
+```sh
+python3.12 skills/create-linear-task/scripts/sync_config.py --private \
+  --output "$HOME/.codex/skills/create-linear-task/config.local.toml"
+python3.12 skills/create-linear-task/scripts/sync_config.py --private \
+  --output "$HOME/.codex/skills/create-linear-task/config.local.toml" --check
+```
+
+Use your actual installed skill path (including a custom `CODEX_HOME`) or a private
+`config.local.toml` outside Git and pass it explicitly with `--config`. Private
+synchronization requires an explicit destination outside all Git checkouts; it
+never overwrites public configuration. Refresh mappings from the private registry,
+not by editing an installed snapshot. Refreshing public skill files preserves the
+separate installed local file. Hosts without local filesystem access must request
+accessible private target configuration; they do not inherit the packager's files.
+
+For maintainers, `python3.12 skills/create-linear-task/scripts/sync_config.py`
+regenerates only the public example snapshot; `--check` detects drift. Never copy
+private config into a public skill/plugin or archive. Historical Git and previously
+distributed mappings remain a separate exposure; these commands do not rewrite
+history or clean earlier installations.
 
 Do not create, rename, or delete teams, projects, or labels. Do not read credentials to compensate for a missing Linear integration; if Linear cannot be accessed, return a prepared draft and say it was not created.
 

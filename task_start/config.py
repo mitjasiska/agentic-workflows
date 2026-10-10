@@ -1,12 +1,15 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import os
 from pathlib import Path
 import re
+import stat
 import tomllib
 from typing import Mapping
 
 from . import TaskError
 
 REGISTRY = Path(__file__).resolve().parent.parent / "config" / "projects.toml"
+CONFIG_DIRECTORY = ".agentic-workflows-lite"
 
 
 @dataclass(frozen=True)
@@ -18,7 +21,7 @@ class Project:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    kind: str
+    kind: str | None
     model: str | None = None
     mode: str | None = None
 
@@ -60,6 +63,7 @@ class LocalConfig:
     review_validation: ReviewValidationConfig = field(default_factory=ReviewValidationConfig)
     task_assessment: TaskAssessmentConfig = field(default_factory=TaskAssessmentConfig)
     implementation_scope: ImplementationScopeConfig = field(default_factory=ImplementationScopeConfig)
+    loop_timeout: float = 1800
 
 
 def read_toml(path: Path) -> dict:
@@ -81,7 +85,7 @@ def required_text(data: dict, key: str) -> str:
 
 
 def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConfig:
-    data = read_toml(path or Path.home() / ".agentic-workflows" / "config.toml")
+    data = read_toml(path or Path.home() / CONFIG_DIRECTORY / "config.toml")
     api_key = required_text(data.get("linear"), "api_key")
     if any(char.isspace() for char in api_key):
         raise TaskError("Linear api_key must not contain whitespace")
@@ -95,10 +99,11 @@ def load_local(path: Path | None = None, *, no_agent: bool = False) -> LocalConf
         root = Path(required_text(data, "projects_root")).expanduser()
         if not root.is_absolute():
             raise TaskError("projects_root must be absolute (or start with ~)")
-        agent = None if no_agent else agent_config(data.get("agent"))
+        agent = None if no_agent else agent_config(data.get("agent"), partial=True)
         profiles = {} if no_agent else codex_repository_profiles(data.get("codex"))
-        reviewer = None if no_agent else agent_config(data.get("reviewer"))
-        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation, assessment, scope)
+        reviewer = None if no_agent else agent_config(data.get("reviewer"), partial=True)
+        timeout = 1800 if no_agent else loop_config(data.get("loop", {}))
+        return LocalConfig(root.resolve(), api_key, agent, profiles, reviewer, structure, validation, assessment, scope, timeout)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("projects_root could not be resolved") from None
 
@@ -145,12 +150,14 @@ def implementation_config(data: dict) -> tuple[TaskAssessmentConfig, Implementat
     return TaskAssessmentConfig(enabled), ImplementationScopeConfig(policy.strip())
 
 
-def agent_config(data: dict | None) -> AgentConfig | None:
+def agent_config(data: dict | None, *, partial: bool = False) -> AgentConfig | None:
     # Older configurations remain useful for --no-agent.
     if data is None:
         return None
-    kind = required_text(data, "kind")
-    if not re.fullmatch(r"[a-z][a-z0-9_-]*", kind):
+    if not isinstance(data, dict) or set(data) - {"kind", "model", "mode", "reasoning"}:
+        raise TaskError("agent/reviewer supports only kind, model, and mode (or legacy reasoning)")
+    kind = None if partial and "kind" not in data else required_text(data, "kind")
+    if kind is not None and not re.fullmatch(r"[a-z][a-z0-9_-]*", kind):
         raise TaskError("agent.kind must be a lowercase agent name such as codex or pi")
 
     model = data.get("model")
@@ -172,6 +179,96 @@ def agent_config(data: dict | None) -> AgentConfig | None:
             raise TaskError(f"agent.{mode_key} must be a lowercase execution mode without whitespace")
         mode = mode.strip()
     return AgentConfig(kind, model, mode)
+
+
+def loop_config(data: dict, default: float = 1800) -> float:
+    if not isinstance(data, dict) or set(data) - {"timeout"}:
+        raise TaskError("loop must be a table supporting only timeout")
+    timeout = data.get("timeout", default)
+    if type(timeout) not in {int, float} or not 0 < timeout <= 86400:
+        raise TaskError("loop.timeout must be positive and at most 86400 seconds")
+    return timeout
+
+
+def project_settings(local: LocalConfig, repository: Path) -> LocalConfig:
+    """Merge optional defaults from the trusted permanent checkout only.
+
+    Call only for a fresh selection. Contexts/checkpoints own active settings;
+    recovery and same-session continuations must not reload these files.
+    """
+    from .agent import validate_agent_defaults
+    from .workspace import Git
+
+    directory = repository / CONFIG_DIRECTORY
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return local
+    except OSError:
+        raise TaskError("Cannot inspect project configuration directory") from None
+    if not stat.S_ISDIR(info.st_mode) or directory.resolve() != directory:
+        raise TaskError("Project configuration directory must be a real directory in the permanent checkout")
+    git = Git(repository)
+    git.check_repository()
+    for name in ("config.toml", "config.local.toml"):
+        path = directory / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise TaskError(f"Cannot inspect project configuration: {path}") from None
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.resolve() != path:
+            raise TaskError(f"Project configuration must be a regular, unaliased file: {path}")
+        if name == "config.local.toml":
+            relative = path.relative_to(repository).as_posix()
+            if git.command("ls-files", "--", relative).strip():
+                raise TaskError("Project config.local.toml must not be tracked by Git")
+            try:
+                git.command("check-ignore", "--", relative)
+            except TaskError:
+                raise TaskError("Ignore .agentic-workflows-lite/config.local.toml in Git before using it") from None
+        # O_NOFOLLOW/O_NONBLOCK also refuse a final-component symlink/FIFO swap.
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as source:
+                current = os.fstat(source.fileno())
+                if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                        or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                        or directory.resolve() != directory):
+                    raise TaskError("Project configuration path changed during inspection")
+                data = tomllib.load(source)
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            raise TaskError(f"Cannot read valid project TOML from {path}") from None
+        if set(data) - {"agent", "reviewer", "loop"}:
+            raise TaskError("Project configuration supports only agent, reviewer, and loop defaults")
+        updates = {}
+        for role in ("agent", "reviewer"):
+            if role not in data:
+                continue
+            override = agent_config(data[role], partial=True)
+            # Validate each provided value, even when a later layer overrides it.
+            validate_agent_defaults(override)
+            base = getattr(local, role)
+            updates[role] = AgentConfig(*(getattr(override, key) if getattr(override, key) is not None
+                                         else getattr(base, key) if base else None
+                                         for key in ("kind", "model", "mode")))
+        if "loop" in data:
+            updates["loop_timeout"] = loop_config(data["loop"], local.loop_timeout)
+        local = replace(local, **updates)
+    return local
+
+
+def check_project_settings_unchanged(global_settings: LocalConfig, repository: Path,
+                                     selected: LocalConfig) -> None:
+    """Revalidate the prepared base before creating execution artifacts.
+
+    Merge from the original global defaults so removal of a project field is
+    detected too. Invalid layers fail even if their effective values match.
+    """
+    if project_settings(global_settings, repository) != selected:
+        raise TaskError("Project defaults changed during base preparation; inspect the updated "
+                        "permanent checkout configuration and retry before starting execution")
 
 
 def codex_repository_profiles(data: dict | None) -> dict[str, str]:
@@ -199,7 +296,10 @@ def codex_repository_profiles(data: dict | None) -> dict[str, str]:
 
 
 def load_projects(path: Path = REGISTRY) -> list[Project]:
-    entries = read_toml(path).get("projects")
+    data = read_toml(path)
+    if "example_only" in data:
+        raise TaskError("Configure private project targets and remove example_only; examples are not runtime mappings")
+    entries = data.get("projects")
     if not isinstance(entries, dict) or not entries:
         raise TaskError("Project registry requires a [projects] table")
     projects = []

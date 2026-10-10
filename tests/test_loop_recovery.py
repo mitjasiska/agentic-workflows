@@ -53,6 +53,23 @@ class RecoveryTests(unittest.TestCase):
         self.on_implementation = self.on_review = None
         return self.store.read()[0]
 
+    def test_project_changes_during_interruption_preserve_saved_roles_timeout_and_reviewer(self):
+        from test_layered_config import install_lifecycle_layers
+        local = install_lifecycle_layers(self)
+        before = self.interrupt('review')
+        self.assertEqual(before['timeout'], 10)
+        self.assertEqual(before['reviewer_options']['model'], 'shared-r')
+        from task_start.implementation_pass import binding
+        expected_reviewer = binding(self.registry.get(before['reviewer']['context_id']))
+        local.write_text('[codex]\nprofile="forbidden for a new run"')
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        after = self.store.read()[0]
+        for key in ('implementation', 'reviewer_options', 'timeout', 'run_id'):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(after['reviewer'], expected_reviewer)
+        self.assertEqual((len(self.impl_prompts), len(self.prompts)), (1, 1))
+
     def test_each_phase_recovers_once_and_retains_checks_and_reviewer(self):
         for phase in ("implementation", "review", "fixes", "rereview"):
             with self.subTest(phase=phase):

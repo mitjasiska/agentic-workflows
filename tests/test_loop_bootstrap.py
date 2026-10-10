@@ -1358,6 +1358,108 @@ class BootstrapLoopTests(unittest.TestCase):
         self.assertEqual(self.command(self.repo, 'rev-parse', 'HEAD'), upstream)
         self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD'), upstream)
 
+    def upstream_project_config(self, content, name='config.toml'):
+        directory = self.remote / '.agentic-workflows-lite'
+        directory.mkdir(exist_ok=True)
+        (directory / name).write_text(content)
+        self.command(self.remote, 'add', str(directory / name))
+        self.command(self.remote, 'commit', '-m', 'Upstream project configuration')
+
+    def mock_start_handoff(self):
+        self.enterContext(patch('task_start.cli.load_local', return_value=self.local))
+        self.enterContext(patch('task_start.cli.load_projects', return_value=[
+            fixture.Project(fixture.ISSUE.project, self.repo.name, 'main')]))
+        self.enterContext(patch('task_start.cli.Linear', return_value=self.linear))
+        self.enterContext(patch('task_start.cli.adapter_for', side_effect=self.select_adapter))
+        return self.enterContext(patch('task_start.cli.launch_registered',
+                                      return_value=SimpleNamespace(summary='launched')))
+
+    def assert_config_refused_before_workspace(self):
+        self.assertEqual(self.command(self.repo, 'rev-parse', 'HEAD'),
+                         self.command(self.remote, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.preparation, ['base'])
+        self.linear.start.assert_not_called()
+        self.assertEqual(self.registry.list(), [])
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.prompts, [])
+        self.assertIsNone(self.store)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.git.branches('DEV-7'), [])
+        self.assertEqual([tree['worktree'] for tree in self.git.worktrees()], [str(self.repo)])
+
+    def test_upstream_defaults_require_retry_before_initial_loop_artifacts(self):
+        self.upstream_project_config('[agent]\nmodel="upstream-i"\n[reviewer]\nmodel="upstream-r"\n'
+                                     '[loop]\ntimeout=41\n')
+        with self.assertRaisesRegex(TaskError, 'Project defaults changed.*retry'):
+            loop('DEV-7')
+        self.assert_config_refused_before_workspace()
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        state = self.store.read()[0]
+        self.assertEqual(state['implementation_options'], dict(kind='pi', model='upstream-i', mode='low'))
+        self.assertEqual(state['reviewer_options'], dict(kind='codex', model='upstream-r', mode='high'))
+        self.assertEqual(state['timeout'], 41)
+        self.assertEqual(self.launches[0].options, AgentOptions('pi', 'upstream-i', 'low'))
+        self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD'),
+                         self.command(self.remote, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.preparation, ['base', 'base', 'create', 'linear'])
+
+    def test_upstream_defaults_require_retry_before_start_artifacts(self):
+        launch = self.mock_start_handoff()
+        self.upstream_project_config('[agent]\nmodel="upstream-i"\nmode="medium"\n')
+        with self.assertRaisesRegex(TaskError, 'Project defaults changed.*retry'):
+            cli.start('DEV-7', mode='high')
+        self.assert_config_refused_before_workspace()
+        launch.assert_not_called()
+        cli.start('DEV-7', mode='high')
+        launch.assert_called_once()
+        execution = launch.call_args.args[1]
+        self.assertEqual(execution.options, AgentOptions('pi', 'upstream-i', 'high'))
+        self.assertEqual(execution.repository, self.repo)
+        self.assertEqual(execution.workspace.path, self.path)
+        self.assertEqual(self.command(self.path, 'rev-parse', 'HEAD'),
+                         self.command(self.remote, 'rev-parse', 'HEAD'))
+
+    def test_upstream_removal_does_not_keep_stale_project_defaults(self):
+        from test_layered_config import install_lifecycle_layers
+        install_lifecycle_layers(self)
+        shared = self.remote / '.agentic-workflows-lite/config.toml'
+        shared.unlink()
+        self.command(self.remote, 'add', '-u')
+        self.command(self.remote, 'commit', '-m', 'Remove shared defaults')
+        with self.assertRaisesRegex(TaskError, 'Project defaults changed.*retry'):
+            loop('DEV-7')
+        self.assert_config_refused_before_workspace()
+        result = loop('DEV-7')
+        self.assertEqual(result.state, 'clean', result.render())
+        state = self.store.read()[0]
+        self.assertEqual(state['implementation_options'], dict(kind='pi', model='implementer', mode='high'))
+        self.assertEqual(state['reviewer_options'], dict(kind='codex', model='review-model', mode='medium'))
+        self.assertEqual(state['timeout'], 23)
+        self.assertFalse((self.path / '.agentic-workflows-lite/config.local.toml').exists())
+
+    def test_unsafe_upstream_configuration_never_reaches_start_or_loop_artifacts(self):
+        for command in ('start', 'loop', 'no-agent'):
+            for name, content, message in (
+                ('config.toml', '[linear]\napi_key="synthetic-forbidden"', 'only agent, reviewer, and loop'),
+                ('config.local.toml', '[agent]\nmodel="implementer"', 'must not be tracked'),
+            ):
+                with self.subTest(command=command, file=name):
+                    case = BootstrapLoopTests(); case.setUp()
+                    try:
+                        launch = case.mock_start_handoff()
+                        case.upstream_project_config(content, name)
+                        with case.assertRaisesRegex(TaskError, message):
+                            if command == 'loop':
+                                loop('DEV-7')
+                            else:
+                                cli.start('DEV-7', no_agent=command == 'no-agent')
+                        case.assert_config_refused_before_workspace()
+                        launch.assert_not_called()
+                        case.assertEqual((case.repo / '.agentic-workflows-lite' / name).read_text(), content)
+                    finally:
+                        case.doCleanups()
+
     def test_initial_outcomes_fail_closed_without_review(self):
         for outcome in ('blocked', 'failed', 'malformed', 'timeout', 'failed_check', 'busy'):
             with self.subTest(outcome=outcome):
@@ -1434,6 +1536,59 @@ class BootstrapLoopTests(unittest.TestCase):
         self.linear.start.assert_not_called()
         self.assertEqual(self.registry.list(), [])
         self.assertFalse(self.path.exists())
+
+    def test_layered_initial_settings_timeout_and_cli_are_pinned_through_fixes(self):
+        from test_layered_config import install_lifecycle_layers
+        local = install_lifecycle_layers(self)
+        self.review_results = [findings(finding()), {}]
+        def change_defaults(execution, items):
+            local.write_text('[agent]\nkind="codex"\nmodel="changed"\nmode="low"\n'
+                             '[reviewer]\nkind="pi"\nmodel="changed"\nmode="low"\n[loop]\ntimeout=999')
+        self.on_implementation = change_defaults
+        result = loop('DEV-7', impl_model='cli-i', mode='high')
+        self.assertEqual(result.state, 'clean', result.render())
+        state = self.store.read()[0]
+        self.assertEqual(state['implementation_options'], dict(kind='pi', model='cli-i', mode='high'))
+        self.assertEqual(state['reviewer_options'], dict(kind='codex', model='shared-r', mode='high'))
+        self.assertEqual(state['timeout'], 23)
+        self.assertEqual(self.launches[0].options, AgentOptions('pi', 'cli-i', 'high'))
+        self.assertEqual([r['context_id'] for r in state['records']],
+                         ['DEV-7-I1', 'DEV-7-R1', 'DEV-7-I1', 'DEV-7-R1'])
+        self.assertEqual(state['reviewer']['model'], 'shared-r')
+        self.assertEqual(self.recreated, [False])
+        self.assertFalse((self.path / '.agentic-workflows-lite/config.local.toml').exists())
+        self.assertFalse(any('config.local.toml' in prompt for prompt in self.impl_prompts + self.prompts))
+
+    def test_project_settings_changes_do_not_reload_paused_initial_boundary(self):
+        from test_layered_config import install_lifecycle_layers
+        local = install_lifecycle_layers(self)
+        original = LoopStore.begin
+        def pause(store, state):
+            store.pause()
+            return original(store, state)
+        with patch.object(LoopStore, 'begin', pause):
+            result = loop('DEV-7', timeout=17)
+        self.assertEqual(result.state, 'paused', result.render())
+        before = self.store.read()[0]
+        self.assertEqual(before['timeout'], 17)  # CLI wins over the local 23.
+        local.write_text('invalid project settings = [')
+        result = loop('DEV-7', action='continue')
+        self.assertEqual(result.state, 'clean', result.render())
+        after = self.store.read()[0]
+        for key in ('implementation_options', 'reviewer_options', 'timeout', 'run_id'):
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(len(self.launches), 1)
+
+    def test_invalid_project_timeout_blocks_bootstrap_without_preparation(self):
+        from test_layered_config import install_lifecycle_layers
+        local = install_lifecycle_layers(self)
+        local.write_text('[loop]\ntimeout=true')
+        with self.assertRaisesRegex(TaskError, 'loop.timeout'):
+            loop('DEV-7')
+        self.assertEqual(self.preparation, [])
+        self.assertEqual(self.registry.list(), [])
+        self.assertEqual(self.launches, [])
+        self.linear.start.assert_not_called()
 
     def test_plain_loop_cli_uses_both_configured_roles(self):
         with patch('sys.stdout', new_callable=io.StringIO) as output:

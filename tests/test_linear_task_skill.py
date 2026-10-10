@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -139,10 +140,10 @@ class LinearTaskSkillTests(unittest.TestCase):
         return preparer.prepare_issue(settings, self.target(settings), draft(**changes))
 
     def test_repository_configuration_selects_exact_target_and_canonical_taxonomy(self):
-        settings = preparer.load_settings(preparer.DEFAULT_CONFIG)
-        target = preparer.resolve_target(settings, ROOT, None)
-        self.assertEqual(target.key, "agentic-workflows")
-        self.assertEqual(target.linear_project, "Agentic Workflows")
+        settings = self.settings()
+        target = self.target(settings)
+        self.assertEqual(target.key, "example")
+        self.assertEqual(target.linear_project, "Example Project")
         self.assertEqual(target.linear_team, "DEV")
         self.assertEqual(
             {
@@ -153,7 +154,7 @@ class LinearTaskSkillTests(unittest.TestCase):
         )
         self.assertEqual(settings.research_label, "Research")
         with self.assertRaisesRegex(preparer.PreparationError, "no configured linear_team"):
-            preparer.resolve_target(settings, Path("/work/knowledge-base"), None)
+            preparer.resolve_target(self.settings(team=None), Path("/work/example-repo"), None)
 
     def test_new_issue_uses_configured_target(self):
         result = self.prepare(existing_target=None)
@@ -212,8 +213,8 @@ class LinearTaskSkillTests(unittest.TestCase):
             )
 
     def test_packaged_config_matches_canonical_project_registry(self):
-        canonical = ROOT / "config" / "projects.toml"
-        packaged = ROOT / "skills" / "create-linear-task" / "config.toml"
+        canonical = ROOT / "config" / "projects.example.toml"
+        packaged = ROOT / "skills" / "create-linear-task" / "config.example.toml"
         self.assertEqual(packaged.read_text(), synchronizer.render(canonical))
         completed = subprocess.run(
             [sys.executable, "-B", str(SYNC_SCRIPT), "--check"],
@@ -221,6 +222,81 @@ class LinearTaskSkillTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_public_tree_has_only_synthetic_mappings_and_ignores_private_paths(self):
+        tracked = set(subprocess.check_output(['git', '-C', str(ROOT), 'ls-files'], text=True).splitlines())
+        deleted = set(subprocess.check_output(['git', '-C', str(ROOT), 'ls-files', '--deleted'], text=True).splitlines())
+        # Account for an unstaged implementation deletion without reading any
+        # legitimate ignored runtime copy in a developer's configured checkout.
+        self.assertNotIn('config/projects.toml', tracked - deleted)
+        public = tomllib.loads((ROOT / 'config/projects.example.toml').read_text())
+        self.assertIs(public['example_only'], True)
+        for entry in public['projects'].values():
+            self.assertTrue(entry['repo_name'].startswith('example-'))
+            self.assertTrue(entry['linear_project'].startswith('Example '))
+            self.assertEqual(entry['linear_team'], 'EXAMPLE')
+        private_paths = ['config/projects.toml', '.agentic-workflows-lite/config.local.toml',
+                         'skills/create-linear-task/config.local.toml',
+                         'plugins/create-linear-task/skills/create-linear-task/config.local.toml']
+        result = subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '--no-index', '--', *private_paths],
+                                check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.splitlines(), private_paths)
+
+    def test_public_examples_are_never_runtime_targets(self):
+        for skill in (ROOT / "skills/create-linear-task", ROOT / "plugins/create-linear-task/skills/create-linear-task"):
+            with self.subTest(skill=skill):
+                with self.assertRaisesRegex(preparer.PreparationError, "Example targets"):
+                    preparer.load_settings(skill / "config.example.toml")
+                self.assertFalse((skill / "config.toml").exists())
+                temporary = self.enterContext(tempfile.TemporaryDirectory())
+                installed = Path(temporary) / "installed"
+                shutil.copytree(skill, installed, ignore=shutil.ignore_patterns("config.local.toml"))
+                result = subprocess.run([sys.executable, str(installed / "scripts/prepare_issue.py"),
+                                         "--repository", "/work/example-app"], input=json.dumps(draft()),
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('"target"', result.stdout)
+
+    def test_private_sync_requires_explicit_safe_destination_and_never_changes_public(self):
+        public = synchronizer.DEFAULT_OUTPUT.read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = root / "projects.toml"
+            registry.write_text('[projects.private]\nlinear_project="Private Fixture 🦉"\n'
+                                'linear_team="FIXTURE"\nrepo_name="private-fixture"\nbase_branch="main"\n'
+                                '# Never copy this private note\n')
+            installed = root / "installed/config.local.toml"
+            with patch("sys.stderr", new=io.StringIO()):
+                for arguments in (["--private"], ["--projects", str(registry)],
+                                  ["--private", "--projects", str(registry), "--output", str(synchronizer.DEFAULT_OUTPUT)],
+                                  ["--private", "--projects", str(registry), "--output", str(ROOT / "config.local.toml")]):
+                    self.assertEqual(synchronizer.main(arguments), 2)
+            arguments = ["--private", "--projects", str(registry), "--output", str(installed)]
+            self.assertEqual(synchronizer.main(arguments), 0)
+            self.assertEqual(synchronizer.main(arguments + ["--check"]), 0)
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("private note", installed.read_text())
+            settings = preparer.load_settings(installed)
+            target = preparer.resolve_target(settings, root / "private-fixture", None)
+            self.assertEqual((target.linear_project, target.linear_team), ("Private Fixture 🦉", "FIXTURE"))
+            # Reject a separate checkout, not just this source repository.
+            checkout = root / "another-repo"
+            checkout.mkdir()
+            subprocess.run(["git", "-C", str(checkout), "init", "-q"], check=True)
+            with self.assertRaisesRegex(ValueError, "outside Git"):
+                synchronizer.private_output(checkout / "config.local.toml")
+            alias = root / "alias"
+            alias.symlink_to(installed.parent, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                synchronizer.private_output(alias / "config.local.toml")
+            with self.assertRaisesRegex(ValueError, "marked examples"):
+                synchronizer.render(registry)
+            with self.assertRaisesRegex(ValueError, "unmarked runtime"):
+                synchronizer.render(synchronizer.DEFAULT_PROJECTS, private=True)
+            registry.write_text(registry.read_text() + 'api_key="must-not-install"\n')
+            with self.assertRaisesRegex(ValueError, "unsupported project"):
+                synchronizer.render(registry, private=True)
+        self.assertEqual(synchronizer.DEFAULT_OUTPUT.read_bytes(), public)
 
     def test_renders_visible_spec_and_complete_collapsed_metadata(self):
         settings = self.settings()
@@ -262,8 +338,9 @@ class LinearTaskSkillTests(unittest.TestCase):
     def test_distributed_default_stop_preserves_behavioral_outcomes_without_blanket_tests(self):
         for skill in (ROOT / 'skills/create-linear-task', ROOT / 'plugins/create-linear-task/skills/create-linear-task'):
             with self.subTest(skill=skill):
-                settings = preparer.load_settings(skill / 'config.toml')
-                target = preparer.resolve_target(settings, ROOT, None)
+                public = tomllib.loads((skill / 'config.example.toml').read_text())
+                settings = replace(self.settings(), stop_condition=public['task_creation']['default_stop_condition'])
+                target = self.target(settings)
                 for kind, outcomes, validation in (
                     ('feature', ['Retries stop at the configured limit.', 'Tests cover exhausted retries and worker failures.'],
                      'Run the focused retry tests.'),
@@ -618,8 +695,9 @@ class LinearTaskSkillTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             installed = root / "installed" / "create-linear-task"
-            shutil.copytree(ROOT / "skills" / "create-linear-task", installed)
-            repository = root / "agentic-workflows"
+            shutil.copytree(ROOT / "skills" / "create-linear-task", installed, ignore=shutil.ignore_patterns("config.local.toml"))
+            repository = root / "example-repo"
+            (installed / "config.local.toml").write_text(config_text())
             repository.mkdir()
             completed = subprocess.run(
                 [
@@ -636,7 +714,7 @@ class LinearTaskSkillTests(unittest.TestCase):
                 cwd=root,
             )
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["target"]["project_key"], "agentic-workflows")
+        self.assertEqual(payload["target"]["project_key"], "example")
         self.assertEqual(payload["target"]["source"], "configuration")
         self.assertEqual(payload["target"]["team"], "DEV")
         self.assertEqual(payload["label_changes"], {"add": ["feature-id"], "remove": []})

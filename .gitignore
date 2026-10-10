@@ -3,3 +3,9 @@ __pycache__/
 
 # Defensive guard for accidental repository-local shell secrets.
 secrets.env
+
+# Private runtime registry and developer overrides; publish examples only.
+/config/projects.toml
+.agentic-workflows-lite/config.local.toml
+/skills/create-linear-task/config.local.toml
+/plugins/create-linear-task/skills/create-linear-task/config.local.toml

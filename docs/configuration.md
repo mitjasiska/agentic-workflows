@@ -16,11 +16,15 @@ run `pi --help` to verify the installed interface.
 
 1. Clone `agentic-workflows` and your project repositories.
 2. Copy [`config/local.example.toml`](../config/local.example.toml) to
-   `~/.agentic-workflows/config.toml` (create the directory first).
+   `~/.agentic-workflows-lite/config.toml` (create the directory first).
 3. Set `projects_root`, your Linear personal API key, and `[agent]` in that local
    file. The key needs read access to the issues, projects and team statuses, and
    permission to update issues. Keep it private; never commit the populated file.
-4. Add the cloned repository directory to your `PATH`, then run:
+4. Copy [`config/projects.example.toml`](../config/projects.example.toml) to
+   `config/projects.toml` inside this CLI checkout. Replace the synthetic targets
+   with your own mappings and remove `example_only = true`. The runtime file is
+   ignored by Git.
+5. Add the cloned repository directory to your `PATH`, then run:
 
    ```sh
    task start DEV-7
@@ -38,10 +42,13 @@ installation is required. On Windows, invoke
 `py -3.12 C:/path/to/agentic-workflows/task start DEV-7`; a global Windows launcher
 is not included yet.
 
-Portable project metadata is committed in
-[`config/projects.toml`](../config/projects.toml). Match `linear_project` exactly to the
-Linear project name and set `repo_name` and `base_branch`. Machine-specific paths
-and the Linear API key live in `~/.agentic-workflows/config.toml`; shell-exported
+The private runtime registry is `config/projects.toml` beside the CLI source,
+independent of the invoking directory. Only synthetic
+[examples](../config/projects.example.toml) are tracked. Match `linear_project`
+exactly to the Linear project name and set `repo_name` and `base_branch`. Missing,
+duplicate, unmatched, or still-marked example mappings fail before task preparation.
+This remains the only authority for Linear-project → repository/base resolution. Machine-specific paths
+and the Linear API key live in `~/.agentic-workflows-lite/config.toml`; shell-exported
 GitHub credentials use the [private secrets file](#persistent-github-token-on-posix)
 described below:
 
@@ -56,6 +63,94 @@ kind = "codex"
 model = "gpt-6-astra"
 mode = "high"
 ```
+
+## Manual namespace change
+
+`~/.agentic-workflows-lite/config.toml` is the only default global configuration
+path. `~/.agentic-workflows/config.toml` is not read, copied, or migrated. For this
+unreleased product, stop controllers and finish active tasks before switching,
+create the new private directory, and manually copy/reconfigure your global TOML
+there (or start from the example). Likewise copy/recreate `secrets.env` privately
+and update shell startup references. Do not put either file in Git.
+
+Machine-local context storage and retained integration directories also use
+`~/.agentic-workflows-lite/`. Old execution evidence is not automatically adopted;
+retain it for inspection. Do not rewrite pinned checkout/session paths to pretend
+an old execution is a new one. No compatibility alias or migration script is
+provided. The repository name and `task` command are unchanged by this namespace
+change.
+
+When updating an existing checkout, save a private copy of its populated
+`config/projects.toml` outside Git first, then restore it to the newly ignored
+runtime path after updating. Fresh clones start from the synthetic example.
+
+Earlier Git history and previously installed/distributed snapshots may still
+contain real mappings. Removing them from the current tree does not erase that
+exposure. Inspect historical distribution separately; this change does not
+rewrite history. Refresh installed private mappings using the
+[skill instructions](../skills/create-linear-task/SKILL.md#establish-context-and-target);
+public packages carry only examples.
+
+## Project defaults
+
+The resolved trusted permanent checkout may contain
+`.agentic-workflows-lite/config.toml` for shared, Git-tracked defaults and
+`.agentic-workflows-lite/config.local.toml` for personal overrides. Start from
+[`config/project.example.toml`](../config/project.example.toml). Add
+`.agentic-workflows-lite/config.local.toml` to that repository's `.gitignore`
+**before** creating a local override. The loader refuses tracked or non-ignored
+local files. The controller never copies these local files into task worktrees,
+handoffs, checkpoints, or distribution artifacts; checkpoints retain only the
+resolved execution values needed for recovery.
+
+Only these tables and fields are supported:
+
+```toml
+[agent]
+model = "implementation-model" # kind/model/mode are independently optional
+[reviewer]
+mode = "high"                  # independent of implementation
+[loop]
+timeout = 1800                  # seconds per loop pass, > 0 and <= 86400
+```
+
+Both roles accept `kind`, `model`, and `mode`, matching the global schema;
+`reasoning` remains a legacy alias for `mode`, and both cannot occur in one table.
+`[loop] timeout` is also allowed globally. It affects `task loop` only; standalone
+review/integration timeouts retain their command defaults.
+
+Fields resolve independently: **CLI → project local → project shared → global →
+existing built-in behavior**. An absent file, table, or field inherits. An empty
+string is invalid rather than a reset. Changing agent kind does not reset model
+or mode; the selected adapter validates the final combination. Model names retain
+the existing syntax validation and provider-dependent availability. Missing agent
+kind still requires configuration or a CLI selection; start may leave model/mode
+to its agent, while loop, review, and integration require explicit resolved values.
+
+Project overrides cannot contain credentials, Linear identity, mappings, base
+branches, repository locations, trusted paths, Codex profiles, controller policies,
+or test commands. Unknown keys, wrong types, malformed TOML, invalid selections,
+and out-of-range timeouts fail before a fresh handoff. Project directories/files
+must be real paths within the permanent checkout; symlinks, hard-linked files,
+special files, and linked task worktrees are refused. No parent-directory search
+or current-directory discovery is added.
+
+Fresh start, review, integration, and loop initialization resolve these layers.
+Start, from-scratch loop, and fresh integration also revalidate them after advancing
+the permanent base, before preparing task workspaces or integration artifacts.
+Invalid configuration blocks preparation; changed effective defaults require
+inspecting the updated permanent checkout and retrying the command. The base update
+remains in place, and the retry selects from its current configuration. This check
+also applies to workspace-only start so a newly tracked local override cannot be
+copied into a task checkout.
+
+The active loop checkpoint pins resolved implementation/reviewer selections and
+its timeout. Interrupt recovery, continuation, fixes, and re-review retain them;
+same-reviewer standalone resume also retains its context settings. Editing project
+files in either checkout does not hot-reload an active execution. Existing CLI
+conflict checks on recovery remain in force. Workspace-only start validates project
+files but skips agent selection; cleanup skips execution defaults as before. Keep
+repository test policy in `AGENTS.md` and CI.
 
 ## Linear issue structure
 
@@ -198,7 +293,7 @@ itself accepts thinking suffixes such as `model:high`, Agentic Workflows rejects
 that syntax because Pi may silently clamp it. Keep `model` plain and put every
 thinking choice in workflow `mode`/`--mode` so it follows one validated path.
 
-Per-command choices override machine-local configuration without modifying it:
+Per-command choices override the configuration layers without modifying them:
 
 ```sh
 task start DEV-7 --agent pi
@@ -207,8 +302,8 @@ task start DEV-7 --agent codex --model gpt-6-astra --mode high
 
 `--agent`, `--model`, and `--mode` resolve independently. For example,
 `--agent pi` retains the configured model and mode; it does not silently choose
-Pi-specific values. Precedence is command override, then `[agent]`, then the
-selected CLI's local default for an omitted model or mode. An unavailable or
+Pi-specific values. Precedence is command override, project local, project shared, then global
+`[agent]`; an omitted model or mode retains the selected CLI's own local default. An unavailable or
 unknown requested agent fails; there is no fallback to Codex.
 
 Configure review separately from implementation in the machine-local config:
@@ -220,7 +315,7 @@ model = "gpt-6-astra"
 mode = "high"
 ```
 
-Fresh review requires an explicit model and mode in `[reviewer]` or command flags.
+Fresh review requires an explicit model and mode in the resolved `[reviewer]` layers or command flags.
 Resuming a review retains its saved agent/model/mode and rejects selection flags.
 See [review lifecycle](lifecycle.md#task-review) for exact resume requirements.
 
@@ -271,7 +366,7 @@ reasoning choices are independent of permissions.
 
 A repository that needs unattended implementation can opt into one
 named Codex configuration profile in the machine-local
-`~/.agentic-workflows/config.toml`. The key is the exact `repo_name` from
+`~/.agentic-workflows-lite/config.toml`. The key is the exact `repo_name` from
 `config/projects.toml`, not a checkout or worktree path. For this repository:
 
 ```toml
@@ -348,9 +443,10 @@ into Git command arguments.
 ### Persistent GitHub token on POSIX
 
 For Aquila-style Bash environments, keep shell-exported workflow secrets in
-`~/.agentic-workflows/secrets.env`, outside every repository. The existing
-`~/.agentic-workflows/config.toml` remains the home for the Linear key and workflow
-settings; no credential migration is needed there. The CLI reads environment
+`~/.agentic-workflows-lite/secrets.env`, outside every repository. The existing
+`~/.agentic-workflows-lite/config.toml` remains the home for the Linear key and workflow
+settings. Existing installations must copy or recreate these files manually
+as described [above](#manual-namespace-change). The CLI reads environment
 variables and does not load `secrets.env` itself.
 
 Create the private directory and file without truncating an existing file. The
@@ -359,10 +455,10 @@ subshell keeps the restrictive creation mask local to these commands:
 ```sh
 (
     umask 077
-    mkdir -p "$HOME/.agentic-workflows"
-    chmod 700 "$HOME/.agentic-workflows"
-    touch "$HOME/.agentic-workflows/secrets.env"
-    chmod 600 "$HOME/.agentic-workflows/secrets.env"
+    mkdir -p "$HOME/.agentic-workflows-lite"
+    chmod 700 "$HOME/.agentic-workflows-lite"
+    touch "$HOME/.agentic-workflows-lite/secrets.env"
+    chmod 600 "$HOME/.agentic-workflows-lite/secrets.env"
 )
 ```
 
@@ -382,8 +478,8 @@ POSIX shell syntax and tolerates a missing file:
 
 ```sh
 set +vx  # Disable verbose input and command tracing before loading secrets.
-if [ -r "$HOME/.agentic-workflows/secrets.env" ]; then
-    . "$HOME/.agentic-workflows/secrets.env"
+if [ -r "$HOME/.agentic-workflows-lite/secrets.env" ]; then
+    . "$HOME/.agentic-workflows-lite/secrets.env"
 fi
 ```
 
@@ -398,7 +494,7 @@ environment. Reload it in each terminal that will invoke workflow commands:
 
 ```sh
 set +vx
-. "$HOME/.agentic-workflows/secrets.env"
+. "$HOME/.agentic-workflows-lite/secrets.env"
 ```
 
 Alternatively, source `~/.bashrc` again or open a fresh interactive Bash shell

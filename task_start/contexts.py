@@ -17,7 +17,7 @@ from .workspace import run
 
 
 def registry_path() -> Path:
-    return Path.home() / ".agentic-workflows" / "contexts.sqlite3"
+    return Path.home() / ".agentic-workflows-lite" / "contexts.sqlite3"
 
 
 def now() -> str:

@@ -13,7 +13,7 @@ from . import TaskError
 from .pass_delivery import object_digest
 from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, codex_repository_policy, resolve_agent_options
-from .config import load_local, load_projects, repository_path, resolve_project
+from .config import load_local, load_projects, project_settings, repository_path, resolve_project
 from .contexts import now, ContextRegistry, HerdrContexts, context_observer, context_reference, launch_registered, reconcile
 from .handoff import review_handoff
 from .linear import Linear
@@ -178,6 +178,8 @@ def review(identifier: str, *, resume: str | None = None, agent_kind: str | None
     issue = Linear(local.api_key).get_issue(identifier)
     project = resolve_project(load_projects(), issue.project)
     repo = repository_path(local, project)
+    if resume is None:
+        local = project_settings(local, repo)
     registry, identities = ContextRegistry(), HerdrContexts()
     workspace, anchor, base, endpoint = resolve_review_workspace(issue, project, repo, registry, identities, local_only=True)
     with PublicationStore(workspace.path).locked() as store:

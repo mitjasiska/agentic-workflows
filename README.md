@@ -35,12 +35,14 @@ You need Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
 Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
 
 1. Clone this repository and the project repositories you want to work on.
-2. Check the mappings in [`config/projects.toml`](config/projects.toml).
+2. Copy [`config/projects.example.toml`](config/projects.example.toml) to
+   `config/projects.toml` (Git-ignored), replace the synthetic mappings, and remove
+   `example_only = true`.
    `linear_project` must match the Linear project name; `repo_name` and
    `base_branch` identify its local checkout and base. The base must track a
-   same-named remote branch.
+   same-named remote branch. Missing or ambiguous mappings stop the workflow.
 3. Copy [`config/local.example.toml`](config/local.example.toml) to
-   `~/.agentic-workflows/config.toml`, creating the directory first. Set
+   `~/.agentic-workflows-lite/config.toml`, creating the directory first. Set
    `projects_root`, your Linear personal API key, and your `[agent]` selection.
    Keep this populated file private. The key needs issue/project/team-status
    read access and permission to update issues.
@@ -48,7 +50,7 @@ Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
    [persistent token setup](docs/configuration.md#persistent-github-token-on-posix).
    Use [`config/secrets.example.env`](config/secrets.example.env) as the placeholder
    template.
-   Store `GH_TOKEN` in `~/.agentic-workflows/secrets.env` with mode `600`, and
+   Store `GH_TOKEN` in `~/.agentic-workflows-lite/secrets.env` with mode `600`, and
    source that file from `~/.bashrc`. Reload it in existing shells after token
    changes. Git push still uses your separate SSH/HTTPS authentication.
 5. Add this repository to `PATH`, then start a task:
@@ -66,6 +68,10 @@ Configure `[reviewer]` separately before using review; fresh reviews require an
 explicit model and mode in that section or as command flags. The
 [configuration guide](docs/configuration.md) includes examples, option precedence,
 agent compatibility, and optional repository-specific Codex permission profiles.
+Optional shared and personal
+[project defaults](docs/configuration.md#project-defaults) apply per field from the
+trusted permanent checkout. The old global namespace has no fallback; see the
+[manual setup change](docs/configuration.md#manual-namespace-change).
 
 ## Using the workflow
 
@@ -85,16 +91,20 @@ policy in [Linear issue structure settings](docs/configuration.md#linear-issue-s
 Only an explicit `required` policy makes the configured block a prerequisite.
 
 The standalone skill is validated with Codex; other skill hosts have not been
-verified. Use it from this repository, or install the whole directory:
+verified. Install the whole directory, then generate its private mappings from
+your configured `config/projects.toml`:
 
 ```sh
 skill_dest="${CODEX_HOME:-$HOME/.codex}/skills/create-linear-task"
 mkdir -p "$skill_dest"
 cp -R skills/create-linear-task/. "$skill_dest/"
+python3.12 skills/create-linear-task/scripts/sync_config.py --private \
+  --output "$skill_dest/config.local.toml"
 ```
 
-Start a new Codex session after installation or refresh. When project mappings
-change, follow the skill's [configuration refresh instructions](skills/create-linear-task/SKILL.md#establish-context-and-target).
+Public skill/plugin files contain examples only and cannot select a real target.
+Keep the private installed configuration outside Git. Start a new Codex session
+after installation or refresh. When project mappings change, follow the skill's [configuration refresh instructions](skills/create-linear-task/SKILL.md#establish-context-and-target).
 Its own instructions also cover [classification](skills/create-linear-task/SKILL.md#write-and-classify-the-issue)
 and [safe issue refinement](skills/create-linear-task/SKILL.md#render-deterministic-fields).
 

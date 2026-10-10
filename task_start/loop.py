@@ -12,7 +12,8 @@ from uuid import uuid4
 from . import TaskError
 from .ownership import ownership_operation
 from .agent import AgentExecution, AgentOptions, AgentOverrides, adapter_for, resolve_agent_options
-from .config import load_local, load_projects, repository_path, resolve_project
+from .config import (check_project_settings_unchanged, load_local, load_projects, project_settings,
+                     repository_path, resolve_project)
 from .contexts import ContextRegistry, HerdrContexts, allocate_launch, pending_launch, context_observer, context_reference
 from .implementation_pass import binding, implementation_pass, implementation_target, initial_execution, parse_implementation
 from .linear import Linear, LinearUnavailable
@@ -48,14 +49,16 @@ def environment(identifier, *, allow_bootstrap=False, pending_implementation=Non
     return env
 
 
-def bootstrap(env, options):
+def bootstrap(env, options, global_settings):
     check_issue_structure(env.issue, env.local.issue_structure)
     adapter_for(options).check_available()
     target = Herdr(env.repo).resolve_task(Git(env.repo), env.issue.identifier, include_remotes=False)
     if target is not None and LoopStore(target.path).path.exists():
         raise TaskError("Loop checkpoint exists but its original implementation reservation is missing; inspect before recovery")
     env.workspace = prepare_task(env.issue, env.project, Linear(env.local.api_key), Git(env.repo),
-                                 lambda: Herdr(env.repo), default_only=True)
+                                 lambda: Herdr(env.repo), default_only=True,
+                                 check_configuration=lambda: check_project_settings_unchanged(
+                                     global_settings, env.repo, env.local))
     env.endpoint = env.identities.endpoint()
     env.base = Git(env.repo).command("rev-parse", "--verify", f"refs/heads/{env.project.base_branch}^{{commit}}").strip()
 
@@ -566,7 +569,7 @@ def loop(identifier, *, action="run", agent_kind=None, model=None, mode=None,
     if action in {"run", "new"}:
         if (max_reviews is not None and (type(max_reviews) is not int or not 1 <= max_reviews <= 20)
                 or max_passes is not None and (type(max_passes) is not int or not 1 <= max_passes <= 40)
-                or timeout is not None and (not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400)):
+                or timeout is not None and (type(timeout) not in {int, float} or not 0 < timeout <= 86400)):
             raise TaskError("Loop requires 1..20 reviews, 1..40 passes, and a positive timeout up to 86400 seconds")
         if from_review and any(v is not None for v in implementation_overrides):
             raise TaskError("--i-* options require a from-scratch loop, not --from-review")
@@ -661,7 +664,6 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
             return drive(store, state, runtime, on_pass_result=on_pass_result)
     max_reviews = 3 if max_reviews is None else max_reviews
     max_passes = 6 if max_passes is None else max_passes
-    timeout = 1800 if timeout is None else timeout
     reservation = None
     if action == "new":
         existing = control_store(identifier, optional=True)
@@ -673,6 +675,9 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
                 reservation = previous
     env = environment(identifier, allow_bootstrap=not from_review,
                       pending_implementation=reservation["implementation"]["context_id"] if reservation else None)
+    global_settings = env.local
+    env.local = project_settings(global_settings, env.repo)
+    timeout = env.local.loop_timeout if timeout is None else timeout
     options = resolve_agent_options(env.local.reviewer, AgentOverrides(agent_kind, model, mode),
                                     section="reviewer", agent_flag="--r-agent")
     if options.model is None or options.mode is None:
@@ -689,7 +694,7 @@ def _loop(identifier, *, action, agent_kind, model, mode, max_reviews, max_passe
                                                 agent_flag="--i-agent")
         if initial_options.model is None or initial_options.mode is None:
             raise TaskError("Loop implementation requires explicit model and mode ([agent] or --i-model/--i-mode)")
-        bootstrap(env, initial_options)
+        bootstrap(env, initial_options, global_settings)
     elif any(v is not None for v in implementation_overrides):
         raise TaskError("--i-* options require a from-scratch loop; existing implementation settings are preserved")
     with PublicationStore(env.workspace.path).locked() as publication:
