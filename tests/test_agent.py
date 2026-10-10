@@ -80,14 +80,14 @@ class ConfigurationAndInputTests(unittest.TestCase):
 
     def test_codex_repository_profiles_are_explicit_and_exact(self):
         data = {"repositories": {
-            "agentic-workflows": {"profile": "agentic-workflows-trusted"},
+            "agentic-workflows-lite": {"profile": "agentic-workflows-lite-trusted"},
             "other.repo": {"profile": "other_profile"},
         }}
-        expected = {"agentic-workflows": "agentic-workflows-trusted",
+        expected = {"agentic-workflows-lite": "agentic-workflows-lite-trusted",
                     "other.repo": "other_profile"}
         self.assertEqual(codex_repository_profiles(data), expected)
-        self.assertEqual(codex_repository_policy(expected, "agentic-workflows"),
-                         {"codex_profile": "agentic-workflows-trusted"})
+        self.assertEqual(codex_repository_policy(expected, "agentic-workflows-lite"),
+                         {"codex_profile": "agentic-workflows-lite-trusted"})
         self.assertEqual(codex_repository_policy(expected, "unlisted"), {})
 
     def test_invalid_codex_repository_profiles_fail_closed(self):
@@ -112,10 +112,10 @@ class ConfigurationAndInputTests(unittest.TestCase):
             path = Path(directory) / "config.toml"
             base = (f'projects_root = {json.dumps(directory)}\n[linear]\n'
                     'api_key = "placeholder"\n[agent]\nkind = "codex"\n')
-            path.write_text(base + '[codex.repositories."agentic-workflows"]\n'
-                            'profile = "agentic-workflows-trusted"\n')
+            path.write_text(base + '[codex.repositories."agentic-workflows-lite"]\n'
+                            'profile = "agentic-workflows-lite-trusted"\n')
             self.assertEqual(load_local(path).codex_repository_profiles,
-                             {"agentic-workflows": "agentic-workflows-trusted"})
+                             {"agentic-workflows-lite": "agentic-workflows-lite-trusted"})
             path.write_text(base + '[codex.repositories.repo]\nprofile = "../invalid"\n')
             self.assertEqual(load_local(path, no_agent=True).codex_repository_profiles, {})
 
@@ -320,9 +320,9 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("picodex", launch_argvs[1])
 
     def test_trusted_repository_profile_is_the_only_permission_launch_override(self):
-        policy = {"codex_profile": "agentic-workflows-trusted"}
+        policy = {"codex_profile": "agentic-workflows-lite-trusted"}
         self.results[1]["argv"] = ["codex", "--cd", "/exact/checkout", "--profile",
-                                    "agentic-workflows-trusted", "--model", "custom/model",
+                                    "agentic-workflows-lite-trusted", "--model", "custom/model",
                                     "--config", 'model_reasoning_effort="high"', "--", self.bootstrap]
         with patch.object(self.codex, "command", side_effect=self.results) as command:
             self.run_launch(policy=policy)
@@ -333,7 +333,7 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("--ask-for-approval", launch)
 
     def test_implementation_and_review_share_repository_profile_not_handoff(self):
-        policy = {"codex_profile": "agentic-workflows-trusted"}
+        policy = {"codex_profile": "agentic-workflows-lite-trusted"}
         implementation = AgentExecution(self.issue, Path("/resolved/repository"), self.workspace,
                                         self.codex.options, self.prompt, policy=policy)
         review = replace(implementation, purpose="review",

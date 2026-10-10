@@ -2,7 +2,8 @@
 
 [Project overview](../README.md) · [Configuration](configuration.md) · [Architecture](architecture.md)
 
-Command behavior, invariants, and refusal/retry cases. Start with the
+Command behavior, invariants, and refusal/retry cases for Agentic Workflows Lite
+(AWL), whose first public release is a **Developer Preview**. Start with the
 [README](../README.md#using-the-workflow) for the human workflow and command choices.
 
 - [Start and status transition](#task-start)

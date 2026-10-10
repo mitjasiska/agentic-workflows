@@ -34,9 +34,9 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
     def test_repository_marketplace_references_the_plugin_package(self):
         marketplace = json.loads(MARKETPLACE.read_text())
 
-        self.assertEqual(marketplace["name"], "agentic-workflows")
+        self.assertEqual(marketplace["name"], "agentic-workflows-lite")
         self.assertEqual(
-            marketplace["interface"], {"displayName": "Agentic Workflows"}
+            marketplace["interface"], {"displayName": "Agentic Workflows Lite"}
         )
         self.assertEqual(len(marketplace["plugins"]), 1)
         entry = marketplace["plugins"][0]
@@ -78,6 +78,14 @@ class CreateLinearTaskPluginTests(unittest.TestCase):
             "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
         )
         self.assertEqual(manifest["name"], "create-linear-task")
+        self.assertEqual(
+            manifest["repository"],
+            "https://github.com/mitjasiska/agentic-workflows-lite",
+        )
+        self.assertEqual(
+            manifest["homepage"],
+            manifest["repository"] + "/tree/main/plugins/create-linear-task",
+        )
         self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
         self.assertIn("interface", manifest["extensions"]["com.openai"])
         self.assertNotIn("mcpServers", manifest)

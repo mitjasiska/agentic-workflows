@@ -4,7 +4,8 @@
 
 Installation, project mapping, issue structure, task readiness, implementation
 scope, agent selection, review validation, repository permission profiles, and
-GitHub API credentials for the `task` CLI.
+GitHub API credentials for the Agentic Workflows Lite (AWL) `task` CLI.
+The first public release is a **Developer Preview** for local, single-machine use.
 
 ## Installation and project mapping
 
@@ -14,7 +15,8 @@ The commands and JSON responses were checked against Herdr 0.9.1 and Codex CLI
 0.157.1. Pi transport was checked against Pi CLI 0.87.1 and Herdr 0.9.1;
 run `pi --help` to verify the installed interface.
 
-1. Clone `agentic-workflows` and your project repositories.
+1. Clone [agentic-workflows-lite](https://github.com/mitjasiska/agentic-workflows-lite)
+   and your project repositories.
 2. Copy [`config/local.example.toml`](../config/local.example.toml) to
    `~/.agentic-workflows-lite/config.toml` (create the directory first).
 3. Set `projects_root`, your Linear personal API key, and `[agent]` in that local
@@ -33,13 +35,13 @@ run `pi --help` to verify the installed interface.
 The executable `task` lives at the repository root. For example, in a POSIX shell:
 
 ```sh
-export PATH="/absolute/path/to/agentic-workflows:$PATH"
+export PATH="/absolute/path/to/agentic-workflows-lite:$PATH"
 task start DEV-7
 ```
 
 It works from any directory; a symlink to `task` on your `PATH` works too. No package
 installation is required. On Windows, invoke
-`py -3.12 C:/path/to/agentic-workflows/task start DEV-7`; a global Windows launcher
+`py -3.12 C:/path/to/agentic-workflows-lite/task start DEV-7`; a global Windows launcher
 is not included yet.
 
 The private runtime registry is `config/projects.toml` beside the CLI source,
@@ -66,9 +68,14 @@ mode = "high"
 
 ## Manual namespace change
 
+The GitHub repository and permanent checkout have been renamed to
+`agentic-workflows-lite`. The `task` command and existing Linear project/team names
+are unchanged. The following guidance applies to older installations still using
+the historical namespace.
+
 `~/.agentic-workflows-lite/config.toml` is the only default global configuration
-path. `~/.agentic-workflows/config.toml` is not read, copied, or migrated. For this
-unreleased product, stop controllers and finish active tasks before switching,
+path. The historical `~/.agentic-workflows/config.toml` is not read, copied, or
+migrated. Stop controllers and finish active tasks before switching,
 create the new private directory, and manually copy/reconfigure your global TOML
 there (or start from the example). Likewise copy/recreate `secrets.env` privately
 and update shell startup references. Do not put either file in Git.
@@ -77,12 +84,12 @@ Machine-local context storage and retained integration directories also use
 `~/.agentic-workflows-lite/`. Old execution evidence is not automatically adopted;
 retain it for inspection. Do not rewrite pinned checkout/session paths to pretend
 an old execution is a new one. No compatibility alias or migration script is
-provided. The repository name and `task` command are unchanged by this namespace
-change.
+provided.
 
-When updating an existing checkout, save a private copy of its populated
-`config/projects.toml` outside Git first, then restore it to the newly ignored
-runtime path after updating. Fresh clones start from the synthetic example.
+When upgrading a checkout from before the private-registry separation, save a
+private copy of its populated `config/projects.toml` outside Git first, then
+restore it to the ignored runtime path after updating. Fresh clones start from
+the synthetic example.
 
 Earlier Git history and previously installed/distributed snapshots may still
 contain real mappings. Removing them from the current tree does not erase that
@@ -289,7 +296,7 @@ submission to resolve the selected model, supported thinking levels, and effecti
 level. It rejects a model/mode pair if Pi would silently clamp it. Model/account
 support is ultimately determined by the selected CLI. Login, repository trust,
 and each agent's own permission settings remain under your control. Although Pi
-itself accepts thinking suffixes such as `model:high`, Agentic Workflows rejects
+itself accepts thinking suffixes such as `model:high`, Agentic Workflows Lite rejects
 that syntax because Pi may silently clamp it. Keep `model` plain and put every
 thinking choice in workflow `mode`/`--mode` so it follows one validated path.
 
@@ -359,7 +366,7 @@ for CI ownership, human verification, and honest reporting.
 
 ## Codex permissions for trusted repositories
 
-Agentic Workflows does not relax Codex permissions globally. With no repository
+Agentic Workflows Lite does not relax Codex permissions globally. With no repository
 override, the adapter passes no profile, sandbox, approval, or network option, so
 Codex's active defaults and machine configuration continue to apply. Model and
 reasoning choices are independent of permissions.
@@ -370,13 +377,13 @@ named Codex configuration profile in the machine-local
 `config/projects.toml`, not a checkout or worktree path. For this repository:
 
 ```toml
-[codex.repositories."agentic-workflows"]
-profile = "agentic-workflows-trusted"
+[codex.repositories."agentic-workflows-lite"]
+profile = "agentic-workflows-lite-trusted"
 ```
 
 Create the selected profile beside Codex's user config. With the usual
 `CODEX_HOME`, the example above names
-`~/.codex/agentic-workflows-trusted.config.toml`:
+`~/.codex/agentic-workflows-lite-trusted.config.toml`:
 
 ```toml
 approval_policy = "never"
@@ -386,8 +393,8 @@ sandbox_mode = "workspace-write"
 network_access = true
 ```
 
-This exact combination was verified with Codex CLI 0.157.1. Agentic Workflows
-launches it as `codex --cd WORKTREE --profile agentic-workflows-trusted ...`;
+This exact combination was verified with Codex CLI 0.157.1. Agentic Workflows Lite
+launches it as `codex --cd WORKTREE --profile agentic-workflows-lite-trusted ...`;
 Codex loads and enforces the profile. `workspace-write` limits writes to the task
 workspace and Codex's temporary roots while keeping protected paths such as
 `.git` and `.codex` read-only. Network access permits commands inside that sandbox
@@ -540,7 +547,7 @@ try:
     request = Request("https://api.github.com/user", headers={
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
-        "User-Agent": "agentic-workflows-auth-check",
+        "User-Agent": "agentic-workflows-lite-auth-check",
         "X-GitHub-Api-Version": "2022-11-28",
     })
     with urlopen(request, timeout=30) as response:

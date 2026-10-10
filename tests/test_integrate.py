@@ -616,7 +616,7 @@ class IntegrationTests(unittest.TestCase):
     @unittest.skipIf(os.geteuid() == 0, "POSIX write-denial fixture requires an unprivileged process")
     def test_codex_workspace_write_contract_needs_no_agent_git_writes(self):
         transport = self.codex_transport()
-        self.local = replace(self.local, codex_repository_profiles={self.repo.name: "agentic-workflows-trusted"})
+        self.local = replace(self.local, codex_repository_profiles={self.repo.name: "agentic-workflows-lite-trusted"})
         temporary_root = self.result_root
         observed = []
         def deliver(prompt):
@@ -657,7 +657,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIsNone(self.store.read()["acceptance"])
         self.assertFalse(self.operations("push"))
         argv = transport.argv
-        self.assertEqual(argv[argv.index("--profile") + 1], "agentic-workflows-trusted")
+        self.assertEqual(argv[argv.index("--profile") + 1], "agentic-workflows-lite-trusted")
         for flag in ("--sandbox", "--ask-for-approval", "--add-dir", "--dangerously-bypass-approvals-and-sandbox"):
             self.assertNotIn(flag, argv)
         transport.assert_effects(1, 1)
