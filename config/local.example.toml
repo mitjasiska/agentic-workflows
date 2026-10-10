@@ -1,4 +1,4 @@
-# Copy to ~/.agentic-workflows/config.toml and edit locally.
+# Copy to ~/.agentic-workflows-lite/config.toml and edit locally.
 # GitHub API credentials do not belong in this TOML file.
 # See config/secrets.example.env and docs/configuration.md for private shell setup.
 # Windows example: projects_root = "C:/development/projects"
@@ -43,3 +43,7 @@ strategy = "focused_first" # focused_first | exhaustive
 # names $CODEX_HOME/agentic-workflows-trusted.config.toml; see the README.
 # [codex.repositories."agentic-workflows"]
 # profile = "agentic-workflows-trusted"
+
+# Optional loop wait per pass; CLI/project overrides resolve per field.
+[loop]
+timeout = 1800 # > 0 and <= 86400 seconds

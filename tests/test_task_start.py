@@ -21,8 +21,8 @@ from task_start.preparation import check_issue_structure
 from task_start.workspace import Git, Herdr, Workspace, branch_name, run
 
 
-PROJECT = Project("KnowledgeBase", "knowledge-base", "main")
-ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "KnowledgeBase", "todo", "Todo", "started",
+PROJECT = Project("Example Project", "example-repo", "main")
+ISSUE = Issue("issue-id", "DEV-7", "Add ingestion CLI", "Example Project", "todo", "Todo", "started",
               description="+++ Agent instructions\n\nImplement the ingestion CLI and validate it.\n\n+++",
               state_type="unstarted")
 # Deliberately not an API key; no real credentials are used by these tests.
@@ -33,7 +33,7 @@ def issue_data():
     return {"issue": {
         "id": "issue-id", "identifier": "DEV-7", "title": "Add ingestion CLI",
         "description": ISSUE.description,
-        "project": {"id": "project-id", "name": "KnowledgeBase"},
+        "project": {"id": "project-id", "name": "Example Project"},
         "state": {"id": "todo", "name": "Todo", "type": "unstarted"},
         "team": {"id": "team-id", "states": {
             "nodes": [{"id": "todo", "name": "Todo"}, {"id": "started", "name": "In Progress"}],
@@ -68,13 +68,17 @@ class ParsingTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_portable_registry_and_resolution(self):
-        projects = load_projects()
-        self.assertEqual(resolve_project(projects, "KnowledgeBase"), PROJECT)
-        self.assertEqual(repository_path(LOCAL, PROJECT), Path("/projects/knowledge-base").resolve())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "projects.toml"
+            path.write_text('[projects.fixture]\nlinear_project = "Example Project"\n'
+                            'repo_name = "example-repo"\nbase_branch = "main"\n')
+            projects = load_projects(path)
+        self.assertEqual(resolve_project(projects, "Example Project"), PROJECT)
+        self.assertEqual(repository_path(LOCAL, PROJECT), Path("/projects/example-repo").resolve())
         with self.assertRaisesRegex(TaskError, "exactly one"):
             resolve_project(projects, "Unknown")
         with self.assertRaises(TaskError):
-            resolve_project([PROJECT, PROJECT], "KnowledgeBase")
+            resolve_project([PROJECT, PROJECT], "Example Project")
 
     def test_local_config(self):
         with tempfile.TemporaryDirectory() as temp:

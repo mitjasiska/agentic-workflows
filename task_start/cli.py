@@ -9,7 +9,8 @@ from . import TaskError
 from .ownership import ownership_operation
 from .agent import (AgentExecution, AgentOverrides, adapter_for,
                     codex_repository_policy, resolve_agent_options)
-from .config import load_local, load_projects, repository_path, resolve_project
+from .config import (check_project_settings_unchanged, load_local, load_projects, project_settings,
+                     repository_path, resolve_project)
 from .contexts import ContextRegistry, HerdrContexts, inspect_contexts, launch_registered
 from .handoff import implementation_handoff
 from .linear import Linear
@@ -87,7 +88,7 @@ def parser() -> argparse.ArgumentParser:
     add_agent_options(loop_command, prefix="r-", role="reviewer")
     loop_command.add_argument("--max-reviews", type=int, help="Review limit (default 3; maximum 20)")
     loop_command.add_argument("--max-passes", type=int, help="Total pass limit (default 6; maximum 40)")
-    loop_command.add_argument("--timeout", type=int, metavar="SECONDS", help="Wait per pass (default 1800)")
+    loop_command.add_argument("--timeout", type=int, metavar="SECONDS", help="Wait per pass (configured [loop] timeout or 1800; maximum 86400)")
     loop_command.add_argument("--json", action="store_true", help="Print the combined lifecycle result")
     pr_command = commands.add_parser("pr", help="Commit and publish the exact clean-reviewed task as a GitHub PR")
     pr_command.add_argument("issue", type=issue_identifier)
@@ -141,10 +142,6 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
     local = load_local(no_agent=no_agent)
     agent = None
     options = None
-    if not no_agent:
-        options = resolve_agent_options(local.agent, overrides)
-        agent = adapter_for(options)
-        agent.check_available()
     projects = load_projects()
     linear = Linear(local.api_key)
     issue = linear.get_issue(identifier)
@@ -152,7 +149,16 @@ def start(identifier: str, *, no_agent: bool = False, slice: str | None = None,
         check_issue_structure(issue, local.issue_structure)
     project = resolve_project(projects, issue.project)
     repo = repository_path(local, project)
-    workspace = prepare_task(issue, project, linear, Git(repo), lambda: Herdr(repo), slice=slice)
+    global_settings = local
+    # Validate workspace-only starts too: private files must never be copied
+    # into a task checkout, even when no agent is requested.
+    local = project_settings(global_settings, repo)
+    if not no_agent:
+        options = resolve_agent_options(local.agent, overrides)
+        agent = adapter_for(options)
+        agent.check_available()
+    workspace = prepare_task(issue, project, linear, Git(repo), lambda: Herdr(repo), slice=slice,
+                             check_configuration=lambda: check_project_settings_unchanged(global_settings, repo, local))
     if agent:
         policy = (codex_repository_policy(local.codex_repository_profiles, project.repo_name)
                   if options.kind == "codex" else {})

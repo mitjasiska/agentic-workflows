@@ -24,9 +24,13 @@ def check_issue_structure(issue, policy: IssueStructureConfig):
 
 
 @ownership_operation
-def prepare_task(issue, project, linear, git, herdr_factory, *, slice=None, default_only=False):
+def prepare_task(issue, project, linear, git, herdr_factory, *, check_configuration,
+                 slice=None, default_only=False):
     git.check_disposal(issue.identifier)
     git.update_base(project.base_branch)
+    # Fetch/fast-forward may introduce changed or unsafe project files. Validate
+    # the prepared checkout before Herdr can copy them or create task artifacts.
+    check_configuration()
     herdr = herdr_factory()
     selection = dict(default_only=True) if default_only else {}
     workspace = herdr.prepare(git, project.base_branch,

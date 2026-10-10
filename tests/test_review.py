@@ -107,6 +107,24 @@ class ReviewTests(unittest.TestCase):
             pane["label"] = args[1]
         return dict(pane=copy.deepcopy(pane))
 
+    def test_project_defaults_apply_to_fresh_review_but_resume_keeps_original_selection(self):
+        from test_layered_config import install_lifecycle_layers
+        local = install_lifecycle_layers(self)
+        first = review('DEV-7', model='cli-reviewer')
+        self.assertEqual(first.state, 'clean', first.render())
+        context = self.registry.get(first.context_id)
+        self.assertEqual((context['agent'], context['model'], context['mode']),
+                         ('codex', 'cli-reviewer', 'medium'))
+        local.write_text('invalid = [')
+        resumed = review('DEV-7', resume=first.context_id)
+        self.assertEqual(resumed.state, 'clean', resumed.render())
+        self.assertEqual(resumed.execution, first.execution)
+        self.assertEqual(resumed.context_id, first.context_id)
+        before = len(self.prompts)
+        with self.assertRaisesRegex(TaskError, 'valid project TOML'):
+            review('DEV-7')
+        self.assertEqual(len(self.prompts), before)
+
     def test_fresh_multiple_resume_latest_intent_same_tab_and_saved_selection(self):
         first, second = review("DEV-7"), review("DEV-7")
         self.assertEqual([first.context_id, second.context_id], ["DEV-7-R1", "DEV-7-R2"])

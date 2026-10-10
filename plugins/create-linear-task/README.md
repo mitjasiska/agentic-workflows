@@ -21,16 +21,31 @@ The package shape follows the official OpenAI documentation for
 From the repository root, regenerate the bundled snapshot whenever the canonical skill changes:
 
 ```sh
+python3.12 skills/create-linear-task/scripts/sync_config.py --check
 python3.12 plugins/create-linear-task/scripts/sync_plugin.py
 python3.12 plugins/create-linear-task/scripts/sync_plugin.py --check
-python3.12 -m unittest tests.test_create_linear_task_plugin -v
+PYTHONPATH=tests:. python3.12 -m unittest test_create_linear_task_plugin -v
 ```
 
 The check compares every selected bundled skill file byte-for-byte with the canonical directory and
 also checks the generated compatibility manifest. Synchronization and ZIP packaging share that
 selection logic, so transient files such as `__pycache__/`, `*.pyc`, and `*.pyo` are ignored by
 both. The repository test suite runs the same drift check and verifies that these files cannot
-change the archive.
+change the archive. The explicit public file allowlist excludes private
+`config.local.toml`; unknown files (including the old populated `config.toml`) are
+refused. Both trees must contain the exact generated `config.example.toml`, even
+if a populated file was accidentally copied into both. Synchronization and
+packaging never read the runtime registry. Regenerate public examples with the
+canonical skill synchronizer before bundling.
+
+Install private target mappings separately using the canonical skill's
+[refresh instructions](../../skills/create-linear-task/SKILL.md#establish-context-and-target).
+They stay outside Git and archives. The installed renderer requires private
+`config.local.toml` beside the skill or an explicit `--config`; public examples
+cannot authorize issue creation. A cloud host must have accessible private target
+configuration before functional acceptance. No private configuration is inherited
+from the packaging machine. Historical archives/Git history remain separate
+exposures and are not rewritten by packaging.
 
 Create a deterministic submission archive and optionally verify it later:
 
@@ -89,7 +104,7 @@ checkout or filesystem from the machine or VPS where this repository was package
 
 Run this separately only when the ChatGPT session can genuinely access all of the following:
 
-- a repository checkout whose directory identity matches a project in the bundled `config.toml`;
+- a repository checkout whose directory identity matches a project in accessible private configuration;
 - the relevant repository instructions and implementation files;
 - a Linear integration authorized for the configured team/project and its complete label catalog.
 

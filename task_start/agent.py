@@ -121,7 +121,7 @@ def resolve_agent_options(config: AgentConfig | None, overrides: AgentOverrides,
     """Resolve independent CLI-over-config choices without mutating configuration."""
     kind = overrides.kind if overrides.kind is not None else (config.kind if config else None)
     if kind is None:
-        raise TaskError(f"Configure [{section}] kind in ~/.agentic-workflows/config.toml or pass {agent_flag}")
+        raise TaskError(f"Configure [{section}] kind in ~/.agentic-workflows-lite/config.toml or pass {agent_flag}")
     model = overrides.model if overrides.model is not None else (config.model if config else None)
     mode = overrides.mode if overrides.mode is not None else (config.mode if config else None)
     return AgentOptions(kind, model, mode)
@@ -1329,6 +1329,24 @@ def adapter_for(options: AgentOptions) -> AgentAdapter:
         supported = ", ".join(sorted(ADAPTERS))
         raise TaskError(f"Unsupported agent {options.kind!r}; supported agents: {supported}")
     return adapter(options)
+
+
+def validate_agent_defaults(config: AgentConfig) -> None:
+    """Validate a partial layer without selecting a provider or probing a CLI.
+
+    Without a kind, a value must be supported by at least one registered adapter;
+    the final merged/CLI selection still validates the actual combination.
+    """
+    if config.kind is not None:
+        adapter_for(AgentOptions(config.kind, config.model, config.mode))
+        return
+    for kind, adapter in ADAPTERS.items():
+        try:
+            adapter(AgentOptions(kind, config.model, config.mode))
+        except TaskError:
+            continue
+        return
+    raise TaskError("Unsupported project agent/reviewer model or mode")
 
 
 # Compatibility names for code importing the original concrete launcher.

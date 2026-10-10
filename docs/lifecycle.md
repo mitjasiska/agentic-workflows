@@ -1209,7 +1209,7 @@ history participates, and the clean permanent checkout may fast-forward to the
 verified latest base, as in `pr`. The real task branch, index, and files remain
 unchanged during the disposable probe and agent pass. After an actual deterministic
 conflict, the workflow reproduces it in a durable machine-local repository under
-`~/.agentic-workflows/integrations/<pass-id>/checkout`. It has its own object
+`~/.agentic-workflows-lite/integrations/<pass-id>/checkout`. It has its own object
 storage, no configured remote, and workflow-pinned source/base refs. The workflow
 quits the isolated rebase sequencer while retaining the conflicted index/files;
 the agent resolves with ordinary file edits, creation, and deletion. It does not
