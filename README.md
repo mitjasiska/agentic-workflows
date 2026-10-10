@@ -1,9 +1,11 @@
-# Agentic Workflows
+# Agentic Workflows Lite (AWL)
 
-Agentic Workflows helps you take a development task from a Linear issue to an
-agent implementation, independent review, PR publication, and workspace cleanup.
-It combines a task-creation skill with a `task` command that coordinates your repositories,
-Git worktrees, and interactive coding agents in Herdr.
+Agentic Workflows Lite (AWL) is a focused Python development controller for local,
+single-machine workflows. Its first public release is a **Developer Preview**.
+It takes a development task from a Linear issue to an agent implementation,
+independent review, PR publication, and workspace cleanup, combining a task-creation
+skill with a `task` command that coordinates your repositories, Git worktrees, and
+interactive coding agents in Herdr.
 
 You choose the task and scope, the workflow prepares the checkout and hands over
 the current requirements, and you choose manual review or a bounded automatic
@@ -34,7 +36,8 @@ publication, merging, and marking the Linear issue complete.
 You need Python 3.12, Git, and Herdr on `PATH`, with a running Herdr session.
 Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
 
-1. Clone this repository and the project repositories you want to work on.
+1. Clone [agentic-workflows-lite](https://github.com/mitjasiska/agentic-workflows-lite)
+   and the project repositories you want to work on.
 2. Copy [`config/projects.example.toml`](config/projects.example.toml) to
    `config/projects.toml` (Git-ignored), replace the synthetic mappings, and remove
    `example_only = true`.
@@ -56,13 +59,13 @@ Agent execution also needs an authenticated Codex or Pi CLI on `PATH`.
 5. Add this repository to `PATH`, then start a task:
 
    ```sh
-   export PATH="/absolute/path/to/agentic-workflows:$PATH"
+   export PATH="/absolute/path/to/agentic-workflows-lite:$PATH"
    task start DEV-7
    ```
 
 No package installation is required. The command works from any directory or
 through a symlink on `PATH`. On Windows, use
-`py -3.12 C:/path/to/agentic-workflows/task start DEV-7`.
+`py -3.12 C:/path/to/agentic-workflows-lite/task start DEV-7`.
 
 Configure `[reviewer]` separately before using review; fresh reviews require an
 explicit model and mode in that section or as command flags. The
@@ -388,4 +391,4 @@ Use `task --help` or `task <command> --help` for the available flags.
 
 ## License
 
-Agentic Workflows is licensed under the [MIT License](LICENSE).
+Agentic Workflows Lite is licensed under the [MIT License](LICENSE).

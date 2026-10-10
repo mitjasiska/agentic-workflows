@@ -2,6 +2,9 @@
 
 [Project overview](../README.md) · [Lifecycle reference](lifecycle.md) · [Agent instructions](../AGENTS.md)
 
+Agentic Workflows Lite (AWL) is a local, single-machine Python development
+controller. Its first public release is a **Developer Preview**.
+
 - [Execution contract and responsibilities](#agent-execution-architecture)
 - [Handoff transport](#handoff-transport)
 - [Context identity and registry](#workflow-context-identities)
@@ -9,7 +12,7 @@
 
 ## Agent execution architecture
 
-Agentic Workflows supports multiple agent adapters. Codex is the current default
+AWL supports multiple agent adapters. Codex is the current default
 and most mature adapter; Pi is the second supported implementation. Additional
 agents can be implemented as adapters without rewriting task lifecycle logic.
 

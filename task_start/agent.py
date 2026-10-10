@@ -1156,7 +1156,7 @@ class PiAdapter(HerdrAgentAdapter):
             raise TaskError("Pi mode must be off/none, minimal, low, medium, high, xhigh, or max")
         if (self.options.model is not None and ":" in self.options.model
                 and self.options.model.rsplit(":", 1)[-1] in self.MODES):
-            raise TaskError("Pi model:mode syntax is not accepted by Agentic Workflows; "
+            raise TaskError("Pi model:mode syntax is not accepted by Agentic Workflows Lite; "
                             "remove the thinking suffix from --model and select it with --mode")
 
     def launch_args(self) -> list[str]:
