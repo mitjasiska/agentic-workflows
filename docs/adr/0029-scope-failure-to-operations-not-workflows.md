@@ -1,0 +1,5 @@
+# Scope failure to Operations, not Workflows
+
+`Failed` and `Interrupted` are lifecycle statuses of concrete Operations. A Workflow does not enter a Failed phase or permanent Failed status when an agent pass, provider call, Git action, or other Operation fails. It retains its current phase, preserves available work and evidence, and exposes all applicable Attention Requirements and Recovery Plans.
+
+A retry or resume creates a new immutable Operation linked to the earlier Operation; it never reopens or mutates the earlier record. A later successful Operation may supersede the failed attempt for current routing without erasing either Operation from the Workflow Audit Trail. Reusing an eligible agent session is a separate execution choice and does not reuse Operation identity. Only an explicit user-controlled lifecycle decision, such as abandonment or cleanup, ends further work on the Workflow. This prevents recoverable failures from becoming dead-end Workflow states and keeps failure semantics attached to the bounded action that actually failed.

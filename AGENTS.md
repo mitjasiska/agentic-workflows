@@ -1,5 +1,11 @@
 # Repository instructions
 
+## Use Linear as the work queue
+
+Linear is the canonical source for what work should be performed next. Repository documents are authoritative for product decisions, constraints, and detailed design, but they do not create work by themselves. Begin architecture refinement or implementation from the applicable Linear issue, and use the repository sources to interpret and execute that issue. Do not turn an open item in an architecture document into an unrequested task.
+
+The current architecture-refinement continuation is tracked by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness). The local checkpoint records the exact question at which that issue should resume.
+
 ## Start from the repository sources
 
 Read `README.md` before planning or changing this repository. It maps the authoritative planning documents and defines the task-readiness checkpoint.
@@ -9,8 +15,11 @@ For architecture, workflow, domain-model, or implementation-task preparation, re
 - `architecture.md` for product boundaries and architectural constraints;
 - `workflow-specification.md` for detailed workflow behavior;
 - `GLOSSARY.md` for canonical terminology;
+- `docs/architecture-refinement-checkpoint.md` for the current architecture-grilling position, next question, and implementation-readiness gate;
 - `docs/adr/` for relevant settled decisions and rationale;
 - `docs/research/` only when a decision depends on its evidence.
+
+For architecture grilling, continuation in a new chat, or deciding whether implementation may begin, read the checkpoint completely after the authoritative documents it names. Treat it as a routing record rather than a decision source: settled behavior remains authoritative only in the architecture, workflow specification, glossary, and ADRs. Update the checkpoint before ending a refinement session so its next question and readiness state remain current.
 
 Do not assume that merely mentioning a future capability in these documents makes it part of the current task.
 

@@ -1,0 +1,3 @@
+# Select Workflows by current worktree or immutable ID
+
+Commands after Workflow creation resolve the exact Workflow from the current managed worktree as the ordinary low-friction path. When invoked elsewhere, including through the dashboard, they require the immutable Workflow ID explicitly. AW does not guess an existing Workflow from a Task identifier, slice label, branch prefix, or mutable title, because one Task may have several sibling Workflows. Missing, inconsistent, or ambiguous worktree identity stops the command without mutation. This permits short commands such as `awctl pr` inside the intended worktree while preserving a deterministic API and automation selector.

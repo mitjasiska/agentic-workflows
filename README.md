@@ -8,10 +8,13 @@ This repository contains the architecture and, later, the implementation of Agen
 - [`architecture.md`](architecture.md) defines the product boundary, architectural shape, major behavior, and open decisions.
 - [`workflow-specification.md`](workflow-specification.md) defines detailed workflow mechanics and edge cases.
 - [`GLOSSARY.md`](GLOSSARY.md) defines canonical domain language.
+- [`docs/architecture-refinement-checkpoint.md`](docs/architecture-refinement-checkpoint.md) records where architecture grilling should resume and which decisions still block implementation. It is a navigation checkpoint, not an additional source of product truth.
 - [`docs/adr/`](docs/adr/) records durable architectural decisions and their rationale.
 - [`docs/research/`](docs/research/) contains evidence used to inform decisions, including findings from the prototype.
 
 Chat transcripts are working conversations, not authoritative project state. Decisions that must survive the conversation belong in the applicable repository document.
+
+Linear is the canonical work queue: it determines what should be worked on next. The repository documents remain authoritative for the product decisions and constraints used to execute that work. The completed architecture-foundation task is [DEV-115](https://linear.app/mitjasiska/issue/DEV-115/define-agentic-workflows-architecture-foundation); the current continuation is [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness).
 
 The planning documents distinguish three kinds of guidance:
 
@@ -27,6 +30,16 @@ The product owner may update and commit architecture documentation directly to t
 
 Architecture work may use Codex against the local repository or ChatGPT against the current GitHub repository. The selected environment must be able to read the current authoritative documents. Local uncommitted decisions must be committed and pushed, attached explicitly, or otherwise synchronized before a GitHub-connected chat can rely on them.
 
+### Continuing the current architecture refinement
+
+[DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness) remains open across as many focused sessions as are needed to reach Initial E2E implementation readiness. Do not create a new refinement issue for each chat. At the start of a session:
+
+1. Open this repository at its latest architecture commit and confirm that DEV-119 is still the applicable Linear issue.
+2. In Codex, invoke the installed `grilling` skill or `grill-with-docs` wrapper and say: “Continue DEV-119 from `docs/architecture-refinement-checkpoint.md`. Ask one question at a time.”
+3. In a GitHub-connected ChatGPT chat, use the same request only after the latest local documentation changes have been committed and pushed so that the chat can read them.
+
+During the session, write each accepted decision into the applicable authoritative document and update the checkpoint's last completed decision and exact next question. When stopping before readiness, leave DEV-119 open and leave the repository changes ready for the user's direct-to-main documentation commit. When the readiness checklist is complete, mark the checkpoint ready, create the separate Initial E2E implementation issue in Linear, and only then complete DEV-119.
+
 ## Task-readiness checkpoint
 
 Before an implementation task is finalized or started, a repository-aware planning process must check it against the authoritative planning documents. If an unresolved architectural or product decision prevents the task from being specified safely, task preparation stops and a focused grilling session resolves only the blocking questions. The resulting decisions are written back to the authoritative documents before the task becomes ready.
@@ -37,7 +50,7 @@ This checkpoint will be encoded in a reusable architecture-to-task skill that ca
 
 ## Task shape and agent latitude
 
-Tasks should specify a cohesive outcome, boundaries, acceptance criteria, relevant architecture, and required evidence while leaving the implementation approach open where the architecture does not require one. Prefer a larger coherent vertical slice when it lets an agent reason about the affected design as a whole. Do not split work into small tickets merely to prescribe a sequence of mechanical edits or to constrain the agent unnecessarily.
+Tasks should specify a cohesive outcome, boundaries, acceptance criteria, relevant architecture, and required evidence while leaving the implementation approach open where the architecture does not require one. Prefer a larger coherent task when it lets an agent reason about the affected design as a whole. Do not split work into small tickets merely to prescribe a sequence of mechanical edits or to constrain the agent unnecessarily. The term **Task Slice** is reserved for an explicitly scoped part of one Task that produces its own branch, worktree, review cycle, and pull request. It must not be used to label competing implementations of the same scope; those are planned **Workflow Variants**.
 
 Architecture must not force an Implementer into an ad hoc workaround. If a Design Direction becomes awkward when applied to the actual code, the Implementer may refine it into a coherent solution that preserves Product Invariants and task intent, and must report the choice. If the coherent solution would change a Product Invariant or make a material product decision in an Open Area, implementation pauses for an explicit architecture decision.
 

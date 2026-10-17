@@ -24,7 +24,7 @@ A concise working definition is:
 
 > From task to independently reviewed change — a local-first control plane for human-directed agentic work.
 
-The product is intended to become a full-fledged public product. It will begin with a narrow end-to-end implementation slice and grow through numbered milestones in the same codebase. The initial slice is not another disposable prototype, and there will not be separate Lite and Full editions.
+The product is intended to become a full-fledged public product. It will begin with a narrow end-to-end milestone and grow through numbered milestones in the same codebase. The initial milestone is not another disposable prototype, and there will not be separate Lite and Full editions.
 
 Human control is a non-negotiable operating constraint rather than the product's end in itself. Agentic Workflows provides orchestration, evidence, proportionate guardrails, and safe defaults, but the human remains able to intervene, redirect an agent, use an external agent, override workflow policy deliberately, abandon a workflow, retain its workspace, and decide whether or when work should be submitted. Guardrails that materially slow ordinary development must justify that cost with a concrete risk.
 
@@ -73,7 +73,7 @@ The new product will be a clean C#/.NET application. AWP remains a source of req
 | Human intervention | Comparatively process-bound | Safe defaults with explicit overrides |
 | Integrations | Closely connected to the original toolchain | Explicit task, forge, and execution boundaries |
 | Dashboard | Existing experience informs requirements | Detailed reporting first; workflow controls later |
-| Evolution | Behavioral reference | One evolving product across V1, V2, and later milestones |
+| Evolution | Behavioral reference | One evolving product across v1, v2, and later milestones |
 
 ## 4. Core principles
 
@@ -129,7 +129,7 @@ Local-first therefore describes **control and ownership**, not a restriction tha
 
 ## 5. Product topology
 
-Agentic Workflows has one centralized logical authoritative control plane with potentially multi-machine execution through Herdr. One AW installation spans all of its registered projects, Git repositories, workflows, and worktree records. In V1 that authority is hosted by one AW service process and one database. Future availability or scale work may introduce coordinated service replicas, but it must not create several independent authorities that can disagree about workflow state.
+Agentic Workflows has one centralized logical authoritative control plane with potentially multi-machine execution through Herdr. One AW installation spans all of its registered projects, Git repositories, workflows, and worktree records. In v1 that authority is hosted by one AW service process and one database. Future availability or scale work may introduce coordinated service replicas, but it must not create several independent authorities that can disagree about workflow state.
 
 ```mermaid
 flowchart TB
@@ -248,17 +248,18 @@ A small Herdr plugin may be useful later for discovery, shortcuts, or embedded a
 
 All Herdr access goes through an application boundary such as `IHerdrGateway`. Workflow-domain code must not invoke Herdr commands directly.
 
-The gateway is expected to provide operations such as:
+The initial gateway exposes the small AW-semantic surface required by concrete workflows rather than mirroring Herdr's complete CLI. It can:
 
-- inspect Herdr version and capabilities;
-- list and inspect saved machines;
-- create or inspect workspaces and worktrees;
-- start an agent in a defined role;
-- send an instruction to an agent session;
-- inspect agent and pane state;
-- obtain execution snapshots and output;
-- stop or interrupt an operation;
-- correlate Herdr identifiers with Agentic Workflows operation identifiers.
+- inspect an execution target's compatibility and relevant capabilities;
+- prepare or inspect a Workflow workspace;
+- start a new Managed Agent Pass or resume its selected eligible session;
+- observe or interrupt the correlated execution;
+- obtain the correlated output and Result Envelope transport outcome; and
+- tear down resources owned by one resolved Workflow.
+
+Stable target, workspace, session, execution, and AW Operation identifiers cross this boundary so durable workflow records can be reconciled with Herdr facts. The gateway does not expose a generic Herdr command runner to domain code or acquire one method per Herdr CLI command. A CLI-backed infrastructure adapter translates AW requests into the required Herdr commands. Exact C# method names and command composition remain implementation choices, and the surface grows only when a concrete workflow requires another capability.
+
+An execution target supplies a structured compatibility response containing its Herdr or integration-contract version and named supported capabilities. Each gateway operation declares only the small capability set it actually requires, and AW validates that set before starting a mutation. A missing mandatory capability rejects that Operation with a precise diagnostic and Recovery Plan; it does not disable unrelated operations that the same target can still perform. AW therefore does not require an exact Herdr version when the structured contract and required capabilities are compatible. Capability cache lifetime, refresh mechanics, and wire-level field names are infrastructure details unless observed Herdr behavior proves that they affect workflow correctness.
 
 ### 7.3 CLI-first transport
 
@@ -279,7 +280,7 @@ The C# implementation must use argument-list process invocation rather than inte
 
 The raw Herdr socket API may be added behind the same gateway for long-lived event subscriptions, lower-latency dashboard updates, or deeper local integration.
 
-V1 does not require every operation to use the raw socket. A hybrid implementation is acceptable: CLI commands and snapshots for control, with socket subscriptions introduced when live-event requirements justify them.
+v1 does not require every operation to use the raw socket. A hybrid implementation is acceptable: CLI commands and snapshots for control, with socket subscriptions introduced when live-event requirements justify them.
 
 ### 7.5 Remote machines
 
@@ -311,11 +312,11 @@ Terminal-screen scraping must not be the primary integration contract.
 
 ## 8. Milestones
 
-V1, V2, and later numbers describe delivery stages of the same Agentic Workflows product. They do not represent Lite versus Full editions or local versus distributed products.
+v1, v2, and later numbers describe delivery stages of the same Agentic Workflows product. They do not represent Lite versus Full editions or local versus distributed products.
 
-### 8.1 Initial E2E implementation slice
+### 8.1 Initial E2E Milestone
 
-Before attempting the entire V1 surface, development should produce one narrow, usable, production-shaped vertical slice:
+Before attempting the entire v1 surface, development should complete one narrow, usable, production-shaped end-to-end milestone:
 
 ```text
 Captured task definition
@@ -323,25 +324,30 @@ Captured task definition
     → Codex started through Herdr
     → implementation result and exact proposed tree captured
     → independent Reviewer started through Herdr
-    → findings bound to the exact Review Target
-    → submission readiness calculated
+    → findings, when present, bound to the exact Review Target and routed through repair
+    → human-approved awctl pr
+    → deterministic commit, push, and GitHub pull-request creation
     → lifecycle shown in a minimal read-only dashboard
 ```
 
-This slice should have production-quality identifiers, durable state, diagnostics, and restart reconciliation. It intentionally starts with one task source, one repository, one harness, one execution target, and a minimal dashboard.
+This milestone should have production-quality identifiers, durable state, diagnostics, and restart reconciliation. It intentionally starts with Linear as its one Task Source, one repository, Codex as its one harness, one execution target, and a minimal dashboard. Using the primary real Task Source ensures that the milestone exercises Agent Instructions extraction, immutable source revisions, and changed-requirement handling rather than validating only internal workflow machinery.
 
 It must validate:
 
 - that the new workflow is materially less frustrating than AWP;
 - that Herdr cleanly owns execution responsibilities;
 - that completion and review evidence can be correlated reliably;
+- that both clean-first review and findings-to-repair routing are covered without deliberately introducing a defect into genuine implementation work; controlled end-to-end scenarios may use synthetic Result Envelopes to exercise the latter path;
+- that exact reviewed content can be committed and submitted through deterministic Git and GitHub actions without allowing agents to own those actions;
 - that the dashboard adds workflow understanding beyond Herdr's execution UI.
 
-The E2E slice is the first implementation step, not another product or throwaway prototype.
+The Initial E2E Milestone is the first implementation step, not another product or throwaway prototype. Acceptance is established by end-to-end tests that exercise the complete Linear-to-pull-request cycle. The milestone must make later self-hosting possible, but using Agentic Workflows to develop itself is not an acceptance requirement and may begin only in a later stage. Until then, development may continue through the existing prototype. Merge remains a separate human action.
 
-### 8.2 Required V1 product scope
+The initial submission milestone needs to create a new GitHub pull request safely. Updating an already-open pull request with a later reviewed batch and additional commit is an immediate follow-up, not a capability deferred to the end of v1. It may be sequenced alongside the first Task Source expansion according to implementation and end-to-end test evidence.
 
-V1 expands the proven slice to include:
+### 8.2 Required v1 product scope
+
+v1 expands the proven milestone to include:
 
 - a durable local control plane and application API;
 - Linux as the officially supported operating system;
@@ -361,19 +367,21 @@ V1 expands the proven slice to include:
 - clear, structured, unambiguous errors and warnings;
 - explicit workspace retention and cleanup controlled by the user.
 
-Multi-machine execution may be available through Herdr without changing the Agentic Workflows control-plane topology. It should be validated after the local E2E path is reliable rather than becoming a prerequisite for the first slice.
+Multi-machine execution may be available through Herdr without changing the Agentic Workflows control-plane topology. It should be validated after the local E2E path is reliable rather than becoming a prerequisite for the Initial E2E Milestone.
 
-### 8.3 V2 direction
+Markdown task files and pasted or standard-input task text are the first Task Source expansion after the Initial E2E Milestone. They should be implemented before broader v1 provider and workflow expansion so the provider-neutral Task model is tested early and quick local work does not remain dependent on Linear.
 
-V2 is expected to add workflow controls to the dashboard. Those controls must invoke the same application commands as `awctl`; the dashboard must not become a second orchestration implementation.
+### 8.3 v2 direction
+
+v2 is expected to add workflow controls to the dashboard. Those controls must invoke the same application commands as `awctl`; the dashboard must not become a second orchestration implementation.
 
 Other later capabilities may include additional task providers, forges, harnesses, richer resource reporting, and more configurable policies. They remain improvements to the same product.
 
-### 8.4 V3 organizational direction
+### 8.4 v3 organizational direction
 
-V3 may introduce organization-oriented identity and access capabilities, including named users, authentication, authorization, roles, and actor-attributed audit records. These are important for a company deployment but provide no current benefit to the initial single-operator workflow. V1 does not build dormant user-management or RBAC subsystems merely to reserve this direction; the existing API boundary and database migrations provide a practical seam when the requirement becomes real.
+v3 may introduce organization-oriented identity and access capabilities, including named users, authentication, authorization, roles, and actor-attributed audit records. These are important for a company deployment but provide no current benefit to the initial single-operator workflow. v1 does not build dormant user-management or RBAC subsystems merely to reserve this direction; the existing API boundary and database migrations provide a practical seam when the requirement becomes real.
 
-### 8.5 Deliberately outside V1
+### 8.5 Deliberately outside v1
 
 - Dashboard workflow mutation and control.
 - Application-managed user accounts, authentication, authorization, teams, and RBAC.
@@ -394,10 +402,15 @@ V3 may introduce organization-oriented identity and access capabilities, includi
 The following concepts must remain distinct:
 
 - **Task definition:** normalized user requirements and provenance.
-- **Workflow:** the durable end-to-end process for a task, containing an auditable sequence of immutable task snapshots when the user explicitly adopts changed requirements.
-- **Workflow phase:** the kind of work the workflow is currently progressing through, such as workspace preparation, implementation, review, submission, or export.
-- **Operation:** one bounded action, such as implementation, review, validation, submission, export, or cleanup.
-- **Operation status:** the lifecycle of one concrete operation, such as pending, running, completed, failed, or interrupted. It is not another Workflow phase.
+- **Task:** the provider-neutral unit of requested work captured from a Task Source. One Task may be delivered through one or more Workflows.
+- **Workflow scope:** a value on a Workflow: either `WholeTask` or `NamedSlice(name)`. A named Task Slice is therefore scope, not a separate aggregate, identity, or lifecycle.
+- **Workflow variant:** an optional identity component for a competing candidate implementation of the same Task Snapshot and Workflow Scope. Variants may deliberately use different models or approaches, but do not narrow or repartition the Task requirements.
+- **Workflow:** the durable end-to-end process for one Task under one Workflow scope. `WholeTask` is the ordinary default and is not represented as an implicit or unnamed slice. A Workflow contains an auditable sequence of immutable task snapshots when the user explicitly adopts changed requirements and owns exactly one branch, worktree, implementation/review loop, and pull request. One Workflow does not own multiple mutable worktrees or multiple pull requests.
+- **Workflow phase:** the kind of work the Workflow is currently progressing through. The Initial E2E set is exactly `WorkspacePreparation`, `Implementation`, `Review`, and `Submission`.
+- **Attention Requirement:** one active typed reason that requires human input, with its own Recovery Plan and resolution history. A Workflow may have several active requirements.
+- **Attention Required:** the derived gate that prevents AW from starting an otherwise eligible next action while one or more applicable Attention Requirements remain unresolved. It retains the Workflow's current phase and is neither a phase nor a failure verdict.
+- **Operation:** one immutable bounded attempt to perform an action, such as implementation, review, validation, submission, export, or cleanup. A retry or resume is another Operation linked to the predecessor it follows or supersedes.
+- **Operation status:** exactly one of `Pending`, `Running`, `Completed`, `Failed`, or `Interrupted` for one concrete Operation. It is not another Workflow phase or its semantic result.
 - **Execution observation:** AW's timestamped last verified view of the corresponding Herdr execution, including whether the execution target was reachable when observed. It distinguishes external facts from AW's durable intent and operation state.
 - **Pass:** a numbered implementation or review attempt within a workflow.
 - **Agent role:** the purpose of an invocation, such as Implementer or Reviewer.
@@ -407,6 +420,26 @@ The following concepts must remain distinct:
 - **Evidence:** verified facts supporting a workflow decision, including revision, validation, review, warnings, and provenance.
 - **Submission:** deterministic establishment of the authorized commit, push, and pull request or merge request from exact reviewed content.
 - **Export:** delivery of outputs from a local-only artifact workflow.
+
+v1 keeps Task Slice creation deliberately small. `awctl start TASK-ID --slice NAME` requests a new independently identified Workflow for that explicit scope. It does not create a child Linear Issue, ask an agent to decompose the Task automatically, build a dependency graph among slices, or store a separate slice requirements document. The user-declared name is both an agent-visible scope label and part of branch identity; it is not merely a technical branch suffix. The Handoff includes the complete authoritative Task Snapshot and stable slice name and instructs the role to work only within that scope. AW does not mechanically prove the semantic boundary; genuine ambiguity produces a human-decision result rather than silent scope expansion.
+
+A Task Slice must not be used to represent alternative implementations of the same scope. A slice answers which part of the Task a Workflow addresses; a Workflow Variant answers which competing candidate implementation of that same part is being attempted. Planned Variant support will allow several Workflows to share one Task Snapshot and Workflow Scope while retaining independent branches, worktrees, agent configurations, passes, reviews, and lifecycle. A common use case is comparing implementations produced by different models before choosing one for submission. Variant support is not part of the Initial E2E Milestone and is targeted for v1 or early v2. Until it is implemented, AW continues to reject duplicate Workflows for the same Task and scope rather than disguising alternatives as slices. Exact commands, candidate comparison, winner selection, and cleanup behavior remain to be specified.
+
+A Task may retain Workflows with both `WholeTask` and `NamedSlice(name)` scopes, including a Named Slice Workflow created after a Whole Task Workflow was completed or submitted. The later Workflow captures the then-current Task Source and does not supersede, repartition, or reinterpret earlier Workflows. AW does not attempt to prove that Workflow scopes are non-overlapping. Workflows for different scopes of the same Task may execute concurrently in their separate worktrees; AW still rejects a duplicate Workflow for the same scope under the current identity rules. Overlap is handled through ordinary Git integration and a fresh review rather than global serialization.
+
+`awctl start` never silently reuses a worktree. When the same Task and Workflow Scope already has a retained Workflow, the command stops without changing state or launching an agent. It reports enough status to expose unfinished or reviewed-but-unsubmitted work and directs the user to an explicit continuation action, such as resuming or submitting that Workflow, or to a different named scope. The conditions under which a later Workflow may reuse the same scope after the earlier Workflow has reached its final external outcome remain to be specified.
+
+Changing the Linear Issue does not authorize a duplicate Workflow for the same scope. The user resumes the existing Workflow and explicitly adopts the new Task Snapshot, which returns execution to implementation before review. Once that Workflow has a pull request, continuing the same pull request remains an explicit continuation of that Workflow; a separate pull request for the Task requires `--slice` and a distinct named scope.
+
+AW persists confirmed Submission identity while a Workflow is retained: provider, repository, pull-request number and URL, head branch, Workflow, and scope. The forge is authoritative for the request's mutable open, closed, or merged status. When live status affects an operation on that Workflow, AW queries the exact recorded request.
+
+For a Linear-backed Task, v1-generated pull-request content includes a deterministic closing reference such as `Fixes DEV-123`, even though the branch identity also contains the Linear Issue key. This makes the intended GitHub–Linear linkage and merge-triggered completion explicit, including when several slice pull requests belong to one Task. Removing the redundant reference requires a later explicit decision supported by evidence that branch-based linking is sufficiently reliable; dogfooding does not change this rule automatically.
+
+v1 does not treat retained AW history as a project-wide or cross-installation registry. `awctl start` checks the candidate branch against relevant local Git state and live branches on the configured remote. An existing branch stops creation and directs the user to existing work or `--slice`; an absent branch permits creation without a historical pull-request search. Cleanup or external branch deletion can therefore make the same Task and scope available again. Duplicate execution after the shared branch evidence disappears, and the race in which two machines start before either publishes shared Git state, are accepted user responsibilities in v1.
+
+For Linear, the candidate branch identity is derived directly from the normalized Issue key and optional normalized slice name; the mutable Issue title is excluded. Repository context provides the project boundary. Exact prefix and separator syntax remain an implementation detail, but the Whole Task and Named Slice forms must avoid Git ref prefix conflicts.
+
+Commands after Workflow creation normally select the Workflow from the caller's current managed worktree. From outside a managed worktree, the caller or dashboard supplies the immutable Workflow ID explicitly. AW does not resolve an existing Workflow from Task ID, slice label, branch prefix, or title when more than one Workflow may exist, and it refuses missing or conflicting worktree identity instead of guessing. This keeps the common `awctl review`, `awctl pr`, and `awctl cleanup` path short while preserving an unambiguous automation path.
 - **Merge:** a separate future operation; it is not part of submission.
 - **Deployment:** a production operation and intentionally not represented by “publish.”
 
@@ -416,29 +449,32 @@ The term **worker** is not part of the Agentic Workflows runtime model. Herdr ma
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Captured
-    Captured --> WorkspacePreparation
+    [*] --> WorkspacePreparation
     WorkspacePreparation --> Implementation
     Implementation --> Review: implementation pass completed
     Review --> Implementation: changes requested
-    Review --> ReadyToSubmit: clean report for exact uncommitted state
-    ReadyToSubmit --> Submitted: awctl pr
-    ReadyToSubmit --> Exported: artifact export
-    Submitted --> Retained
-    Exported --> Retained
-    ReadyToSubmit --> Retained: keep local result
-    Retained --> CleanedUp: explicit cleanup
+    Review --> Submission: clean review
+    Submission --> Submission: awctl pr
+    Submission --> Implementation: additional work
 ```
 
-The diagram describes Workflow phases and durable outcomes, not external process status. For example, a Workflow may be in the Review phase while its current Review Operation is Pending, Running, Completed, Failed, or Interrupted. Validation performed by the Implementer or Reviewer is evidence inside that pass rather than a mandatory standalone Workflow phase.
+The diagram contains only Workflow phases. `ReadyToSubmit`, `Submitted`, `Retained`, and cleanup are not phases: they are respectively derived eligibility, durable Submission Evidence, continued existence of the Workflow, and deletion of that Workflow. A clean review advances the Workflow to `Submission`, where readiness is derived from current evidence. Successful submission leaves the retained Workflow in that phase until additional work returns it to `Implementation`; cleanup removes it rather than creating a `CleanedUp` phase. A Workflow may be in the `Review` phase while its current Review Operation is `Pending`, `Running`, `Completed`, `Failed`, or `Interrupted`. Validation performed by the Implementer or Reviewer is evidence inside that pass rather than a mandatory standalone Workflow phase.
 
-AW also keeps Operation Status distinct from its last Execution Observation. Recording the intent to start a Reviewer does not prove that Herdr started it, and losing contact with Herdr does not prove that the Reviewer stopped. If the Reviewer was last confirmed running and its execution target becomes unreachable, AW preserves that timestamped fact and separately reports current reachability as unavailable. It does not change the Operation to Failed or Interrupted. Interrupted requires positive reconciliation evidence that the original execution disappeared without a valid result. The model must represent uncertainty explicitly instead of manufacturing a precise lifecycle transition from missing information. Final phase, status, and outcome names still require refinement, but these distinctions are architectural requirements.
+`Submission` is the deterministic umbrella for establishing the authorized commit, pushing the branch, and creating or updating the forge change request. v1 exposes that umbrella as `awctl pr` for GitHub pull requests. A future GitLab adapter may create merge requests through the same phase; a merge request is GitLab's change-request form and does not make merge part of Submission. Commit, push, and forge-request actions remain explicit internal boundaries so later versions may expose them separately if real usage justifies the additional public surface.
+
+The Initial E2E Milestone has no single authoritative Workflow Status or Workflow Outcome enum. Current user-facing state is a projection of independent durable facts: Workflow Phase, current Operation and Execution Observation, active Attention Requirements, explicit abandonment, current clean-review eligibility, and Submission Evidence. Labels such as `Review · needs attention`, `Submission · ready`, `Submission · submitted`, and `Abandoned after Implementation` are query and presentation results, not competing stored authorities. This permits additional Implementation work after Submission without inventing a transition out of a terminal `Submitted` state.
+
+A Workflow has no Failed phase or terminal Failed status. Failure and interruption belong to the concrete Operation that encountered them. The Workflow remains in its current phase, preserves all available work and evidence, and exposes applicable Attention Requirements and recovery actions. Retrying or resuming never reopens or mutates the earlier Operation: AW creates a new immutable Operation linked to its predecessor, and a later successful Operation may supersede the failed attempt for current routing without rewriting its history. Whether that new Operation resumes an eligible agent session or starts another one is an independent execution choice governed by session policy and any valid override. Only an explicit user-controlled lifecycle decision, such as abandoning the Workflow or cleaning it up, ends further work; the exact abandonment and cleanup command semantics are specified separately.
+
+Conditions that require human input do not multiply the phase graph. AW creates an Attention Requirement only when safe continuation requires a human policy choice or manual/external action. It does not mirror every `Failed`, `Interrupted`, or temporarily unreachable Operation as another attention record: those already have Operation Status, diagnostics, and a Recovery Plan. The Initial E2E reason set is limited to `TaskChangeDecision`, `PassBudgetContinuation`, `LinearCancellationDecision`, and `RepositoryReconciliation`. Session loss, result-contract failure, review staleness, provider failure, and temporary unreachability remain represented by their existing Operation, evidence, eligibility, and Recovery Plan concepts. Another reason is added only when a concrete end-to-end scenario cannot be represented without ambiguity. Attention Requirements are current derived alerts, not records the user manually marks resolved. At each deterministic boundary and before an intended recovery action, AW revalidates all available facts, exposes every requirement that still applies, and automatically removes every current projection that no longer applies. One ordinary action may therefore clear several alerts; creation and clearance events remain in the Workflow Audit Trail. There is no `mark-resolved` command or requirement-by-requirement repair checklist. The derived Attention Required gate prevents AW from automatically starting the next gated action while any requirement currently applies, but does not retroactively fail a completed Operation or automatically interrupt a running pass. `awctl cleanup --force` remains the direct escape hatch when the user chooses to discard the Workflow instead of recovering it.
+
+AW also keeps Operation Status distinct from its last Execution Observation. Recording the intent to start a Reviewer does not prove that Herdr started it, and losing contact with Herdr does not prove that the Reviewer stopped. If the Reviewer was last confirmed running and its execution target becomes unreachable, AW preserves that timestamped fact and separately reports current reachability as unavailable. It does not change the Operation to Failed or Interrupted. The Initial E2E status set is exactly `Pending`, `Running`, `Completed`, `Failed`, and `Interrupted`. A user-requested stop such as Ctrl+C and a positively confirmed vanished execution are both `Interrupted`, with a typed interruption reason preserving the cause. AW does not add a `Canceled` Operation Status because Linear Task cancellation is a different concept. Review findings and other successful semantic outcomes belong to the Result Envelope rather than Operation Status. The model must represent uncertainty explicitly instead of manufacturing a precise lifecycle transition from missing information. The minimal Attention Requirement reason set still requires refinement, but these distinctions are architectural requirements.
 
 ## 11. Task ingestion and identity
 
 ### 11.1 Supported sources
 
-V1 accepts tasks from:
+v1 accepts tasks from:
 
 - Linear;
 - a Markdown file;
@@ -446,7 +482,13 @@ V1 accepts tasks from:
 
 Pasted and Markdown tasks are required because some work should not be tracked in Linear, including small research tasks and one-off artifact production.
 
-All sources normalize into an internal task definition. Provider-specific concepts, such as a Linear status, remain optional provider behavior rather than core workflow assumptions.
+All sources normalize into an internal task definition. Provider-specific concepts, such as a Linear status, remain optional provider behavior rather than core workflow assumptions. For a Linear-backed Task, AW automatically moves the Task to the configured In Progress state as part of successful Workflow startup; the user does not perform that transition manually. Project setup resolves and persists the concrete Linear workflow-state identifier instead of relying on an English display name during each run. AW automatically selects an unambiguous active-work state when possible and requests a one-time configuration choice only when resolution is ambiguous. Startup validates that the saved state still exists and belongs to the Task's Linear team.
+
+A read-only admission check stops without creating a Workflow or worktree when the Linear Task is already in a terminal Done or Canceled state; the user must deliberately reopen it in Linear before retrying. An existing configured In Progress status is an idempotent success and is not rewritten. AW then durably prepares the Workflow and worktree, updates Linear when required, and only afterward launches the first managed agent pass. If the Linear update fails, startup stops without launching the agent while retaining the prepared Workflow for retry. If the update succeeds but agent launch fails, AW leaves the Task In Progress and retains the Workflow for retry rather than attempting a compensating status rollback. After startup, AW observes and reports later Linear status changes but does not write or reassert status. `awctl pr` does not mark the Task Done. The existing GitHub–Linear integration owns later PR-driven transitions, including completion when its pull request is merged. AW does not use provider status as proof of workflow correctness, review validity, or submission state.
+
+If an active Linear-backed Workflow is changed to Canceled, AW does not automatically interrupt a Managed Agent Pass already running. The pass may finish so its work and Result Envelope can be preserved, but AW pauses before the next managed handoff and requires an explicit user decision. The user remains free to interrupt immediately with Ctrl+C or by exiting the agent; that follows the ordinary interruption and recovery contract rather than a special cancellation mechanism. When no pass is active, the cancellation pause applies as soon as AW observes the state. AW does not reopen the Linear Task or roll back its status.
+
+If an already-active Workflow observes that the Linear Task became Done, AW records and displays a warning but does not pause or alter routing. Done can be an automatic consequence of another linked pull request and is not reliable evidence that the user intended to stop this Workflow. This differs deliberately from Canceled. The Workflow continues against its immutable Task Snapshot, and AW still performs no corrective Linear status write.
 
 All textual task sources use one deterministic requirements-extraction rule. When a recognized `Agent instructions` section is present, that section is the authoritative agent-facing requirements content and the remaining content is retained as context and provenance. When the section is absent, the complete task content is authoritative. Markdown files and pasted text are intended primarily for quick work and therefore are expected to use the complete-content fallback in most cases; they do not require a special section.
 
@@ -468,13 +510,15 @@ Agentic Workflows must not silently replace the active snapshot when the source 
 
 The decision is recorded for that exact source revision and is not requested again at every later phase unless the source changes again. Retaining the active snapshot leaves the workflow and its evidence unchanged. Adopting a new snapshot preserves earlier snapshots and evidence for audit, invalidates conclusions that depend on the previous requirements, and routes the workflow to implementation before any further review. An Implementer and Reviewer must never unknowingly operate against different snapshots.
 
+Source changes never retroactively alter a completed or submitted Workflow, its Review Report, or its pull request. A later Whole Task or Task Slice Workflow for the same Task captures the then-current source as its own initial Task Snapshot. If a source changes while a Workflow is still active, the ordinary handoff-boundary retain/adopt/stop rule continues to apply to that Workflow.
+
 ### 11.3 Internal identity
 
-Every task, workflow, operation, pass, and evidence record receives an immutable generated identifier. Human-readable names are presentation metadata.
+Every task, workflow, operation, pass, and evidence record receives an immutable generated internal identifier. Human-readable names are presentation metadata.
 
-A Linear key such as `DEV-123` remains a useful external alias. Pasted and Markdown tasks may receive a readable slug. Workspace and branch names should combine readability with an immutable short identifier so that title changes and collisions do not change identity.
+For a Linear-backed Task, a key such as `DEV-123` is also the stable external identifier used in branch identity for v1; the mutable title is not included. Pasted and Markdown Tasks receive a random 128-bit identifier at capture because a user-supplied name alone cannot establish uniqueness without a shared registry. A branch may include a readable slug, but the generated value is its identity. AW checks candidate local and live-remote branches and regenerates before creating state if an actual collision exists. Capturing identical source text on different machines intentionally creates independent identities; AW does not use a content hash as identity.
 
-The exact identifier and naming formats remain open.
+The exact internal identifier and branch-format syntax remain open.
 
 ## 12. Workspaces and repository modes
 
@@ -486,7 +530,7 @@ Agentic Workflows records workspace ownership and workflow mappings. Herdr perfo
 
 ### 12.2 Local-only artifact workflows
 
-Non-remote artifact work is a hard V1 requirement. A research workflow may, for example, produce a PDF report that the user does not want stored on GitHub.
+Non-remote artifact work is a hard v1 requirement. A research workflow may, for example, produce a PDF report that the user does not want stored on GitHub.
 
 One consistent implementation is a managed local Git repository in an Agentic Workflows-owned workspace without a configured remote. Git supplies snapshots, identity, and change tracking even when the user does not regard the output as a software project.
 
@@ -496,9 +540,21 @@ Binary artifacts may require rendered or semantic review rather than a text diff
 
 ### 12.3 Retention and cleanup
 
-Completion, submission, merge, export, retention, and cleanup are separate operations. V1 does not automatically remove a workspace after review, submission, export, or merge.
+Completion, submission, merge, export, retention, and cleanup are separate operations. v1 does not automatically remove a workspace after review, submission, export, or merge.
 
 The user decides when to clean up. Retention permits inspection, summaries, and further discussion with an agent after formal completion.
+
+Explicit abandonment stops all automatic routing for the selected Workflow while retaining its managed worktree, sessions, Task Snapshots, evidence, reports, events, and current state. It is not failure or cleanup. An explicit resume command revalidates current external and workspace state, exposes any resulting Attention Requirements, and then allows ordinary routing to continue.
+
+Explicit cleanup is also the v1 history-retention boundary for the selected Workflow. It removes the verified managed workspace and associated AW-owned task execution state, including detailed reports, audit events, and Submission evidence; v1 does not retain a permanent tombstone solely to prevent the Task from being started again. Sibling Workflows for the same Task remain independent and are not removed by cleaning one Workflow. The dashboard therefore provides complete history for retained Workflows, not a permanent history of every project Task. A future centralized project-management mode may define longer retention and cross-machine admission rules.
+
+Ordinary cleanup may stop when current policy or an unresolved Attention Requirement makes deletion unsafe or ambiguous. `awctl cleanup --force` is instead an invocation-scoped destructive escape hatch. After resolving the exact Workflow and verifying its managed-target boundaries, AW asks Herdr for one bounded best-effort forced teardown of every process, pane, session, and worktree owned by that Workflow. Herdr may escalate from graceful interruption to forced termination of the owned process tree before removing the worktree with its required local Git bookkeeping. Open, idle, running, failed, unreachable, and uncertain execution states affect the reported outcome but never prevent the attempt.
+
+After the Herdr attempt returns or times out, AW always deletes every piece of local AW-owned state for the selected Workflow. Fully confirmed teardown returns success; any failed or unconfirmed external component returns a structured partial-cleanup result and distinct non-zero exit code with the last-known target, managed path, component outcomes, and manual-cleanup instructions. There is no Workflow retry because the state is gone. Forced Cleanup still cannot bypass immutable Workflow identity, resolved-path, or deletion-boundary verification, target an arbitrary directory, affect sibling Workflows, or become a saved default.
+
+Cleanup has no remote Git or forge effects. It never deletes a branch, rewrites history, pushes, closes or deletes a pull request, or changes Linear. AW itself does not invoke `git` as part of cleanup. AW requests session and managed-worktree teardown through Herdr, which owns the workspace and may perform the local Git worktree bookkeeping required to remove it safely. Ordinary cleanup deletes AW state only after the teardown result is durably known.
+
+If Herdr cannot complete or confirm forced teardown, a managed process or workspace may remain orphaned; AW reports that uncertainty rather than claiming success. AW retains no Workflow-specific orphan record, tombstone, cleanup receipt, audit history, or other durable state afterward. Ordinary infrastructure logging follows the general logging policy and is not a hidden Workflow-recovery registry. This implementation boundary does not permit either component to mutate project history, refs, remotes, forge state, or task state as part of cleanup.
 
 Post-completion interaction remains outside the controlled workflow until the user starts another workflow operation. If an informal follow-up changes files, those changes become unreviewed and must not be submitted silently.
 
@@ -506,10 +562,10 @@ The retained worktree is not a closed appliance. A human may edit it directly, o
 
 ## 13. Harness architecture
 
-V1 supports:
+v1 supports:
 
 - **Codex**, the primary initial harness;
-- **Pi**, required before V1 completion to prove that the design is not Codex-specific.
+- **Pi**, required before v1 completion to prove that the design is not Codex-specific.
 
 Claude Code and possibly OpenCode are expected later.
 
@@ -530,7 +586,7 @@ Implementation and review have independent configured defaults for harness, mode
 
 By contrast, choosing a different model for a role changes the workflow-level Role Model Selection. It applies to every later pass of that role until the user changes or clears it, at which point resolution falls back to the applicable configured default. Implementer and Reviewer model selections remain independent.
 
-The current preferred behavior is for a role's harness selection to persist in the same way as its model selection, but this remains provisional until usage validates it. The lifetime of mode changes also remains open. V1 must not introduce a generalized user-configurable system of arbitrary override lifetimes merely to anticipate these possibilities.
+The current preferred behavior is for a role's harness selection to persist in the same way as its model selection, but this remains provisional until usage validates it. The lifetime of mode changes also remains open. v1 must not introduce a generalized user-configurable system of arbitrary override lifetimes merely to anticipate these possibilities.
 
 The user may record or replace a Next-pass Session Override while an agent pass is active. This changes only the planned session allocation for a future role invocation; it does not modify the active pass, its Handoff, its Task Snapshot, or its workspace permissions. For example, while an Implementer is working, the user may choose whether the next Review Pass should resume the previous Reviewer or start a new Reviewer. AW resolves and revalidates that override only when it is ready to create the applicable pass and consumes it when that pass starts.
 
@@ -562,7 +618,7 @@ The automatic implementation/review loop has a configurable Managed Agent Pass B
 
 The policy also supports an explicit **Unlimited** value for deliberate unattended execution, such as using the remainder of a model-usage window overnight. Unlimited means that pass count alone does not pause the workflow; clean review, execution failure, an external usage limit, or another workflow outcome may still stop it. AW must distinguish an intentional Unlimited selection from an omitted or invalid configuration. When a finite budget is exhausted, plain `awctl continue` grants another batch using the currently configured budget, six by default. `awctl continue --max-passes N` grants a different finite batch, while `awctl continue --max-passes unlimited` disables the pass-count pause for that continuation. A possible time-based budget, provider usage-window behavior, and automatic recovery after an external limit are deferred until their real behavior and value can be examined.
 
-V1 should not allow the implementation session to perform the formal independent review. Role and session allocation must nevertheless remain separate concepts so that a later policy could permit it if evidence shows value.
+v1 should not allow the implementation session to perform the formal independent review. Role and session allocation must nevertheless remain separate concepts so that a later policy could permit it if evidence shows value.
 
 A clean Review Report is stored in AW's durable data and refers to the exact Review Target or artifact snapshot that the Reviewer assessed. A Git Review Target binds the comparison baseline content and the complete proposed Reviewed Tree. A Worktree Fingerprint helps AW construct and verify that tree when changes are uncommitted, but a commit SHA is not the identity of the reviewed content. The ordinary managed path reviews uncommitted implementation changes; a permitted recovery path may instead review content already stored in a local commit created through Unmanaged Work.
 
@@ -582,25 +638,25 @@ The Reviewer receives the available evidence and independently assesses the impl
 
 Broad Validation may contain thousands of tests and take hours. It is not run automatically or required for ordinary implementation, review, or PR creation by default. The user decides when it runs, whether manually, in CI, nightly, or at another release boundary. AW records available results without blocking development merely because the full suite has not run.
 
-In V1, linting and type checking follow the same model as tests: an Implementer or Reviewer selects relevant commands, runs them, and returns their results as Validation Evidence. They are not separate universal deterministic phases and their failure does not acquire special routing semantics merely because the command is named lint or type-check. A repository or task may still tell the agent which checks are expected.
+In v1, linting and type checking follow the same model as tests: an Implementer or Reviewer selects relevant commands, runs them, and returns their results as Validation Evidence. They are not separate universal deterministic phases and their failure does not acquire special routing semantics merely because the command is named lint or type-check. A repository or task may still tell the agent which checks are expected.
 
-AW therefore does not assume a V1 deterministic test runner, affected-test selector, universal linter, or mandatory post-review validation gate. A later milestone may add a narrow deterministic validation-pipeline extension point that runs project-configured commands after the final Review Pass, for example a JavaScript project's lint or type-check command. That future capability should be driven by concrete workflows; its configuration, failure routing, and effect on review freshness remain undecided. It does not justify building a general plugin system in V1.
+AW therefore does not assume a v1 deterministic test runner, affected-test selector, universal linter, or mandatory post-review validation gate. A later milestone may add a narrow deterministic validation-pipeline extension point that runs project-configured commands after the final Review Pass, for example a JavaScript project's lint or type-check command. That future capability should be driven by concrete workflows; its configuration, failure routing, and effect on review freshness remain undecided. It does not justify building a general plugin system in v1.
 
 ### 14.2 Managed passes and unmanaged work
 
 AW distinguishes a Managed Agent Pass from Unmanaged Work in the retained workspace. A Managed Agent Pass is started by AW and therefore has a recorded Handoff, role, session, lifecycle, and result. Work performed directly by a human or by an independently opened agent is outside that managed history, even when it occurs in the same worktree.
 
-Every Managed Agent Pass and deterministic AW action contributes to a durable Workflow Audit Trail. AW records the captured inputs, identity and configuration of the execution, lifecycle events, detailed structured pass report, validation evidence, resource and token usage when available, state transitions, warnings, decisions, overrides, and relevant workspace fingerprints. Historical entries are append-only at the domain level: later recovery or correction may supersede an earlier conclusion but must not rewrite the earlier record. AW does not retain every agent message, reasoning trace, terminal interaction, or tool call merely because it occurred. Report retention and secret redaction still require explicit design.
+Every Managed Agent Pass and deterministic AW action contributes to a durable Workflow Audit Trail for the lifetime of the retained Workflow. AW records the captured inputs, identity and configuration of the execution, lifecycle events, detailed structured pass report, validation evidence, resource and token usage when available, state transitions, warnings, decisions, overrides, and relevant workspace fingerprints. Historical entries are append-only at the domain level while retained: later recovery or correction may supersede an earlier conclusion but must not rewrite the earlier record. Explicit cleanup may remove the selected Workflow and its complete audit trail. AW does not retain every agent message, reasoning trace, terminal interaction, or tool call merely because it occurred. Secret redaction and any future longer-term retention still require explicit design.
 
 Each Managed Agent Pass ends by writing exactly one UTF-8 JSON Result Envelope to an AW-authorized result location outside the managed worktree. The envelope contains a correlation identity, a constrained outcome, typed evidence, and one or more human-readable narrative fields that may be detailed and use Markdown. Deterministic workflow code validates the envelope before routing; malformed, missing, ambiguously correlated, or internally inconsistent output cannot be treated as successful merely because the agent says it succeeded. When Herdr positively confirms normal turn completion but the required envelope is missing or invalid, the Operation is Failed with a specific result-contract diagnostic rather than Interrupted. The worktree, session, and available evidence remain preserved for supported retry or recovery. After validation, the complete envelope is stored durably in SQLite as immutable pass evidence. The delivery file is no longer authoritative and may be removed after successful ingestion.
 
 This preserves a useful prototype behavior. The prototype writes `result.json` outside the checkout and strictly parses implementation fields such as `pass_id`, `state`, `summary`, `checks`, and `resolutions`, while review uses `pass_id`, `state`, `summary`, `findings`, and `checks`. The successor uses one versioned universal Result Envelope schema. A role discriminator selects a role-specific payload whose required fields and invariants remain strict; the schema must not degrade into one flat object containing many unrelated optional fields. The exact fields remain to be specified.
 
-The managed/unmanaged boundary is informational rather than restrictive in V1. AW must not prevent a human or external agent from inspecting files, changing files, or using Git in the worktree. At the next deterministic checkpoint, AW reconciles the observable file and Git state, invalidates evidence that no longer matches, and labels the change as externally observed rather than attributing it to a managed pass. The dashboard shows this provenance gap and its consequences, but cannot reconstruct or display the external attempt itself.
+The managed/unmanaged boundary is informational rather than restrictive in v1. AW must not prevent a human or external agent from inspecting files, changing files, or using Git in the worktree. At the next deterministic checkpoint, AW reconciles the observable file and Git state, invalidates evidence that no longer matches, and labels the change as externally observed rather than attributing it to a managed pass. The dashboard shows this provenance gap and its consequences, but cannot reconstruct or display the external attempt itself.
 
 The normal managed route remains the recommended route because it produces complete provenance. After Unmanaged Work changes content, the human may request a fresh independent review or use a Force Override when deliberately submitting without clean review. A fresh Review Pass may assess a Reviewed Tree already stored in a local commit. If Unmanaged Work only commits an already reviewed tree without altering it, AW may preserve the clean content review while recording that commit creation itself was unmanaged.
 
-The initial audience is experienced programmers who value flexible intervention. A later organization-specific policy may require work to stay inside managed workflows, but that is a separate governance capability rather than a reason to constrain the personal and small-team V1 workflow.
+The initial audience is experienced programmers who value flexible intervention. A later organization-specific policy may require work to stay inside managed workflows, but that is a separate governance capability rather than a reason to constrain the personal and small-team v1 workflow.
 
 ## 15. Concurrency
 
@@ -614,7 +670,7 @@ Agentic Workflows must support:
 - simultaneous implementation, review, and validation across workflows;
 - operations executing on different Herdr machines.
 
-V1 imposes no configurable resource limit. The user decides how much work their hardware should run. Herdr supplies execution-level concurrency; Agentic Workflows applies only narrow correctness constraints.
+v1 imposes no configurable resource limit. The user decides how much work their hardware should run. Herdr supplies execution-level concurrency; Agentic Workflows applies only narrow correctness constraints.
 
 Correctness locks should include:
 
@@ -623,11 +679,11 @@ Correctness locks should include:
 - an exclusive workspace mutation lock for the complete verify, commit, push, and pull-request sequence;
 - no repository-wide lock during ordinary isolated worktree activity;
 - serialization only where operations affect the same Git references or other shared mutable state;
-- isolation so one workflow failure does not stop unrelated workflows.
+- isolation so an Operation failure in one Workflow does not stop unrelated Workflows.
 
 An active managed pass does not prohibit all commands. Read-only inspection and commands that record future workflow intent, including a Next-pass Session Override or Role Model Selection, may run concurrently. Commands that would mutate the active pass or its worktree remain subject to the workspace lock; interruption is an explicit control operation rather than an implicit side effect of another command.
 
-The dashboard may display CPU, memory, and process information where available, but V1 does not throttle or terminate work based on resource consumption.
+The dashboard may display CPU, memory, and process information where available, but v1 does not throttle or terminate work based on resource consumption.
 
 ## 16. Commit, push, pull request, force, merge, and export
 
@@ -639,31 +695,37 @@ AW separates publication into three internal deterministic actions:
 
 - commit establishes the exact authorized Git commit: normally it creates one ordinary commit from reviewed uncommitted changes, but it may adopt an already committed, clean-reviewed local `HEAD` without creating another commit;
 - push publishes the exact expected branch revision after checking the remote state;
-- forge submission creates or updates the configured forge's change request. V1 implements this action for GitHub pull requests only; a later GitLab adapter may implement merge requests through the same narrow boundary.
+- forge submission creates or updates the configured forge's change request. v1 implements this action for GitHub pull requests only; a later GitLab adapter may implement merge requests through the same narrow boundary.
 
-V1 exposes these actions through one public convenience command, `awctl pr`, preserving the proven prototype surface. If a correlated action is already complete, the wrapper verifies and reuses it rather than repeating it. The command is named for its result rather than its internal steps.
+v1 exposes these actions through one public convenience command, `awctl pr`, preserving the proven prototype surface. If a correlated action is already complete, the wrapper verifies and reuses it rather than repeating it. Recovering or continuing a partially completed submission means running `awctl pr` again; PR submission has no separate public retry or resume command. The command is named for its result rather than its internal steps.
 
 Before the first mutating action, `awctl pr` performs one deterministic preflight. Normal preflight requires a current clean Review Report, materializes the current proposed tree and verifies that it equals the Reviewed Tree, verifies repository, ancestry, branch, base, remote, and forge target safety, and freezes a durable PR Intent for the exact action chain. When clean `HEAD` already contains the Reviewed Tree, the intent may adopt that commit and the commit action becomes an already-satisfied verified step. No commit, push, or forge write begins until the intent is stored.
+
+For a Linear-backed submission, preflight requires exactly one Primary Publication Category among `Feature`, `Bug`, `Chore`, `Docs`, and `Refactor`, mapped respectively to `feat`, `fix`, `chore`, `docs`, and `refactor`. `Research` is an orthogonal modifier and unrelated labels remain unrelated: a Task may carry both `Feature` and `Research`, but only `Feature` selects `feat`. Missing or multiple primary categories stop submission before a commit or forge write. AW must not replace the Task's full label set merely to establish this classification; task-authoring tooling may reconcile its controlled labels while preserving unrelated labels.
+
+The successful Reviewer supplies Reviewed Publication Metadata derived from the actual reviewed result rather than copying the mutable Linear title: a concise public-safe action summary, description, and validation statement. The summary is a single lower-case action phrase without a type prefix, Task suffix, or sentence-ending punctuation, and its identifier-aware limit reserves enough space for the complete subject to remain within 72 characters. Description and validation text are each limited to 2,000 characters, contain no headings, and exclude private Task instructions, credentials, local paths, and conversation content. Missing, invalid, or stale metadata cannot fall back to the Task title and cannot authorize ordinary submission.
+
+AW deterministically creates both the commit subject and pull-request title as `<type>: <reviewed action summary> (<TASK-ID>)`. The full AW-created commit message adds a blank line followed by `Task-Review: <pass-id>`. The pull-request body contains `Summary`, `Tracking`, and `Validation` sections: the reviewed description; the canonical linked Linear identifier plus the already-selected `Fixes TASK-ID` closing reference; and the reviewed validation statement plus an explicit statement that independent review accepted the exact change. These resolved strings are frozen in the PR Intent and reused by retry rather than regenerated from later mutable Task data. The metadata source for a Force Override with no clean Reviewer result remains part of the later forced-submission contract; v1 must not silently use the Linear title as that fallback.
 
 Review validity and Git publication safety are separate judgments. A changed commit SHA does not by itself invalidate a content review, but AW still uses exact Git object identities after preflight to pin the authorized action chain, detect races, prove ancestry, compare remote refs, and prevent accidental overwrite. Unsafe or ambiguous ancestry can therefore stop submission without claiming that the file review became stale.
 
 The architectural requirement is this separation, not a prematurely fixed ancestry algorithm. Exact accepted history shapes, including merge commits and rebased external commits, remain an implementation-design question and should be settled from concrete recovery scenarios without enlarging the ordinary workflow.
 
-A Force Override bypasses only the requirement for current clean-review evidence. Forced preflight still captures and freezes the exact current worktree content and performs every target, revision, concurrency, and destructive-scope check. Retry resumes only the action chain authorized by the frozen PR Intent; it does not silently adopt later content.
+A Force Override bypasses only the requirement for current clean-review evidence. Forced preflight still captures and freezes the exact current worktree content and performs every target, revision, concurrency, and destructive-scope check. A later `awctl pr` invocation continues only the action chain authorized by the frozen PR Intent; it does not silently adopt later content.
 
-The internal action boundaries remain explicit so later versions can expose separate `awctl commit` or `awctl push` commands if real usage demonstrates that the additional flexibility is worth the larger public surface. V1 does not implement those speculative commands.
+The internal action boundaries remain explicit so later versions can expose separate `awctl commit` or `awctl push` commands if real usage demonstrates that the additional flexibility is worth the larger public surface. v1 does not implement those speculative commands.
 
-The wrapper and its internal actions are durably resumable and idempotent. AW records the exact intended repository, branch, reviewed tree, commit, remote target, and pull- or merge-request identity as those values become known. After interruption or uncertain provider output, retry first reconciles actual local Git and forge state because a side effect may have succeeded immediately before AW lost the response or persisted its checkpoint.
+The wrapper and its internal actions are durably resumable and idempotent. AW records the exact intended repository, branch, reviewed tree, commit, remote target, and pull- or merge-request identity as those values become known. After interruption or uncertain provider output, the next `awctl pr` invocation first reconciles actual local Git and forge state because a side effect may have succeeded immediately before AW lost the response or persisted its checkpoint.
 
-When the exact commit bound to the PR Intent already exists, whether AW created it or adopted it after clean review, retry reuses it rather than rolling it back or creating another commit. When the exact commit is already pushed, retry continues with pull-request creation; when the intended pull request already exists, retry adopts that verified result rather than creating a duplicate. AW advances only from effects it can correlate to the same PR Intent and target. Ambiguous or conflicting state produces a Recovery Plan instead of a guessed continuation.
+When the exact commit bound to the PR Intent already exists, whether AW created it or adopted it after clean review, the next `awctl pr` invocation reuses it rather than rolling it back or creating another commit. When the exact commit is already pushed, that invocation continues with pull-request creation; when the intended pull request already exists, it adopts that verified result rather than creating a duplicate. AW advances only from effects it can correlate to the same PR Intent and target. Ambiguous or conflicting state produces a Recovery Plan instead of a guessed continuation.
 
 If the remote branch no longer points to the expected revision, AW stops only the unsafe submission operation and does not overwrite, reset, force-push, or automatically pull, merge, or rebase the branch. It reports the expected and observed revisions and tells the user that the remote changes must be fetched and reconciled manually before PR creation can continue. The retained worktree and other safe commands remain available. After resolving the Git divergence outside AW, the user reruns `awctl pr`; the command revalidates the actual state and resumes the correlated action chain when safe. There is no separate mark-resolved command, recovery comment, or manual workflow-state repair. `--force` is a Force Override of review policy only; it never authorizes a Git force-push or bypasses remote-revision checks.
 
-PR creation is manual in V1. A clean review moves the workflow into a ready state but does not create a pull request automatically.
+PR creation is manual in v1. A clean review moves the workflow into a ready state but does not create a pull request automatically.
 
 Normal submission requires the current materialized file tree to match the clean Reviewed Tree exactly. Content or mode changes make the review stale. A pure staging change or a commit that preserves the same tree does not, although Git ancestry and target checks may independently stop submission.
 
-Optional PR-on-clean behavior may invoke the same deterministic operation later but is not required in V1.
+Optional PR-on-clean behavior may invoke the same deterministic operation later but is not required in v1.
 
 Creating a pull or merge request does not end the usefulness of the retained worktree or branch. The human may start another implementation/review cycle there when something was missed. A later `awctl pr` run performs the same internal actions, adding another ordinary commit to the same remote branch and updating the existing request. The earlier rule that multiple implementation and review passes yield one commit applies to each submitted batch of uncommitted changes, not to the entire lifetime of the request.
 
@@ -699,7 +761,7 @@ In particular, `--force` never adds Git force-push behavior. Remote branch diver
 
 ### 16.5 Merge and export
 
-Merge is a separate policy boundary and remains a human action in V1. Creating a PR does not imply merge, and neither implies deployment. AW may add a merge operation later.
+Merge is a separate policy boundary and remains a human action in v1. Creating a PR does not imply merge, and neither implies deployment. AW may add a merge operation later.
 
 Local-only artifact workflows use export rather than submission. Detailed export and artifact-review semantics remain open.
 
@@ -713,17 +775,17 @@ Local-only artifact workflows use export rather than submission. Detailed export
 
 ### 17.2 Source control and forges
 
-- Git is the V1 local version-control mechanism.
+- Git is the v1 local version-control mechanism.
 - GitHub is the initial forge.
 - GitLab and merge-request terminology should be supported through a forge boundary later.
 - Local Git operations and forge API operations remain separate responsibilities.
 
-Supporting an entirely different local version-control system is not a V1 requirement, but unnecessary GitHub assumptions must not enter the core workflow.
+Supporting an entirely different local version-control system is not a v1 requirement, but unnecessary GitHub assumptions must not enter the core workflow.
 
 ### 17.3 Harnesses
 
-- Codex is used in the initial E2E slice.
-- Codex and Pi are required for V1.
+- Codex is used in the Initial E2E Milestone.
+- Codex and Pi are required for v1.
 - Claude Code and possibly OpenCode are later candidates.
 - Harness and model selection belong to workflow configuration above Herdr-specific invocation details.
 
@@ -731,12 +793,12 @@ Supporting an entirely different local version-control system is not a V1 requir
 
 The dashboard is a core product capability, not an optional administration screen.
 
-### 18.1 V1 reporting
+### 18.1 v1 reporting
 
-V1 provides sophisticated, detailed, read-only oversight of the system. The dashboard is a projection of the same durable Workflow Audit Trail and current state used by `awctl`; it is not a separate best-effort activity feed. Its primary view is concise and operational rather than a wall of agent prose. A user should be able to understand the workflow's important checkpoints and whether attention is required, while opening the detailed report when needed. It should show:
+v1 provides sophisticated, detailed, read-only oversight of the system. The dashboard is a projection of the same durable Workflow Audit Trail and current state used by `awctl`; it is not a separate best-effort activity feed. Its primary view is concise and operational rather than a wall of agent prose. A user should be able to understand the workflow's important checkpoints and whether attention is required, while opening the detailed report when needed. It should show:
 
 - workflows and their states;
-- active, interrupted, ready, retained, submitted, exported, and completed work;
+- active work, Workflows with interrupted Operations, and ready, retained, submitted, exported, or completed Workflows;
 - execution machine, workspace, operation, pass, role, and session relationships;
 - implementation, review, and handoff counts;
 - the latest and final review verdict, including whether review passed or returned findings;
@@ -761,19 +823,19 @@ Copy actions are always available. The user may copy one step's structured repor
 
 The control-plane API exposes this ordered history as a query projection with stable workflow-local ordering; the frontend does not reconstruct it from transient notifications. Any live-update channel merely tells the frontend that durable state changed, after which the frontend reads the authoritative current state and timeline from the API.
 
-The V1 dashboard frontend uses React with TypeScript. In production, ASP.NET Core serves the compiled frontend assets and the control-plane HTTP API from one deployable service. React remains an API client even though it is co-hosted with the API; it does not call application services in-process or access SQLite directly. A separate frontend development server may be used during development without changing the production topology.
+The v1 dashboard frontend uses React with TypeScript. In production, ASP.NET Core serves the compiled frontend assets and the control-plane HTTP API from one deployable service. React remains an API client even though it is co-hosted with the API; it does not call application services in-process or access SQLite directly. A separate frontend development server may be used during development without changing the production topology.
 
 Detailed dashboard appearance and interaction design are intentionally deferred during core-system architecture refinement. After the core architecture is settled and before production implementation begins, AW will have a short, focused UI/UX design phase. That phase defines the dashboard information hierarchy and interactions without reopening the control-plane, API, persistence, or workflow-ownership boundaries unnecessarily.
 
-### 18.2 V2 control
+### 18.2 v2 control
 
-V2 is expected to control workflows through the dashboard, including implementation, review, retry, resume, agent instructions, next-pass harness or model selection, interruption, submission, drafts, and deliberate force operations.
+v2 is expected to control workflows through the dashboard, including implementation, review, retry, resume, agent instructions, next-pass harness or model selection, interruption, submission, drafts, and deliberate force operations.
 
 Dashboard controls call the same durable application commands as `awctl` through the control-plane API. Dashboard reporting uses control-plane queries over the authoritative database rather than direct SQL access. The dashboard never controls Herdr directly and never implements a second workflow engine.
 
 ### 18.3 External Orchestrators
 
-An External Orchestrator such as ChatGPT remains useful in V1. A user may copy an Agentic Workflows report into an external conversation to discuss whether an implementation is correct and decide what to do next.
+An External Orchestrator such as ChatGPT remains useful in v1. A user may copy an Agentic Workflows report into an external conversation to discuss whether an implementation is correct and decide what to do next.
 
 AW composes a detailed, portable Workflow Report from the Task Snapshots, structured pass reports, deterministic events, and current state. The Workflow Report is optimized for copying into an external agent or chat, so it may be long. It is not a raw transcript and does not claim to include every tool call or hidden reasoning step. It should include:
 
@@ -792,7 +854,7 @@ AW composes a detailed, portable Workflow Report from the Task Snapshots, struct
 
 The dashboard exposes copy actions for individual steps, selected combinations, and the complete composed Workflow Report at any time, making transfer to the External Orchestrator a first-class capability rather than requiring manual assembly.
 
-V1 does not embed the complete code diff in the Workflow Report. The report must remain useful without consuming external-orchestrator context on potentially large patches. It does include a compact changed-file list derived deterministically from the exact Review Target rather than copied from an agent claim. Optional diff export or attachment may be reconsidered after V1 usage provides evidence for it; V1 does not design that mechanism in advance.
+v1 does not embed the complete code diff in the Workflow Report. The report must remain useful without consuming external-orchestrator context on potentially large patches. It does include a compact changed-file list derived deterministically from the exact Review Target rather than copied from an agent claim. Optional diff export or attachment may be reconsidered after v1 usage provides evidence for it; v1 does not design that mechanism in advance.
 
 ## 19. Diagnostics
 
@@ -828,9 +890,9 @@ Easy human recovery is a core invariant even when the framework stops conservati
 
 `awctl status` and the dashboard render the same Recovery Plan until the blocker is resolved. Displaying it never mutates workflow state, and executing an action revalidates its preconditions rather than trusting a stale plan.
 
-Recovery uses a small set of ordinary workflow commands instead of bespoke repair procedures for every error. AW does not prevent a human or external agent from opening or changing a retained worktree. Such changes invalidate dependent evidence and block unsafe automatic continuation, but they do not lock the user out, trigger an automatic rollback, or require hidden state repair.
+Recovery uses a small set of ordinary workflow commands instead of bespoke repair procedures for every error. v1 has no generic `awctl retry` command. To repeat an idempotent deterministic action, the user reruns the command that expresses the intended outcome, and AW reconciles the prior Operation before continuing. `awctl resume` is reserved for continuing an Abandoned Workflow or an interrupted Managed Agent Pass from preserved work. The explicit command revalidates retained state and immediately starts the single unambiguous safe next action when one exists. If an Attention Requirement remains or materially different continuations require a user choice, it stops with the applicable Recovery Plan instead of guessing or requiring hidden state repair. A later generic retry command may be considered only if observed usage shows that rerunning the original commands is inadequate. AW does not prevent a human or external agent from opening or changing a retained worktree. Such changes invalidate dependent evidence and block unsafe automatic continuation, but they do not lock the user out, trigger an automatic rollback, or require hidden state repair.
 
-A recovery action never rewrites historical state or evidence to make a blocker appear not to have happened. A successful ordinary action, such as another Implementation Pass followed by a fresh Review Pass, records a newer valid checkpoint that supersedes the blocker for future decisions while retaining the blocker and the evidence it invalidated in audit history. The resulting workflow state is current and internally consistent; the earlier record is not "fixed."
+A recovery action never rewrites historical state or evidence to make a blocker appear not to have happened. Every retry or resume creates a new immutable Operation linked to the earlier Operation it follows; it never changes that predecessor's status, inputs, result, or evidence. A successful ordinary action, such as another Implementation Pass followed by a fresh Review Pass, records a newer valid checkpoint that supersedes the blocker for future decisions while retaining the blocker and the evidence it invalidated in audit history. Reusing an eligible agent session is independent of this Operation identity. The resulting workflow state is current and internally consistent; the earlier record is not "fixed."
 
 Durable records include at least:
 
@@ -846,7 +908,7 @@ Durable records include at least:
 - captured result, available raw-output, and evidence references;
 - available token, timing, and resource measurements and their attribution.
 
-Internal actions with external side effects, including commit, push, and pull- or merge-request creation, reconcile actual state before retrying. A stored checkpoint is not sufficient proof that the next side effect is safe, because the process may have stopped between an external success and the checkpoint write. Retrying `awctl pr` must continue the same correlated action chain rather than replaying it as a new one.
+Internal actions with external side effects, including commit, push, and pull- or merge-request creation, reconcile actual state before another attempt. A stored checkpoint is not sufficient proof that the next side effect is safe, because the process may have stopped between an external success and the checkpoint write. Running `awctl pr` again creates a new immutable Operation linked to the earlier attempt while continuing the same frozen PR Intent and correlated action chain rather than replaying it as unrelated work.
 
 On startup or reconnection:
 
@@ -857,11 +919,11 @@ On startup or reconnection:
 5. Agentic Workflows never silently starts a replacement agent after restart.
 6. The user resumes explicitly, reusing the harness session when supported.
 
-A remote Herdr session may continue while the Agentic Workflows control plane is disconnected. Agentic Workflows retains the last confirmed Execution Observation, marks current reachability unavailable, and reconciles when communication returns. Unreachability alone never changes an Operation to Failed or Interrupted. Interrupted requires positive evidence that the original execution disappeared without a valid result, and remains distinct from Failed because an interrupted workspace may contain valid work.
+A remote Herdr session may continue while the Agentic Workflows control plane is disconnected. Agentic Workflows retains the last confirmed Execution Observation, marks current reachability unavailable, and reconciles when communication returns. Unreachability alone never changes an Operation to Failed or Interrupted. While the last verified observation says a Managed Agent Pass may still be active, AW refuses to start or resume another managed pass in that Workflow because concurrent agents could edit the same worktree. Read-only inspection remains available. The user may restore Herdr connectivity and await reconciliation or invoke `awctl cleanup --force`; if Forced Cleanup cannot confirm external teardown, AW deletes its own Workflow state as specified and returns the last-known target, managed path, and manual-cleanup instructions for handling any orphaned Herdr resources directly. Interrupted requires positive evidence that the original execution disappeared without a valid result, and remains distinct from Failed because an interrupted workspace may contain valid work.
 
 ## 21. Operating-system strategy
 
-V1 is officially supported on Linux. Windows and macOS remain important future targets because many developers use them and Herdr supports them.
+v1 is officially supported on Linux. Windows and macOS remain important future targets because many developers use them and Herdr supports them.
 
 To preserve that path:
 
@@ -879,22 +941,22 @@ The new product will be implemented in **C#/.NET**. C# is selected because it is
 
 The expected shape is:
 
-- one long-running ASP.NET Core application/service hosting the V1 control plane;
+- one long-running ASP.NET Core application/service hosting the v1 control plane;
 - an HTTP application API used by `awctl` and the dashboard;
 - a React and TypeScript dashboard compiled to static assets and served by the ASP.NET Core host in production;
 - durable local workflow storage;
 - a replaceable Herdr infrastructure adapter;
 - self-contained packaging for supported operating systems.
 
-On Linux, V1 is installed as a non-root `systemd` user service under the same Unix account that owns the Herdr sessions, Git credentials, and AW-managed workspaces. It starts automatically and is supervised across process failures and machine restarts. The service owns the control-plane lifecycle, SQLite connection, API and dashboard host, durable pending-operation dispatcher, and restart reconciliation. An interactive terminal or active `awctl` process is not required for a managed agent pass to remain tracked. A dedicated organizational service account is deferred to the V3 deployment model rather than imposed on the single-operator V1 installation.
+On Linux, v1 is installed as a non-root `systemd` user service under the same Unix account that owns the Herdr sessions, Git credentials, and AW-managed workspaces. It starts automatically and is supervised across process failures and machine restarts. The service owns the control-plane lifecycle, SQLite connection, API and dashboard host, durable pending-operation dispatcher, and restart reconciliation. An interactive terminal or active `awctl` process is not required for a managed agent pass to remain tracked. A dedicated organizational service account is deferred to the v3 deployment model rather than imposed on the single-operator v1 installation.
 
 Ordinary `awctl` commands never silently start the control-plane service. When the configured endpoint is unreachable, `awctl` reports that endpoint, the relevant local service status when available, and an exact explicit recovery command. Service lifecycle actions such as start, stop, restart, and status remain deliberate commands; a failed workflow command is not treated as permission to spawn a hidden background process.
 
-`awctl` uses one explicitly configured logical control-plane endpoint and performs no automatic network or service discovery. The default endpoint is loopback for the local V1 installation; an operator may configure the private Tailscale-style address of a remote central installation. Endpoint precedence is `--server <url>`, then the `AW_SERVER` environment variable, then saved user configuration, then the loopback default. The command-line option is invocation-scoped and never modifies saved configuration. An invalid value at a higher-precedence layer produces a clear configuration error rather than silently falling back. A later deployment with coordinated service replicas can preserve this client contract by placing them behind one stable endpoint, so hypothetical distribution does not justify V1 discovery machinery.
+`awctl` uses one explicitly configured logical control-plane endpoint and performs no automatic network or service discovery. The default endpoint is loopback for the local v1 installation; an operator may configure the private Tailscale-style address of a remote central installation. Endpoint precedence is `--server <url>`, then the `AW_SERVER` environment variable, then saved user configuration, then the loopback default. The command-line option is invocation-scoped and never modifies saved configuration. An invalid value at a higher-precedence layer produces a clear configuration error rather than silently falling back. A later deployment with coordinated service replicas can preserve this client contract by placing them behind one stable endpoint, so hypothetical distribution does not justify v1 discovery machinery.
 
 The HTTP API is part of the control plane, not a separate source of workflow truth. Its application commands and queries are the supported access boundary for the dashboard and `awctl`; SQLite remains an internal persistence detail.
 
-One AW installation uses one transactional database for all registered projects and repositories. All authoritative AW-owned workflow data lives there: project and repository registrations, workflow and worktree identities, task snapshots, handoffs, result envelopes, reports, events, state transitions, evidence, measurements, decisions, warnings, recovery plans, and submission records. This central scope enables one dashboard to query and aggregate workflow state and token usage across the entire installation. A temporary `result.json` may remain the delivery boundary between an agent process and AW, but after validation and ingestion it is transport rather than a second durable source of truth. V1 should not reproduce the prototype's ambiguity about whether current workflow truth lives in the database or durable sidecar files.
+One AW installation uses one transactional database for all registered projects and repositories. All authoritative AW-owned workflow data lives there: project and repository registrations, workflow and worktree identities, task snapshots, handoffs, result envelopes, reports, events, state transitions, evidence, measurements, decisions, warnings, recovery plans, and submission records. This central scope enables one dashboard to query and aggregate workflow state and token usage across the entire installation. A temporary `result.json` may remain the delivery boundary between an agent process and AW, but after validation and ingestion it is transport rather than a second durable source of truth. v1 should not reproduce the prototype's ambiguity about whether current workflow truth lives in the database or durable sidecar files.
 
 SQLite stores both explicit current state and an append-only Workflow Audit Trail. A successful application command updates the affected current-state records and appends the corresponding historical events in one database transaction. Current state is queried directly; AW does not require replaying the complete event history to discover that a workflow is, for example, awaiting review. The events explain how that state was reached and support reporting and audit. This is deliberately not full event sourcing.
 
@@ -902,11 +964,11 @@ For an agent-pass completion, that transaction includes the complete validated J
 
 “All workflow data” does not mean storing the Git repository, worktree contents, Herdr sessions, or produced binary artifacts as database blobs. Those systems retain their own authoritative state; AW stores their identities, fingerprints, metadata, and evidence references and reconciles them at deterministic boundaries.
 
-.NET 10 LTS is the current target candidate. React with TypeScript is the V1 dashboard stack. V1 uses SQLite for authoritative workflow storage because one AW service process owns the single logical control plane. SQLite preserves local-first, zero-service operation while providing transactional durable state. Multi-machine agent execution through Herdr does not change this storage requirement.
+.NET 10 LTS is the current target candidate. React with TypeScript is the v1 dashboard stack. v1 uses SQLite for authoritative workflow storage because one AW service process owns the single logical control plane. SQLite preserves local-first, zero-service operation while providing transactional durable state. Multi-machine agent execution through Herdr does not change this storage requirement.
 
-PostgreSQL is not a V1 requirement and AW will not implement or test two database providers speculatively. It may be reconsidered if a later company deployment needs multiple concurrently writing AW service replicas, high availability, zero-downtime control-plane deployment, or another requirement SQLite cannot meet. Even then, every replica would use the same central database and implement one logical authoritative control plane rather than become an independent workflow authority. Provider-specific concepts must not leak into the domain model or Workflow Audit Trail semantics, but V1 should not build a generalized persistence-provider framework merely to anticipate that migration.
+PostgreSQL is not a v1 requirement and AW will not implement or test two database providers speculatively. It may be reconsidered if a later company deployment needs multiple concurrently writing AW service replicas, high availability, zero-downtime control-plane deployment, or another requirement SQLite cannot meet. Even then, every replica would use the same central database and implement one logical authoritative control plane rather than become an independent workflow authority. Provider-specific concepts must not leak into the domain model or Workflow Audit Trail semantics, but v1 should not build a generalized persistence-provider framework merely to anticipate that migration.
 
-Native AOT is not a V1 requirement. It can be evaluated later if startup time or distribution size justifies its constraints.
+Native AOT is not a v1 requirement. It can be evaluated later if startup time or distribution size justifies its constraints.
 
 Herdr is implemented in Rust, but Agentic Workflows does not need to share its implementation language because the integration boundary is process/API based.
 
@@ -914,11 +976,11 @@ Herdr is implemented in Rust, but Agentic Workflows does not need to share its i
 
 Detailed threat modeling remains future work, but the following boundaries are already required:
 
-- V1 is a single-trusted-operator system with no application-managed users, login, authentication, authorization, or RBAC;
-- the V1 dashboard and API rely on a trusted network perimeter, such as loopback access or a private Tailscale-style overlay network, and must not be treated as safe for direct public exposure;
+- v1 is a single-trusted-operator system with no application-managed users, login, authentication, authorization, or RBAC;
+- the v1 dashboard and API rely on a trusted network perimeter, such as loopback access or a private Tailscale-style overlay network, and must not be treated as safe for direct public exposure;
 - the control-plane HTTP listener binds to loopback by default; listening on a private-network interface requires explicit configuration and a service restart but does not require a database migration;
-- V1 audit records distinguish command and automation origin where useful, such as CLI, dashboard, reconciliation, or system, but do not pretend to identify a human user;
-- named actors and permissions are deferred to the V3 organizational direction and may be introduced through database migrations and API middleware without changing workflow-domain identity or historical pass data;
+- v1 audit records distinguish command and automation origin where useful, such as CLI, dashboard, reconciliation, or system, but do not pretend to identify a human user;
+- named actors and permissions are deferred to the v3 organizational direction and may be introduced through database migrations and API middleware without changing workflow-domain identity or historical pass data;
 - task text, provider data, agent output, and repository contents are untrusted input;
 - credentials never enter prompts, copied reports, or ordinary diagnostics;
 - Herdr commands use structured arguments rather than shell interpolation;
@@ -934,10 +996,10 @@ Detailed threat modeling remains future work, but the following boundaries are a
 
 The next architecture discussion should challenge and decide these matters one at a time:
 
-1. The exact domain model, aggregate boundaries, and state names.
+1. The remaining domain aggregate boundaries and state names. Workflow scope is already settled as the value `WholeTask` or `NamedSlice(name)`, not a separate Task Slice aggregate.
 2. The SQLite schema, event ordering, migration, backup, corruption-recovery, and retention strategy.
 3. The saved endpoint-configuration format and its validation. Endpoint precedence is already fixed as `--server`, `AW_SERVER`, saved user configuration, then loopback default.
-4. Operational guidance for explicit private-network exposure beyond the already selected loopback default, without V1 application authentication.
+4. Operational guidance for explicit private-network exposure beyond the already selected loopback default, without v1 application authentication.
 5. The exact `IHerdrGateway` contract and the first set of supported Herdr commands.
 6. Herdr version and capability negotiation.
 7. The exact fields, validation rules, and version-evolution policy of the already selected universal JSON Result Envelope.
@@ -950,7 +1012,7 @@ The next architecture discussion should challenge and decide these matters one a
 14. GitHub submission behavior, including updating an existing pull request and the minimum safe ancestry rules for adopting an existing local commit.
 15. Provider contracts for later Jira and GitLab support.
 16. Dashboard information architecture and interaction design. React with TypeScript, served by the ASP.NET Core control plane in production, is already selected.
-17. The minimum V1 resource and token-usage telemetry, including attribution boundaries and behavior when a harness cannot report exact usage.
+17. The minimum v1 resource and token-usage telemetry, including attribution boundaries and behavior when a harness cannot report exact usage.
 18. Logging, event retention, audit history, and secret-redaction rules.
 19. Configuration precedence across system, project, task, and command-line settings.
 20. Cancellation, abandonment, retry, resume, and forced-cleanup semantics.
@@ -967,7 +1029,7 @@ Agentic Workflows is one evolving C#/.NET product in the `agentic-workflows` rep
 
 One authoritative local-first control plane owns workflow meaning, durable state, policy, evidence, reporting, and commands. Herdr owns local and remote execution, sessions, panes, worktrees, harness processes, and execution concurrency. Agentic Workflows has no worker process and no RabbitMQ. Multi-machine execution is available through Herdr without creating a distributed Agentic Workflows control plane.
 
-The first implementation is a narrow, production-shaped E2E slice: captured task definition, Codex implementation through Herdr, exact proposed-tree capture, fresh independent review, submission-readiness calculation, and a minimal read-only dashboard. V1 expands that foundation to Codex and Pi, all required task sources, Git and local-artifact workflows, detailed reporting, concurrency, manual submission, and safe recovery. V2 is expected to add dashboard control through the same application commands used by `awctl`.
+The first implementation is a narrow, production-shaped Initial E2E Milestone: captured Linear Task, Codex implementation through Herdr, exact proposed-tree capture, fresh independent review, deterministic `awctl pr` commit, push, and GitHub pull-request creation, and a minimal read-only dashboard. v1 expands that foundation to Codex and Pi, all required task sources, Git and local-artifact workflows, detailed reporting, concurrency, follow-up submission, and safe recovery. v2 is expected to add dashboard control through the same application commands used by `awctl`.
 
 The system defaults to safe, evidence-backed actions while preserving explicit human authority. Review is bound to an exact Review Target, normally an uncommitted proposed tree. Later content or mode changes invalidate that review evidence; staging, unstaging, or committing the identical Reviewed Tree does not. PR creation is manual; `--force` deliberately bypasses review policy without bypassing target or destructive-operation safety. Cleanup remains explicit and workspaces may be retained for follow-up discussion.
 
@@ -982,8 +1044,8 @@ This section preserves discarded alternatives so future discussions do not accid
 | Commit to Paraorb as a second or future product now | Rejected | Paraorb is only a possible future brand for the same product. No separate roadmap, domain, or social presence is planned. |
 | Continue the Python implementation as the new product | Rejected | The new product starts clean in C#/.NET while selectively reusing sound AWP domain knowledge. |
 | Port AWP class-for-class into C# | Rejected | A clean architecture should preserve proven semantics without reproducing prototype coupling and infrastructure. |
-| Build a broad full product before an E2E path works | Rejected | Build one production-shaped vertical slice first, then expand it into V1. |
-| Treat the E2E slice as another throwaway prototype | Rejected | It is the first implementation of the permanent product and must establish production-quality boundaries. |
+| Build a broad full product before an E2E path works | Rejected | Complete one production-shaped end-to-end milestone first, then expand it into v1. |
+| Treat the Initial E2E Milestone as another throwaway prototype | Rejected | It is the first implementation of the permanent product and must establish production-quality boundaries. |
 | Introduce an Agentic Workflows worker | Superseded | Herdr servers already provide the local and remote execution boundary. A separate worker duplicates Herdr. |
 | Preserve a worker merely as preparation for distributed architecture | Rejected | Future distribution does not justify present duplication. Herdr machine targets already provide multi-machine execution. |
 | Use RabbitMQ or another broker between control and execution | Rejected | There is no Agentic Workflows worker fleet or service-to-service delivery problem requiring a broker. |
@@ -992,42 +1054,42 @@ This section preserves discarded alternatives so future discussions do not accid
 | Recreate Herdr worktree, pane, session, or remote-machine functionality | Rejected | These capabilities belong to the Herdr execution runtime. |
 | Make Agentic Workflows a Herdr plugin initially | Not selected | Begin as a standalone C# service. A small plugin may be added later for discovery or shortcuts. |
 | Couple the domain directly to Herdr CLI calls | Rejected | Herdr is accessed through an explicit gateway so transport and version details remain infrastructure concerns. |
-| Use the raw Herdr socket for every V1 interaction | Not selected | CLI wrappers and structured JSON are the initial integration. Raw sockets may be added for event subscriptions. |
+| Use the raw Herdr socket for every v1 interaction | Not selected | CLI wrappers and structured JSON are the initial integration. Raw sockets may be added for event subscriptions. |
 | Infer operation success only from an idle Herdr agent | Rejected | Completion must correlate to a unique operation and verified repository or artifact evidence. |
 | Scrape terminal pixels as the main integration contract | Rejected | Structured CLI/API responses and correlated result artifacts are required. |
-| Evolve V2 into several independent Agentic Workflows control planes | Rejected | AW retains one logical workflow authority even if later availability work uses coordinated replicas. V2 adds product capabilities such as dashboard control, not competing authorities. |
+| Evolve v2 into several independent Agentic Workflows control planes | Rejected | AW retains one logical workflow authority even if later availability work uses coordinated replicas. v2 adds product capabilities such as dashboard control, not competing authorities. |
 | Limit execution to one machine | Rejected | Herdr can route work to local and saved remote machines while Agentic Workflows keeps one authoritative control plane. |
-| Require PostgreSQL in V1 in anticipation of future distribution | Rejected | One AW service process owns V1 state. SQLite avoids an external database service; PostgreSQL can be reconsidered if coordinated multi-writer replicas or high availability become real requirements. |
+| Require PostgreSQL in v1 in anticipation of future distribution | Rejected | One AW service process owns v1 state. SQLite avoids an external database service; PostgreSQL can be reconsidered if coordinated multi-writer replicas or high availability become real requirements. |
 | Silently start the AW service from ordinary `awctl` commands | Rejected | The `systemd` user service starts automatically. Connection failures receive explicit diagnostics and deliberate service lifecycle commands rather than hidden process creation. |
-| Automatically discover AW control-plane services on the network | Rejected for V1 | `awctl` uses one explicit endpoint, defaulting to loopback. Later coordinated replicas can remain behind the same logical endpoint. |
-| Add global concurrency limits or automatic CPU/memory throttling in V1 | Rejected for V1 | Users control capacity. Agentic Workflows enforces correctness locks and may report resource use. |
+| Automatically discover AW control-plane services on the network | Rejected for v1 | `awctl` uses one explicit endpoint, defaulting to loopback. Later coordinated replicas can remain behind the same logical endpoint. |
+| Add global concurrency limits or automatic CPU/memory throttling in v1 | Rejected for v1 | Users control capacity. Agentic Workflows enforces correctness locks and may report resource use. |
 | Block concurrency across an entire repository | Rejected | Isolated branches and worktrees must permit parallel work. |
-| Make the V1 dashboard the mutation interface | Deferred | V1 emphasizes detailed reporting. V2 controls use the same application commands as the CLI. |
-| Add users, login, authorization, teams, or RBAC in V1 | Deferred to V3 | The initial installation has one trusted operator and relies on a private network perimeter. Organization identity becomes valuable only for company deployment. |
+| Make the v1 dashboard the mutation interface | Deferred | v1 emphasizes detailed reporting. v2 controls use the same application commands as the CLI. |
+| Add users, login, authorization, teams, or RBAC in v1 | Deferred to v3 | The initial installation has one trusted operator and relies on a private network perimeter. Organization identity becomes valuable only for company deployment. |
 | Make every test or lint result a workflow-owned deterministic gate | Rejected as a default assumption | The prototype delegates focused check selection and execution to agents, and its blanket failed-check gate created avoidable stops for unrelated baseline failures. Exact routing and mandatory-check policy require separate decisions. |
 | Let the dashboard control Herdr directly | Rejected | The dashboard talks only to the Agentic Workflows API and command layer. |
 | Couple the core workflow directly to Linear | Rejected | Linear, Markdown, and pasted text normalize into the same task model. |
-| Require every workflow to have a remote repository | Rejected | Local research and artifact production without a forge are V1 requirements. |
+| Require every workflow to have a remote repository | Rejected | Local research and artifact production without a forge are v1 requirements. |
 | Initialize Git in an arbitrary user directory automatically | Rejected | Use a managed workspace and explicit export. |
-| Monitor task sources continuously and interrupt agents automatically | Rejected for V1 | AW checks sources at handoff boundaries without interrupting active passes. A changed source pauses the next handoff for an explicit human decision. |
-| Build only a Codex integration | Rejected for V1 | The first slice may start with Codex, but V1 includes Pi to prove harness independence. |
+| Monitor task sources continuously and interrupt agents automatically | Rejected for v1 | AW checks sources at handoff boundaries without interrupting active passes. A changed source pauses the next handoff for an explicit human decision. |
+| Build only a Codex integration | Rejected for v1 | The Initial E2E Milestone may start with Codex, but v1 includes Pi to prove harness independence. |
 | Force all harnesses into a lowest-common-denominator interface | Rejected | Harness and Herdr capabilities remain explicit. |
 | Require a different model or harness for independent review | Rejected | Independence comes from role separation and a fresh initial session. |
-| Perform formal independent review in the implementation session | Rejected for V1 | Initial review uses a fresh session. The policy can be reconsidered later without conflating role and session. |
+| Perform formal independent review in the implementation session | Rejected for v1 | Initial review uses a fresh session. The policy can be reconsidered later without conflating role and session. |
 | Always create a fresh Reviewer for every re-review | Rejected | A later review may resume the prior Reviewer session and retain its own context. |
-| Automatically create a PR after a clean review | Rejected as required V1 behavior | V1 reaches a ready state and waits for an explicit `awctl pr`. Optional automation may follow. |
+| Automatically create a PR after a clean review | Rejected as required v1 behavior | v1 reaches a ready state and waits for an explicit `awctl pr`. Optional automation may follow. |
 | Use “publish” for pull-request creation | Rejected | Submission, merge, export, and deployment are distinct operations. |
-| Treat PR creation and merge as one action | Rejected | Merge is a separate boundary and remains a human action in V1. |
+| Treat PR creation and merge as one action | Rejected | Merge is a separate boundary and remains a human action in v1. |
 | Require forced submissions to be drafts | Rejected | `--force` and `--draft` are independent choices and may be combined. |
 | Prevent humans or external agents from changing a managed workspace | Rejected | Human authority is fundamental. Changes become unreviewed and require review or explicit force before submission. |
 | Allow force to bypass target identity or destructive safety | Rejected | Force bypasses workflow policy only. |
-| Automatically clean up after review, submission, export, or merge | Rejected for V1 | Users control cleanup and may retain sessions and workspaces for follow-up. |
+| Automatically clean up after review, submission, export, or merge | Rejected for v1 | Users control cleanup and may retain sessions and workspaces for follow-up. |
 | Treat informal post-completion interaction as reviewed work | Rejected | It remains outside the controlled workflow until another operation starts. |
 | Silently restart a missing agent after application restart | Rejected | Reconnect to verified execution or mark the operation interrupted and await explicit resume. |
 | Treat every interruption as failure | Rejected | Interrupted workspaces may contain valid results. |
-| Officially support Linux, Windows, and macOS in V1 | Deferred | Linux is the initial supported control-plane platform. Architecture must preserve a realistic cross-platform path. |
-| Build a general third-party plugin marketplace in V1 | Deferred | Add extension mechanisms when concrete external requirements justify them. |
+| Officially support Linux, Windows, and macOS in v1 | Deferred | Linux is the initial supported control-plane platform. Architecture must preserve a realistic cross-platform path. |
+| Build a general third-party plugin marketplace in v1 | Deferred | Add extension mechanisms when concrete external requirements justify them. |
 | Use Rust because Herdr is written in Rust | Rejected | The integration is process/API based. C# better matches product-owner familiarity and application requirements. |
 | Use Go as the primary implementation language | Not selected | Go is viable, but C# offers the preferred application framework and domain-modeling environment. |
-| Require Native AOT in V1 | Not selected | Self-contained deployment comes first; AOT requires evidence that its constraints are worthwhile. |
+| Require Native AOT in v1 | Not selected | Self-contained deployment comes first; AOT requires evidence that its constraints are worthwhile. |
 | Hide provider failures behind generic orchestration messages | Rejected | Diagnostics must be specific, structured, actionable, and shared by CLI and dashboard. |

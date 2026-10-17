@@ -1,0 +1,5 @@
+# Distinguish Workflow Variants from Task Slices
+
+A Task Slice identifies which part of a Task is in scope. It must not be used to label alternative implementations of the same scope. Competing candidate implementations are represented by an optional Workflow Variant, allowing several Workflows to share one Task Snapshot and Workflow Scope while using independent branches, worktrees, models or approaches, agent passes, reviews, and lifecycle.
+
+This distinction prevents scope instructions from being confused with implementation experiments and keeps duplicate-scope admission meaningful. A likely use case is running several models against the same requirements and later choosing a candidate for submission. Variant support is planned for v1 or early v2 rather than the Initial E2E Milestone. Until it is implemented, AW rejects duplicate Workflows for the same Task and scope instead of treating fabricated slice names as variants. CLI syntax, candidate comparison, winner selection, submission policy, and cleanup remain open for a later focused design session.

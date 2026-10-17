@@ -9,8 +9,40 @@ The product and deterministic control plane described by this domain model.
 _Avoid_: AV
 
 **Task**:
-The provider-neutral unit of work carried through an Agentic Workflows workflow.
+The provider-neutral unit of requested work captured from a Task Source and delivered through one or more Workflows.
 _Avoid_: Issue, ticket
+
+**Task Slice**:
+A stable, user-declared, agent-visible scope label on one Workflow for implementing a bounded part of a Task as its own branch, worktree, review cycle, and pull request. The complete Task Snapshot remains authoritative; the label has no separate requirements document, aggregate, or lifecycle, and AW does not enforce its semantic boundary mechanically. A Task Slice must not distinguish competing implementations of the same scope; that is a Workflow Variant.
+_Avoid_: Milestone, implementation phase, additional commit, model experiment, competing implementation
+
+**Workflow Variant**:
+An optional label for one candidate implementation when several Workflows intentionally attempt the same Task Snapshot and Workflow Scope, for example with different models or approaches so the user can compare them and choose a candidate. Each Variant has an independent branch, worktree, agent passes, review evidence, and lifecycle. A Variant does not narrow the Task requirements and is therefore distinct from a Task Slice. Variant support is planned for v1 or early v2, not the Initial E2E Milestone; exact CLI syntax and candidate-selection behavior remain to be specified.
+_Avoid_: Task Slice, scope, automatic winner
+
+**Workflow**:
+The durable end-to-end execution history for one Task under one Workflow Scope, owning one workspace, review path, and submission path.
+_Avoid_: Task, multi-worktree task container, agent session
+
+**Workflow ID**:
+The immutable generated identifier used to select one existing Workflow when current-worktree identity is unavailable. Task identifiers and slice names are not substitutes for it during post-creation command selection.
+_Avoid_: mutable title, inferred sibling selection
+
+**Workflow Scope**:
+The value that identifies whether a Workflow addresses the Whole Task or one `NamedSlice(name)`. It has no independent lifecycle or identity. A Task may retain Workflows with both kinds of scope; creating a later scoped Workflow does not supersede or repartition earlier Workflows.
+_Avoid_: Task Slice aggregate, workspace selector, agent-inferred scope
+
+**Submission**:
+The deterministic umbrella that establishes the authorized commit, publishes the branch, and creates or updates the forge change request. A GitHub pull request and a GitLab merge request are provider forms of Submission; merging the request is a separate operation.
+_Avoid_: Merge, deployment, pull request only
+
+**Submission Evidence**:
+The AW record binding a retained Workflow and scope to a confirmed forge request, including its provider, repository, request number and URL, and head branch. It supports deterministic continuation while retained and may be removed by explicit cleanup; the forge remains authoritative for live request status.
+_Avoid_: permanent project issue registry, cached PR status as authority
+
+**Whole Task**:
+The default Workflow Scope in which one Workflow implements the complete Task and produces one pull request, used when the user has not explicitly selected a named Task Slice.
+_Avoid_: Default slice, unnamed slice, entire project
 
 **Task Definition**:
 The requirements a workflow is expected to satisfy, together with their source provenance.
@@ -20,8 +52,12 @@ _Avoid_: Prompt, pasted task, issue
 The origin from which a task definition is captured, such as Linear, a Markdown file, or pasted text.
 _Avoid_: Issue tracker
 
+**Task Identifier**:
+The stable value used to distinguish a Task for workspace and branch identity. Linear uses its normalized Issue key; Markdown and pasted-text Tasks receive a random 128-bit identifier at capture. A readable slug may accompany the identifier but is not identity-bearing.
+_Avoid_: mutable Task title, content hash, human name as uniqueness proof
+
 **Task Snapshot**:
-One immutable version of a Task Definition and its provenance. Every agent pass is bound to exactly one Task Snapshot, while a Workflow may retain several explicitly adopted snapshots.
+One immutable version of a Task Definition and its provenance. Every agent pass is bound to exactly one Task Snapshot, while a Workflow may retain several explicitly adopted snapshots and sibling Workflows retain provenance to the same parent Task.
 _Avoid_: Latest issue, live task, current requirements
 
 **Active Task Snapshot**:
@@ -93,12 +129,32 @@ The rule-driven part of Agentic Workflows that makes authoritative decisions and
 _Avoid_: Glue, agent workflow
 
 **Workflow Phase**:
-The kind of work through which a Workflow is currently progressing, kept separate from the lifecycle of any concrete Operation or external execution.
-_Avoid_: Agent process status, operation status
+The kind of work through which a Workflow is currently progressing: `WorkspacePreparation`, `Implementation`, `Review`, or `Submission` in the Initial E2E Milestone. Eligibility, durable outcomes, retention, and cleanup are not phases.
+_Avoid_: Agent process status, operation status, blocker reason
+
+**Attention Requirement**:
+One current, typed alert derived when safe continuation requires a human policy choice or manual/external action. Users act on the real situation rather than marking alerts resolved; AW revalidates facts and audit history records when each alert appeared and ceased to apply.
+_Avoid_: Workflow phase, failure, generic blocked state
+
+**Attention Required**:
+The derived Workflow gate that is active while one or more Attention Requirements currently apply. It prevents automatic continuation while preserving the current Workflow Phase and disappears when revalidation finds that no requirement remains applicable.
+_Avoid_: Stored duplicate status, primary blocker only, workflow phase
+
+**Abandoned Workflow**:
+A Workflow on which the user has explicitly stopped all automatic routing while retaining its worktree, sessions, evidence, and history. Abandonment is resumable through an explicit command and is not cleanup or failure.
+_Avoid_: Failed Workflow, deleted Workflow, implicit pause
+
+**Forced Cleanup**:
+An invocation-scoped destructive escape hatch that asks Herdr to stop and remove every managed execution resource owned by one exactly identified Workflow, then deletes all of that Workflow's AW-owned state regardless of the external outcome. Unconfirmed external teardown produces an immediate partial result and no retained Workflow record.
+_Avoid_: Force Override for submission, arbitrary directory deletion, persistent force setting
+
+**Operation**:
+One immutable, bounded attempt to perform a workflow action. Retrying or resuming creates another Operation linked to its predecessor; that Operation may reuse an eligible agent session without reusing the predecessor's identity.
+_Avoid_: Mutable retry record, agent session
 
 **Operation Status**:
-The durable lifecycle status of one bounded Operation, kept separate from the Workflow Phase and from AW's last observation of the external execution.
-_Avoid_: Workflow phase, terminal pane status
+The durable lifecycle status of one bounded Operation: `Pending`, `Running`, `Completed`, `Failed`, or `Interrupted`. User-requested stops and confirmed vanished executions are both `Interrupted` with distinct typed reasons; `Canceled` is a Task-provider state, not an Operation Status.
+_Avoid_: Workflow phase, terminal pane status, failed Workflow
 
 **Execution Observation**:
 AW's timestamped last verified view of an Operation's Herdr execution and the execution target's reachability at that observation.
@@ -203,3 +259,11 @@ _Avoid_: Force-push, state repair
 **PR Intent**:
 The durable authorization for one `awctl pr` action chain, binding its exact content and repository, branch, remote, and forge targets before mutation begins.
 _Avoid_: Latest worktree, mutable submission plan
+
+**Primary Publication Category**:
+The one Linear label whose controlled mapping selects the Conventional Commit-style type for a Linear-backed submission: `Feature`, `Bug`, `Chore`, `Docs`, or `Refactor`. Orthogonal labels such as `Research` may coexist but do not select or alter the publication type.
+_Avoid_: Task kind, Research modifier, arbitrary Linear label
+
+**Reviewed Publication Metadata**:
+The public-safe action summary, description, and validation statement produced and accepted by a Reviewer for one exact Review Target, from which AW deterministically constructs the commit message and forge change request metadata.
+_Avoid_: Linear Task title, private review report, agent-authored PR
