@@ -1,0 +1,3 @@
+# Keep base-conflict integration explicit
+
+AW retains `awctl integrate` as an explicit recovery operation for unpublished reviewed work that conflicts with an advanced base. `awctl pr` detects and reports such conflicts but never starts an integration agent automatically; the user explicitly authorizes isolated conflict resolution, AW installs only a proven result through deterministic Git actions, and the installed state requires fresh independent review before submission. This preserves human control and separates non-deterministic conflict resolution from publication, while the new implementation deliberately avoids reproducing the prototype's specialized recovery complexity without evidence that it is necessary.

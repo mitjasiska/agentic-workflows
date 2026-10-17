@@ -1,0 +1,3 @@
+# Construct agent handoffs deterministically
+
+Agentic Workflows constructs every agent handoff from its durable task snapshot, workflow state, workspace facts, findings, and evidence; an agent-provided summary may supplement but never replace those facts. Every full handoff orders three distinct layers as Workflow Instructions, Task Snapshot, then Pass Brief so operational directions can vary without mutating task requirements. AW selects the role and session while Herdr starts or resumes the session and delivers the handoff, preventing non-deterministic agents from becoming the authority for context transferred between workflow phases.
