@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-17
+Last updated: 2026-10-19
 
 ## Purpose and authority
 
@@ -28,17 +28,15 @@ Current readiness: **Not ready for Initial E2E implementation.** Core product an
 
 ## Last completed decision
 
-Question 54 established operation-specific Herdr capability checks. A structured target response identifies the integration version and named capabilities. AW validates only the capabilities mandatory for the requested mutation; a missing capability rejects that Operation with a precise diagnostic and Recovery Plan while unrelated supported operations remain available. Compatibility is not an exact Herdr-version allowlist. Cache timing and wire-level fields remain adapter details unless they affect workflow correctness.
-
-The supplemental publication decision established that exactly one primary Linear category selects the Conventional Commit-style type while `Research` and unrelated labels remain orthogonal. A Reviewer supplies public-safe summary, description, and validation fields from the exact reviewed result. AW then deterministically freezes the shared commit/PR subject, `Task-Review` trailer, and sectioned PR body, retaining both the canonical Linear link and the previously agreed `Fixes TASK-ID` reference. See ADR 0031.
+Question 73 established Git's native tree representation as the canonical identity of reviewed content. A Review Target records the repository object format and the comparison-baseline and proposed-tree identities rather than an AW-specific per-file hash format. For uncommitted work, AW builds the proposed tree through a private temporary index that does not alter or depend on the user's real staging state. Git therefore defines path, content, deletion, mode, symlink, and supported-submodule semantics. Identical content remains reviewed across staging or commit changes.
 
 ## Next question
 
-Question 55 — Workspace preparation through the gateway:
+Question 74 — Stable snapshot capture:
 
-> Should `PrepareWorkflowWorkspace` be an idempotent, identity-bound request that either creates the intended managed workspace or returns the one already proven to belong to that exact Workflow, while rejecting missing, duplicate, or mismatched ownership evidence instead of guessing or silently adopting an unrelated worktree?
+> Should AW start a Reviewer only after it has captured one stable Review Target, automatically retry when relevant files or Git state change during capture, and then stop with a clear ordinary retry action if the workspace will not become stable?
 
-Recommendation: **Yes.** AW should supply the immutable Workflow identity, resolved repository/base/branch intent, and requested managed location. The gateway returns stable target/workspace identifiers plus the canonical path and observed ownership facts. Repeating the same request after an uncertain response may return the same verified workspace without creating another one. Ambiguity or contradictory ownership stops only preparation and exposes recovery; it must not cause silent reuse, deletion, or repair. This preserves safe retry while avoiding the prototype's need for users to repair AW state manually.
+Recommendation: **Yes.** AW should hold its own workspace mutation gate during capture, observe the relevant repository state, build the proposed Git tree in the private index, and observe the state again. A mismatch means the capture is discarded rather than handed to a Reviewer. AW should retry a small bounded number of times to absorb a brief race; if the workspace keeps changing, it should preserve everything, identify what kind of state changed, and tell the user to rerun the ordinary review command when the external activity settles. This cannot lock humans or independent processes out of the filesystem, so the same before-and-after verification still runs around the Review Pass and invalidates its authority if the target changes later.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -46,9 +44,9 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 
 - [x] Finish cleanup, abandonment, retry, resume, and unreachable-target recovery semantics for the initial lifecycle.
 - [x] Finalize the minimal Workflow phases, durable outcomes, Operation statuses, and Attention Requirement reason set used by the initial milestone.
-- [ ] Specify the initial `IHerdrGateway` contract for local Codex execution, including create/resume/observe/interrupt/result/worktree-teardown behavior and minimum capability negotiation.
-- [ ] Specify the v1 universal Result Envelope fields and validation rules needed by Implementer and Reviewer passes.
-- [ ] Specify the minimal SQLite current-state, event, snapshot, operation, pass, report, evidence, attention, and submission records plus transaction and migration boundaries.
+- [x] Specify the initial `IHerdrGateway` contract for local Codex execution, including create/resume/observe/interrupt/result/worktree-teardown behavior and minimum capability negotiation.
+- [x] Specify the v1 universal Result Envelope fields and validation rules needed by Implementer and Reviewer passes.
+- [x] Specify the minimal SQLite current-state, event, snapshot, operation, pass, report, evidence, attention, and submission records plus transaction and migration boundaries.
 - [ ] Specify canonical Review Target and Worktree Fingerprint encoding, race-free capture, and deterministic commit construction for the initial Git path.
 - [ ] Finalize initial branch/worktree naming and safe path rules.
 - [ ] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR remains the immediate follow-up unless pulled into the milestone deliberately.
@@ -63,17 +61,17 @@ These matters remain important but do not block the first implementation task un
 - Pi and additional harnesses beyond the initial Codex path.
 - Markdown, pasted-text, and standard-input Task Sources, which follow the Initial E2E Milestone promptly.
 - Existing-pull-request update after an additional reviewed batch, unless implementation sequencing pulls it forward.
+- Backward-compatible Result Envelope and SQLite history across upgrades before an explicit stabilization milestone.
+- Production backup cadence and retention, off-machine storage, and host-level disaster recovery beyond the provisional Initial E2E SQLite backups.
 - GitLab, Jira, authentication/RBAC, PostgreSQL, dashboard mutation controls, scheduling, organization governance, and public branding.
 - The full dashboard UI/UX design beyond the minimal read-only lifecycle projection needed by the milestone.
 
 ## Session-size estimate
 
-- Remaining initial Herdr gateway contract: approximately 4–6 focused questions, or 20–40 minutes.
+- Review Target, Worktree Fingerprint, and deterministic commit contract: approximately 1–3 focused questions, or 10–25 minutes.
 - Initial E2E implementation readiness: approximately 15–20 focused questions in total, or 1.5–2.5 hours across one or two sessions.
 - Full detailed v1 architecture: approximately 30–50 further decisions, or 4–7 hours across multiple focused sessions.
 
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
-The 2026-10-17 session paused before Question 55 was answered. Question 54 is the last accepted decision; resume with Question 55 exactly as written above.
-
-Before stopping, the user added and settled one required publication-design follow-up based on the prototype. Prototype research is recorded in `docs/research/prototype-validation.md` under **Linear labels and generated publication metadata**. The accepted successor behavior preserves the category mapping, orthogonal `Research` label, reviewed public metadata, deterministic shared commit/PR subject, `Task-Review` trailer, and sectioned PR body while retaining the successor's already-agreed `Fixes TASK-ID` reference. Question 55 remains the next unanswered question.
+The 2026-10-19 session accepted Question 73. Resume with Question 74 exactly as written above, keeping the distinction between AW's own mutation gate and external processes that AW can only detect.

@@ -21,8 +21,16 @@ An optional label for one candidate implementation when several Workflows intent
 _Avoid_: Task Slice, scope, automatic winner
 
 **Workflow**:
-The durable end-to-end execution history for one Task under one Workflow Scope, owning one workspace, review path, and submission path.
+The durable end-to-end execution history and retention boundary for one Task under one Workflow Scope, owning one workspace, review path, submission path, and their run-specific records.
 _Avoid_: Task, multi-worktree task container, agent session
+
+**Workflow Workspace**:
+The Herdr-managed working area bound to exactly one Workflow, containing its worktree and related execution context. AW may reuse it only when its ownership by that Workflow is proven.
+_Avoid_: Arbitrary directory, guessed worktree, shared workflow workspace
+
+**Unmanaged Herdr Resource**:
+A Herdr pane, session, process, workspace, or worktree whose ownership by an AW Workflow is not proven. AW may observe it during reconciliation but has no authority to adopt, resume, interrupt, or delete it.
+_Avoid_: AW orphan, available workspace, implicitly managed resource
 
 **Workflow ID**:
 The immutable generated identifier used to select one existing Workflow when current-worktree identity is unavailable. Task identifiers and slice names are not substitutes for it during post-creation command selection.
@@ -112,6 +120,10 @@ _Avoid_: Missing task scope, unlimited discretion, settled decision
 The workflow-generated direction for one bounded agent pass, kept separate from the source-derived Task Snapshot.
 _Avoid_: Task Snapshot, Agent Instructions
 
+**Agent Session**:
+A retained harness conversation or execution context that may be idle or used by a Managed Agent Pass. Several sessions may belong to one Workflow without implying that their agents are executing concurrently.
+_Avoid_: Agent role, Managed Agent Pass
+
 **Session Reuse Policy**:
 The configured rule that determines whether a later pass of a role normally resumes an eligible earlier session or starts a new session.
 _Avoid_: Reviewer identity, model selection
@@ -133,7 +145,7 @@ The kind of work through which a Workflow is currently progressing: `WorkspacePr
 _Avoid_: Agent process status, operation status, blocker reason
 
 **Attention Requirement**:
-One current, typed alert derived when safe continuation requires a human policy choice or manual/external action. Users act on the real situation rather than marking alerts resolved; AW revalidates facts and audit history records when each alert appeared and ceased to apply.
+One current, typed alert derived when safe continuation requires a human policy choice or manual/external action. It identifies the concrete unresolved matter and presents a proposed resolution rather than merely announcing that the Workflow is blocked. Users act on the real situation rather than marking alerts resolved; AW revalidates facts and audit history records when each alert appeared and ceased to apply.
 _Avoid_: Workflow phase, failure, generic blocked state
 
 **Attention Required**:
@@ -169,8 +181,8 @@ The bounded freedom an Implementer has to choose a coherent technical solution, 
 _Avoid_: Unspecified requirements, unrestricted agent behavior, mechanical edit plan
 
 **Managed Agent Pass**:
-One bounded Implementer or Reviewer execution started and tracked by AW with a recorded Handoff, session identity, and result.
-_Avoid_: Any agent activity, external agent run
+One bounded Implementer or Reviewer execution started and tracked by AW with a recorded Handoff, session identity, and result. An idle retained Agent Session is not an active pass.
+_Avoid_: Any agent activity, external agent run, idle Agent Session
 
 **Unmanaged Work**:
 Human or agent activity in a retained workspace that AW did not start or track. AW may observe its resulting file or Git state without claiming knowledge of how the work was performed.
@@ -189,7 +201,7 @@ An agent or chat outside the AW-managed workflow that helps a human plan, inspec
 _Avoid_: Orchestrator, AW worker, managed role
 
 **Result Envelope**:
-The single JSON object through which a Managed Agent Pass reports its correlated outcome, detailed narrative, and typed evidence to the Deterministic Workflow. All roles use one versioned schema whose discriminator selects the required role-specific payload.
+The single JSON object through which a Managed Agent Pass reports its correlated outcome, detailed narrative, and typed evidence to the Deterministic Workflow. It is the self-contained durable pass result used for routing, later handoffs, reporting, and human inspection without requiring the agent transcript.
 _Avoid_: Status message, free-form completion claim, agent transcript
 
 **Implementation Pass**:
@@ -217,7 +229,7 @@ The tracked and relevant untracked content in a managed Git worktree that differ
 _Avoid_: Dirty files, dirty worktree
 
 **Worktree Fingerprint**:
-A deterministic identity for the paths, change kinds, modes, and contents of the Uncommitted Worktree Changes at one checkpoint.
+A deterministic content identity for the complete proposed tree relative to its comparison baseline at one checkpoint. Changes to included paths, contents, deletions, or relevant modes change the identity; timestamps and staging state do not.
 _Avoid_: File watcher, timestamp, repository revision
 
 **Reviewed Tree**:
@@ -229,7 +241,7 @@ The exact proposed content and comparison baseline assessed by a Review Pass. Co
 _Avoid_: Commit SHA, latest worktree, moving branch
 
 **Review Report**:
-The durable structured result of a Review Pass, bound to the exact Review Target that was reviewed.
+The durable structured result of a Review Pass, bound to the exact Review Target that was reviewed. It can provide current clean-review evidence only while that target remains unchanged.
 _Avoid_: Agent message, approval
 
 **Validation Evidence**:

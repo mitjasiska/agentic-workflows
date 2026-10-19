@@ -1,0 +1,3 @@
+# Gate workspace concurrency by file mutation
+
+Agent Session existence is not a workspace lock. An executing or uncertain Implementer blocks another pass because it may mutate files, while a read-only Reviewer does not; if another pass starts before that Reviewer is confirmed finished, the earlier review is retained in history but permanently loses authority to produce current clean-review evidence. AW validates every review through the before-and-after Review Target and Worktree Fingerprint rather than trusting role labels, so any content or mode change invalidates clean-review evidence and leaves the user to obtain a fresh review or deliberately submit with `awctl pr --force`; deliberate multi-reviewer aggregation remains deferred.

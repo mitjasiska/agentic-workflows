@@ -1,0 +1,3 @@
+# Make workspace preparation idempotent and identity-bound
+
+AW prepares or reuses a Workflow Workspace only through an idempotent request bound to the immutable Workflow identity and resolved repository, base, branch, and managed-location intent. A retry may return the same workspace only when its ownership is proven; missing, duplicate, contradictory, or mismatched evidence stops preparation before agent launch rather than guessing, adopting, deleting, or duplicating a worktree. Recovery is available through one supported command, using `awctl cleanup --force` for the retained Workflow to clear AW-owned state and tear down only proven owned resources, so users never need to inspect or edit SQLite and unrelated workspaces remain protected.
