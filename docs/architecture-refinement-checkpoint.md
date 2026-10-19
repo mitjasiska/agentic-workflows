@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-19
+Last updated: 2026-10-20
 
 ## Purpose and authority
 
@@ -24,19 +24,17 @@ At the end of every refinement session, update the date, last completed decision
 
 Reach a sufficiently specified Initial E2E Milestone to prepare and start its implementation task. The complete v1 architecture does not need to be finished first. An unanswered matter blocks implementation only when it could materially change the milestone's scope, observable behavior, acceptance criteria, domain ownership, persistence, integration boundaries, sequencing, safety, or recovery.
 
-Current readiness: **Not ready for Initial E2E implementation.** Core product and workflow boundaries are well established, but several integration and persistence contracts still materially affect the first implementation.
+Current readiness: **Ready for Initial E2E implementation task preparation.** Every architecture decision that could materially change the milestone's scope, observable behavior, acceptance boundary, ownership, persistence, integration, sequencing, safety, or recovery has been resolved. Remaining low-level choices are explicit Implementation Latitude or deferred work and do not block the milestone.
 
 ## Last completed decision
 
-Question 73 established Git's native tree representation as the canonical identity of reviewed content. A Review Target records the repository object format and the comparison-baseline and proposed-tree identities rather than an AW-specific per-file hash format. For uncommitted work, AW builds the proposed tree through a private temporary index that does not alter or depend on the user's real staging state. Git therefore defines path, content, deletion, mode, symlink, and supported-submodule semantics. Identical content remains reviewed across staging or commit changes.
+Question 88 limited the Initial E2E dashboard to two read-only operational views backed by the same control-plane query API used by `awctl`: a Project Workflow list and a Workflow detail/timeline. They expose current phase and outcome, active pass, attention and warnings, readiness, Task and workspace context, recovery guidance, ordered steps, reports and evidence, review validity, overrides, and pull-request linkage. Copy and external-link actions remain read-only; every workflow mutation remains CLI-only. Advanced analytics, raw logs, dashboard controls, final visual polish, and refresh mechanism details do not block the milestone.
 
 ## Next question
 
-Question 74 — Stable snapshot capture:
+No further Initial E2E readiness question remains. The grilling frontier for this milestone is empty.
 
-> Should AW start a Reviewer only after it has captured one stable Review Target, automatically retry when relevant files or Git state change during capture, and then stop with a clear ordinary retry action if the workspace will not become stable?
-
-Recommendation: **Yes.** AW should hold its own workspace mutation gate during capture, observe the relevant repository state, build the proposed Git tree in the private index, and observe the state again. A mismatch means the capture is discarded rather than handed to a Reviewer. AW should retry a small bounded number of times to absorb a brief race; if the workspace keeps changing, it should preserve everything, identify what kind of state changed, and tell the user to rerun the ordinary review command when the external activity settles. This cannot lock humans or independent processes out of the filesystem, so the same before-and-after verification still runs around the Review Pass and invalidates its authority if the target changes later.
+The next work item is the separate Initial E2E implementation issue in Linear. This checkpoint should link it after creation; implementation must still begin only from that issue's explicit outcome and acceptance boundary. DEV-119 remains open until that issue is created.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -47,11 +45,11 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 - [x] Specify the initial `IHerdrGateway` contract for local Codex execution, including create/resume/observe/interrupt/result/worktree-teardown behavior and minimum capability negotiation.
 - [x] Specify the v1 universal Result Envelope fields and validation rules needed by Implementer and Reviewer passes.
 - [x] Specify the minimal SQLite current-state, event, snapshot, operation, pass, report, evidence, attention, and submission records plus transaction and migration boundaries.
-- [ ] Specify canonical Review Target and Worktree Fingerprint encoding, race-free capture, and deterministic commit construction for the initial Git path.
-- [ ] Finalize initial branch/worktree naming and safe path rules.
-- [ ] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR remains the immediate follow-up unless pulled into the milestone deliberately.
-- [ ] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
-- [ ] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
+- [x] Specify canonical Review Target and Worktree Fingerprint encoding, race-free capture, and deterministic commit construction for the initial Git path.
+- [x] Finalize initial branch/worktree naming and safe path rules.
+- [x] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR remains the immediate follow-up unless pulled into the milestone deliberately.
+- [x] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
+- [x] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
 
 ## Explicitly deferred beyond the readiness gate
 
@@ -68,10 +66,9 @@ These matters remain important but do not block the first implementation task un
 
 ## Session-size estimate
 
-- Review Target, Worktree Fingerprint, and deterministic commit contract: approximately 1–3 focused questions, or 10–25 minutes.
-- Initial E2E implementation readiness: approximately 15–20 focused questions in total, or 1.5–2.5 hours across one or two sessions.
-- Full detailed v1 architecture: approximately 30–50 further decisions, or 4–7 hours across multiple focused sessions.
+- Initial E2E implementation readiness: complete; no further blocking architecture questions remain.
+- Full detailed v1 architecture after that gate: approximately 25–40 further decisions, or 3–6 hours across several focused sessions.
 
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
-The 2026-10-19 session accepted Question 73. Resume with Question 74 exactly as written above, keeping the distinction between AW's own mutation gate and external processes that AW can only detect.
+The 2026-10-20 session accepted Question 88 and completed the Initial E2E architecture-readiness gate. Do not resume readiness grilling unless implementation evidence exposes a new material architecture question.

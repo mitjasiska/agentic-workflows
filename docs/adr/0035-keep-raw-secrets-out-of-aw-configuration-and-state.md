@@ -1,0 +1,3 @@
+# Keep raw secrets out of AW configuration and state
+
+Although the prototype stored secrets in Git-ignored project configuration, v1 treats both Global and Project Configuration as non-secret configuration because Git-ignore does not protect files from agents, repository tools, backups, diagnostics, or support bundles. AW resolves credentials already available to its non-root service account through provider tooling, environment-backed secret injection, or an operating-system credential store; configuration may hold only references, and raw credentials never enter AW configuration, SQLite, prompts, Result Envelopes, reports, or logs. This trades some setup convenience for a clear security boundary and avoids creating an AW-specific secret vault.

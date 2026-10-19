@@ -8,6 +8,18 @@ The canonical language for the human-directed workflow that coordinates determin
 The product and deterministic control plane described by this domain model.
 _Avoid_: AV
 
+**Project**:
+The AW configuration and workflow boundary anchored to one Git repository. It contains the Workflows started for Tasks in that repository and may eventually map to more than one Linear Project.
+_Avoid_: Linear Project, Workflow, multi-repository product
+
+**Global Configuration**:
+The configuration shared by every Project registered with one AW installation.
+_Avoid_: Workflow configuration, Project-specific settings, secret store
+
+**Project Configuration**:
+The local, repository-excluded configuration file whose validated integration identities and choices are reused by every Workflow in one Project. A committed example documents its shape but is not active configuration.
+_Avoid_: Per-Workflow setup, committed active configuration, mutable Task settings, secret store
+
 **Task**:
 The provider-neutral unit of requested work captured from a Task Source and delivered through one or more Workflows.
 _Avoid_: Issue, ticket
@@ -21,11 +33,15 @@ An optional label for one candidate implementation when several Workflows intent
 _Avoid_: Task Slice, scope, automatic winner
 
 **Workflow**:
-The durable end-to-end execution history and retention boundary for one Task under one Workflow Scope, owning one workspace, review path, submission path, and their run-specific records.
+The durable end-to-end execution history and retention boundary created when AW starts one Task under one Workflow Scope, owning one workspace, review path, submission path, and their run-specific records. A Project normally contains many Workflows because each started Task or named slice receives its own.
 _Avoid_: Task, multi-worktree task container, agent session
 
+**Workflow Integration Binding**:
+The stable external identities selected for one Workflow when it starts, including its repository, task-provider, forge, execution-target, and workspace relationships. Configuration changes do not silently redirect the binding; credential rotation through the same access reference does not change it.
+_Avoid_: Current project defaults, credentials, mutable configuration snapshot
+
 **Workflow Workspace**:
-The Herdr-managed working area bound to exactly one Workflow, containing its worktree and related execution context. AW may reuse it only when its ownership by that Workflow is proven.
+The Herdr-managed working area bound to exactly one Workflow, containing the worktree for that Workflow's branch and its related execution context. AW may reuse it only when its ownership by that Workflow is proven. The worktree is the editable checkout; it is not itself the branch.
 _Avoid_: Arbitrary directory, guessed worktree, shared workflow workspace
 
 **Unmanaged Herdr Resource**:
@@ -37,7 +53,7 @@ The immutable generated identifier used to select one existing Workflow when cur
 _Avoid_: mutable title, inferred sibling selection
 
 **Workflow Scope**:
-The value that identifies whether a Workflow addresses the Whole Task or one `NamedSlice(name)`. It has no independent lifecycle or identity. A Task may retain Workflows with both kinds of scope; creating a later scoped Workflow does not supersede or repartition earlier Workflows.
+The value that identifies whether a Workflow addresses the Whole Task or one `NamedSlice(name)`. The original user-declared slice name is retained as semantic scope; a normalized branch slug is only a derived technical representation. Workflow Scope has no independent lifecycle or identity. A Task may retain Workflows with both kinds of scope; creating a later scoped Workflow does not supersede or repartition earlier Workflows.
 _Avoid_: Task Slice aggregate, workspace selector, agent-inferred scope
 
 **Submission**:
