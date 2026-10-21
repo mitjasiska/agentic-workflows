@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-20
+Last updated: 2026-10-21
 
 ## Purpose and authority
 
@@ -24,17 +24,15 @@ At the end of every refinement session, update the date, last completed decision
 
 Reach a sufficiently specified Initial E2E Milestone to prepare and start its implementation task. The complete v1 architecture does not need to be finished first. An unanswered matter blocks implementation only when it could materially change the milestone's scope, observable behavior, acceptance criteria, domain ownership, persistence, integration boundaries, sequencing, safety, or recovery.
 
-Current readiness: **Ready for Initial E2E implementation task preparation.** Every architecture decision that could materially change the milestone's scope, observable behavior, acceptance boundary, ownership, persistence, integration, sequencing, safety, or recovery has been resolved. Remaining low-level choices are explicit Implementation Latitude or deferred work and do not block the milestone.
+Current readiness: **Ready for Initial E2E implementation-task preparation.** The original readiness grilling and the targeted pre-implementation consistency audit are complete. Broader v1 decisions remain deferred and do not block this milestone.
 
 ## Last completed decision
 
-Question 88 limited the Initial E2E dashboard to two read-only operational views backed by the same control-plane query API used by `awctl`: a Project Workflow list and a Workflow detail/timeline. They expose current phase and outcome, active pass, attention and warnings, readiness, Task and workspace context, recovery guidance, ordered steps, reports and evidence, review validity, overrides, and pull-request linkage. Copy and external-link actions remain read-only; every workflow mutation remains CLI-only. Advanced analytics, raw logs, dashboard controls, final visual polish, and refresh mechanism details do not block the milestone.
+Question 96 makes cleanup the complete local recovery path for reusing a Task and scope. Ordinary cleanup removes the exact local Workflow branch only when no unique local work would be lost; `awctl cleanup --force` deletes that exact verified branch even if local-only work is discarded. Neither form changes a remote branch, pull request, or Task, so a remaining live remote branch continues to block `awctl start`.
 
 ## Next question
 
-No further Initial E2E readiness question remains. The grilling frontier for this milestone is empty.
-
-The next work item is the separate Initial E2E implementation issue in Linear. This checkpoint should link it after creation; implementation must still begin only from that issue's explicit outcome and acceptance boundary. DEV-119 remains open until that issue is created.
+None. The Initial E2E architecture is ready for implementation-task preparation. Per `README.md`, the next work-queue action is to create the separate Initial E2E implementation issue in Linear and only then complete DEV-119.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -47,7 +45,7 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 - [x] Specify the minimal SQLite current-state, event, snapshot, operation, pass, report, evidence, attention, and submission records plus transaction and migration boundaries.
 - [x] Specify canonical Review Target and Worktree Fingerprint encoding, race-free capture, and deterministic commit construction for the initial Git path.
 - [x] Finalize initial branch/worktree naming and safe path rules.
-- [x] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR remains the immediate follow-up unless pulled into the milestone deliberately.
+- [x] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR is explicitly the immediate post-milestone follow-up.
 - [x] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
 - [x] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
 
@@ -58,7 +56,8 @@ These matters remain important but do not block the first implementation task un
 - Workflow Variant CLI, comparison, winner selection, submission, and cleanup behavior; Variant support is planned for v1 or early v2.
 - Pi and additional harnesses beyond the initial Codex path.
 - Markdown, pasted-text, and standard-input Task Sources, which follow the Initial E2E Milestone promptly.
-- Existing-pull-request update after an additional reviewed batch, unless implementation sequencing pulls it forward.
+- Existing-pull-request update after an additional reviewed batch; this is the immediate post-milestone submission expansion.
+- Agent-assisted base-conflict integration through `awctl integrate` and draft pull-request submission.
 - Backward-compatible Result Envelope and SQLite history across upgrades before an explicit stabilization milestone.
 - Production backup cadence and retention, off-machine storage, and host-level disaster recovery beyond the provisional Initial E2E SQLite backups.
 - GitLab, Jira, authentication/RBAC, PostgreSQL, dashboard mutation controls, scheduling, organization governance, and public branding.
@@ -66,9 +65,9 @@ These matters remain important but do not block the first implementation task un
 
 ## Session-size estimate
 
-- Initial E2E implementation readiness: complete; no further blocking architecture questions remain.
+- Initial E2E implementation readiness: complete; no architecture question remains before implementation-task preparation.
 - Full detailed v1 architecture after that gate: approximately 25–40 further decisions, or 3–6 hours across several focused sessions.
 
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
-The 2026-10-20 session accepted Question 88 and completed the Initial E2E architecture-readiness gate. Do not resume readiness grilling unless implementation evidence exposes a new material architecture question.
+The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. The gate is closed again; implementation still begins only from the separate Linear implementation issue required by `README.md`.

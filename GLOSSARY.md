@@ -13,15 +13,15 @@ The AW configuration and workflow boundary anchored to one Git repository. It co
 _Avoid_: Linear Project, Workflow, multi-repository product
 
 **Global Configuration**:
-The configuration shared by every Project registered with one AW installation.
+The authoritative installation-level settings file whose defaults are shared by every Project registered with one AW installation.
 _Avoid_: Workflow configuration, Project-specific settings, secret store
 
 **Project Configuration**:
-The local, repository-excluded configuration file whose validated integration identities and choices are reused by every Workflow in one Project. A committed example documents its shape but is not active configuration.
+The authoritative local, repository-excluded TOML settings file in a Project's canonical registered checkout. Its validated integration identities and choices are reused when new Workflows begin; a committed example documents its shape but is not active configuration.
 _Avoid_: Per-Workflow setup, committed active configuration, mutable Task settings, secret store
 
 **Task**:
-The provider-neutral unit of requested work captured from a Task Source and delivered through one or more Workflows.
+The Project-level, provider-neutral unit of requested work captured from a Task Source and delivered through one or more Workflows. Sibling Workflows reference the same Task identity but own independent Task Snapshots and mutable workflow state.
 _Avoid_: Issue, ticket
 
 **Task Slice**:
@@ -173,7 +173,7 @@ A Workflow on which the user has explicitly stopped all automatic routing while 
 _Avoid_: Failed Workflow, deleted Workflow, implicit pause
 
 **Forced Cleanup**:
-An invocation-scoped destructive escape hatch that asks Herdr to stop and remove every managed execution resource owned by one exactly identified Workflow, then deletes all of that Workflow's AW-owned state regardless of the external outcome. Unconfirmed external teardown produces an immediate partial result and no retained Workflow record.
+An invocation-scoped destructive escape hatch that asks Herdr to stop and remove every managed execution resource owned by one exactly identified Workflow, deletes that Workflow's exact verified local branch even when local-only work is lost, and then deletes all of its AW-owned state. It never changes a remote branch, pull request, or Task; an unconfirmed teardown or local-branch deletion produces an immediate partial result and no retained Workflow record.
 _Avoid_: Force Override for submission, arbitrary directory deletion, persistent force setting
 
 **Operation**:
@@ -279,6 +279,10 @@ _Avoid_: External integration, automatic rebase, unmanaged commit adoption
 **Recovery Plan**:
 The durable explanation of a blocker and the currently valid human actions for resolving, bypassing, or retaining it.
 _Avoid_: Manual database repair, hidden recovery state
+
+**Workflow Resume**:
+The general continuation action for a retained Workflow that stopped before its next safe action. It revalidates current facts, reconciles the preceding Operation, and proceeds only when one safe continuation is unambiguous; partial Submission instead continues through its own `awctl pr` command.
+_Avoid_: Generic retry, reopening an Operation, bypassing an Attention Requirement
 
 **Force Override**:
 An explicit bypass of PR review policy that never authorizes a Git force-push or bypasses target-identity and revision protections.
