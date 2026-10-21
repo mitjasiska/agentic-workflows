@@ -6,7 +6,7 @@ Last updated: 2026-10-21
 
 This file is the durable continuation point for architecture grilling and implementation-readiness checks. It prevents a new chat from reconstructing session order from transcripts or guessing which open topic comes next.
 
-It is not a source of product truth. Settled decisions belong in `architecture.md`, `workflow-specification.md`, `GLOSSARY.md`, and the applicable ADR. The broader unresolved inventory remains in `architecture.md` under **Decisions still requiring refinement**. When this checkpoint conflicts with an authoritative document, fix the checkpoint.
+It is not a source of product truth. Settled decisions belong in `docs/architecture/architecture.md`, `docs/architecture/workflow-specification.md`, `docs/architecture/GLOSSARY.md`, and the applicable ADR under `docs/architecture/adr/`. The broader unresolved inventory remains in `docs/architecture/architecture.md` under **Decisions still requiring refinement**. When this checkpoint conflicts with an authoritative document, fix the checkpoint.
 
 Linear is the canonical work queue. The architecture foundation is completed in [DEV-115](https://linear.app/mitjasiska/issue/DEV-115/define-agentic-workflows-architecture-foundation). Continue the remaining readiness work under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness); this checkpoint supplies that issue's exact local continuation point but does not replace it.
 
@@ -14,7 +14,7 @@ Linear is the canonical work queue. The architecture foundation is completed in 
 
 From this repository, invoke the installed `grilling` skill or the `grill-with-docs` wrapper and ask:
 
-> Continue the Agentic Workflows architecture refinement from `docs/architecture-refinement-checkpoint.md`. Read the repository instructions and authoritative planning documents it identifies. Ask exactly one focused question at a time, give a candid recommendation, write each accepted decision into the authoritative documents, and keep this checkpoint current.
+> Continue the Agentic Workflows architecture refinement from `docs/planning/architecture-refinement-checkpoint.md`. Read the repository instructions and authoritative planning documents it identifies. Ask exactly one focused question at a time, give a candid recommendation, write each accepted decision into the authoritative documents, and keep this checkpoint current.
 
 Confirm that DEV-119 is still the applicable Linear work item before continuing. If it has been completed, canceled, or superseded, follow the current Linear queue instead of starting work merely because this checkpoint contains another question.
 

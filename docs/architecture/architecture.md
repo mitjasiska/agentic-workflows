@@ -653,7 +653,7 @@ A superseded Review Target remains in the Workflow Audit Trail as its tree ident
 
 Validation evidence must record which checks ran, their inputs, their outputs or result summaries, and which expected checks did not run. Agent claims are supporting information rather than unquestioned proof.
 
-The prototype uses agent-selected focused validation rather than a deterministic test-selection or command-execution engine. TDD is optional guidance. Implementers and Reviewers select and run checks, then return structured `passed`, `failed`, or `not_run` evidence; deterministic code validates the result shape and routes the workflow. Its default review strategy is focused-first, with optional exhaustive review. The detailed evidence is captured in [the prototype validation research](docs/research/prototype-validation.md).
+The prototype uses agent-selected focused validation rather than a deterministic test-selection or command-execution engine. TDD is optional guidance. Implementers and Reviewers select and run checks, then return structured `passed`, `failed`, or `not_run` evidence; deterministic code validates the result shape and routes the workflow. Its default review strategy is focused-first, with optional exhaustive review. The detailed evidence is captured in [the prototype validation research](../research/prototype-validation.md).
 
 The prototype also demonstrates a friction pattern that AW must not copy without an explicit decision: any failed Implementer check makes a completed pass invalid, even when the same failure is reproduced on the unchanged base and appears unrelated. That couples truthful failure reporting to a mandatory workflow stop. The successor must model evidence truth and routing as separate concerns.
 

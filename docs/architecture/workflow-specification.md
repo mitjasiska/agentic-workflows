@@ -278,7 +278,7 @@ Both normal and forced PR creation require that no managed agent pass is active 
 
 ## 5. Validation evidence and routing
 
-Prototype research is recorded in [docs/research/prototype-validation.md](docs/research/prototype-validation.md). It confirms that focused test selection and execution are agent-driven prompt behavior. The deterministic controller validates structured check evidence and chooses workflow routing; it does not select or execute the commands itself. TDD is optional, Reviewer validation defaults to focused-first, and linting is merely an agent-selected check unless a repository or task explicitly requires it.
+Prototype research is recorded in [the prototype validation research](../research/prototype-validation.md). It confirms that focused test selection and execution are agent-driven prompt behavior. The deterministic controller validates structured check evidence and chooses workflow routing; it does not select or execute the commands itself. TDD is optional, Reviewer validation defaults to focused-first, and linting is merely an agent-selected check unless a repository or task explicitly requires it.
 
 The prototype rejects an Implementer completion containing any failed check. Even when the same failure is reproduced on the unchanged base and diagnosed as unrelated, the Implementer must report blocked, the loop escalates, and no Reviewer starts automatically. This is a known friction point rather than an inherited requirement.
 
