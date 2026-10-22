@@ -1,0 +1,13 @@
+interface:
+  display_name: "External Orchestrator"
+  short_description: "Coordinate architecture and implementation tasks"
+  default_prompt: "Use $external-orchestrator to prepare the next implementation task."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "linear"
+      description: "Read and update the current work queue"
+
+policy:
+  allow_implicit_invocation: true

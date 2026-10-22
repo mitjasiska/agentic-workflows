@@ -21,8 +21,9 @@ Supporting material provides context without becoming a separate source of produ
 
 - [Architecture refinement checkpoint](docs/planning/architecture-refinement-checkpoint.md) records the current refinement and implementation-readiness position.
 - [Research](docs/research/) contains evidence used to inform decisions.
+- [External Orchestrator skill development](docs/development/external-orchestrator-skill.md) explains how to validate and install the repository-maintained skill.
 
-As the product becomes usable, detailed product documentation belongs under `docs/user/`, development documentation under `docs/development/`, and technical reference material under `docs/reference/`. These sections should be created when they have real content rather than as empty placeholders.
+As the product becomes usable, detailed product documentation belongs under `docs/user/` and technical reference material under `docs/reference/`. These sections should be created when they have real content rather than as empty placeholders.
 
 The README and Architecture Documentation must remain clear to humans. Agent-oriented instructions may be terse, but no product decision should exist only in an agent instruction, task, checkpoint, research note, or chat transcript.
 

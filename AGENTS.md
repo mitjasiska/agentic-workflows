@@ -4,6 +4,8 @@
 
 Linear is the canonical source for what work should be performed next. Repository documents are authoritative for product decisions, constraints, and detailed design, but they do not create work by themselves. Begin architecture refinement or implementation from the applicable Linear issue, and use the repository sources to interpret and execute that issue. Do not turn an open item in an architecture document into an unrequested task.
 
+For architecture refinement, task preparation, work-queue coordination, or deciding next actions outside an AW-managed Implementer or Reviewer pass, use the `external-orchestrator` skill.
+
 The current architecture-refinement continuation is tracked by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness). The local checkpoint records the exact question at which that issue should resume.
 
 ## Start from the repository sources
