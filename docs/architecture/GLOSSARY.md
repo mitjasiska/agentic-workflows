@@ -20,6 +20,14 @@ _Avoid_: Workflow configuration, Project-specific settings, secret store
 The authoritative local, repository-excluded TOML settings file in a Project's canonical registered checkout. Its validated integration identities and choices are reused when new Workflows begin; a committed example documents its shape but is not active configuration.
 _Avoid_: Per-Workflow setup, committed active configuration, mutable Task settings, secret store
 
+**Local Control Interface**:
+The platform-local, non-HTTP request/reply interface through which a co-located `awctl` invokes AW application commands and queries. It is available only to the operating-system account that runs the control plane and is not a remote administration interface.
+_Avoid_: HTTP API, remote CLI endpoint, Herdr gateway
+
+**Control-plane HTTP API**:
+The browser-facing interface served by the AW control plane for its React dashboard. In v1 it is neither `awctl` transport nor a promised stable third-party integration interface.
+_Avoid_: Local Control Interface, public integration API, workflow authority
+
 **Task**:
 The Project-level, provider-neutral unit of requested work captured from a Task Source and delivered through one or more Workflows. Sibling Workflows reference the same Task identity but own independent Task Snapshots and mutable workflow state.
 _Avoid_: Issue, ticket

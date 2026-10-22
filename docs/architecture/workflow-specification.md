@@ -7,6 +7,9 @@
 ## 1. Product and reference conventions
 
 - The canonical CLI executable is `awctl`.
+- `awctl` is installed with the control plane and invokes it only through the Local Control Interface: a small non-HTTP structured JSON request/reply protocol over platform-local IPC. Linux and macOS use a Unix-domain socket; Windows uses a named pipe. The transport is selected automatically, restricted to the operating-system account running the control plane, and has no remote server configuration or discovery.
+- Local Control Interface exchanges are bounded and versioned. Queries return structured projections. A mutating command returns after durable acceptance or completion of its immediate action and includes the Operation identity and current projection when it creates an Operation. Longer-running workflow work continues under control-plane ownership when `awctl` exits or disconnects; progress comes from later queries or the dashboard rather than an operation-owning stream. Pre-stable CLI and service builds must use the same current protocol version, with mismatches rejected before command execution through a structured diagnostic and explicit update or restart guidance.
+- The control plane separately hosts the HTTP API and compiled React dashboard. React is the supported v1 HTTP client; the dashboard API is not `awctl` transport or a promised stable third-party integration contract. Both presentation adapters invoke the same application commands and queries.
 - Most task definitions originate in Linear.
 - A task definition may alternatively come from a Markdown file or pasted text.
 - The Initial E2E Milestone supports Linear as its sole Task Source. Markdown files and pasted or standard-input text are the first source expansion immediately after that milestone, before broader v1 provider and workflow expansion.

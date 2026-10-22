@@ -105,7 +105,7 @@ Integrations expose their capabilities instead of pretending every provider or h
 
 ### 4.6 Local-first ownership
 
-One Agentic Workflows installation owns the authoritative workflow state, policy, API, CLI, and dashboard. It may use Herdr to execute work on the same machine or other machines.
+One Agentic Workflows installation owns the authoritative workflow state, policy, local CLI interface, dashboard HTTP API, and dashboard. It may use Herdr to execute work on the same machine or other machines.
 
 ### 4.7 Recoverable blockers
 
@@ -135,8 +135,9 @@ Agentic Workflows has one centralized logical authoritative control plane with p
 flowchart TB
     User[Human user]
     CLI[awctl]
-    Dashboard[Dashboard]
-    API[Agentic Workflows API]
+    LocalControl[Local Control Interface<br/>JSON over local IPC]
+    Dashboard[React Dashboard]
+    HTTP[Control-plane HTTP API]
     Core[Workflow application and policy]
     State[(Durable workflow state)]
     HerdrGateway[IHerdrGateway]
@@ -149,9 +150,10 @@ flowchart TB
 
     User --> CLI
     User --> Dashboard
-    CLI --> API
-    Dashboard --> API
-    API --> Core
+    CLI --> LocalControl
+    Dashboard --> HTTP
+    LocalControl --> Core
+    HTTP --> Core
     Core --> State
     Core --> Tasks
     Core --> Forge
@@ -172,7 +174,9 @@ This is:
 - not a worker fleet;
 - not a message-broker architecture.
 
-The dashboard frontend communicates only with the Agentic Workflows control-plane API. It never opens the SQLite database, invokes Herdr, or implements workflow rules directly. The API executes application commands and queries against the same domain model and transactional store used by `awctl`, so both interfaces observe identical authorization, invariants, diagnostics, and current state.
+The React dashboard communicates only with the control-plane HTTP API. `awctl` is installed on the same machine as the control plane and communicates only through the Local Control Interface, using a small structured JSON request/reply protocol over platform-local IPC rather than HTTP. The local transport is a Unix-domain socket on Linux and macOS and a named pipe on Windows. Both presentation adapters invoke the same application commands and queries against the same domain model and transactional store, so they observe identical invariants, diagnostics, and current state. Neither interface opens SQLite, invokes Herdr, or implements workflow rules directly.
+
+The Local Control Interface is not a network administration interface. v1 has no remote `awctl` endpoint, endpoint discovery, or CLI server selection. Multi-machine execution remains independent of administration transport: the single control plane may still route execution through Herdr to saved remote machines.
 
 A VPS can host the authoritative Agentic Workflows installation and still satisfy the local-first model. A future multi-user, highly available, multi-controller system would be a materially different architecture and is not currently planned.
 
@@ -858,7 +862,7 @@ v1 provides sophisticated, detailed, read-only oversight of the system. The dash
 - available next actions and their consequences;
 - submission or export readiness and history.
 
-The Initial E2E slice implements only two operational views over that model. The Project view lists its Workflows with Task identity, phase and current outcome, active pass, attention or warning state, review and submission readiness, and last activity. The Workflow view shows the Task Snapshot, branch and worktree, current state and supported recovery guidance, ordered meaningful-step timeline, pass summaries with expandable reports and evidence, review validity, warnings and overrides, and the pull-request link when present. Both views use the same control-plane query API as `awctl`; the frontend never reads SQLite directly. Copying reports and opening external links are read-only operations. Starting, retrying, reviewing, forcing, submitting, cleaning up, and editing configuration remain CLI-only in Initial E2E. Advanced usage analytics, raw-log browsing, dashboard mutation controls, and final visual polish are deferred. Polling versus push refresh, component layout, and styling remain implementation and focused UI/UX latitude.
+The Initial E2E slice implements only two operational views over that model. The Project view lists its Workflows with Task identity, phase and current outcome, active pass, attention or warning state, review and submission readiness, and last activity. The Workflow view shows the Task Snapshot, branch and worktree, current state and supported recovery guidance, ordered meaningful-step timeline, pass summaries with expandable reports and evidence, review validity, warnings and overrides, and the pull-request link when present. The frontend reads those projections through the control-plane HTTP API, while `awctl` obtains equivalent projections through the Local Control Interface; both adapters invoke the same application query handlers and read model. The frontend never reads SQLite directly. Copying reports and opening external links are read-only operations. Starting, retrying, reviewing, forcing, submitting, cleaning up, and editing configuration remain CLI-only in Initial E2E. Advanced usage analytics, raw-log browsing, dashboard mutation controls, and final visual polish are deferred. Polling versus push refresh, component layout, and styling remain implementation and focused UI/UX latitude.
 
 Each workflow has a durable, visually ordered timeline. The dashboard numbers and presents meaningful steps such as task capture, Implementation Pass 1, Review Pass 1 returning findings, Implementation Pass 2 resolving them, Review Pass 2 succeeding, and PR creation. Each Implementer or Reviewer step initially shows its role, outcome, timestamp, and concise result and can be expanded in place to reveal that pass's detailed structured report and evidence. Earlier steps remain visible after later steps supersede their conclusions.
 
@@ -876,7 +880,7 @@ Detailed dashboard appearance and interaction design are intentionally deferred 
 
 v2 is expected to control workflows through the dashboard, including implementation, review, retry, resume, agent instructions, next-pass harness or model selection, interruption, submission, drafts, and deliberate force operations.
 
-Dashboard controls call the same durable application commands as `awctl` through the control-plane API. Dashboard reporting uses control-plane queries over the authoritative database rather than direct SQL access. The dashboard never controls Herdr directly and never implements a second workflow engine.
+Dashboard controls call the same durable application commands as `awctl` through the control-plane HTTP API; `awctl` invokes them through the Local Control Interface. Dashboard reporting uses control-plane queries over the authoritative database rather than direct SQL access. The dashboard never controls Herdr directly and never implements a second workflow engine.
 
 ### 18.3 External Orchestrators
 
@@ -989,7 +993,8 @@ The new product will be implemented in **C#/.NET**. C# is selected because it is
 The expected shape is:
 
 - one long-running ASP.NET Core application/service hosting the v1 control plane;
-- an HTTP application API used by `awctl` and the dashboard;
+- a Local Control Interface used only by a co-located `awctl`, carrying bounded, versioned structured JSON requests and replies over a Unix-domain socket on Linux and macOS or a named pipe on Windows;
+- a control-plane HTTP API used by the React dashboard, not by `awctl`;
 - a React and TypeScript dashboard compiled to static assets and served by the ASP.NET Core host in production;
 - durable local workflow storage;
 - a replaceable Herdr infrastructure adapter;
@@ -997,9 +1002,13 @@ The expected shape is:
 
 On Linux, v1 is installed as a non-root `systemd` user service under the same Unix account that owns the Herdr sessions, Git credentials, and AW-managed workspaces. It starts automatically and is supervised across process failures and machine restarts. The service owns the control-plane lifecycle, SQLite connection, API and dashboard host, durable pending-operation dispatcher, and restart reconciliation. An interactive terminal or active `awctl` process is not required for a managed agent pass to remain tracked. A dedicated organizational service account is deferred to the v3 deployment model rather than imposed on the single-operator v1 installation.
 
-Ordinary `awctl` commands never silently start the control-plane service. When the configured endpoint is unreachable, `awctl` reports that endpoint, the relevant local service status when available, and an exact explicit recovery command. Service lifecycle actions such as start, stop, restart, and status remain deliberate commands; a failed workflow command is not treated as permission to spawn a hidden background process.
+Ordinary `awctl` commands never silently start the control-plane service. When the local IPC endpoint is unavailable, `awctl` reports the expected local endpoint, the relevant local service status when available, and an exact explicit recovery command. Service lifecycle actions such as start, stop, restart, and status remain deliberate commands; a failed workflow command is not treated as permission to spawn a hidden background process.
 
-`awctl` uses one explicitly configured logical control-plane endpoint and performs no automatic network or service discovery. The default endpoint is loopback for the local v1 installation; an operator may configure the private Tailscale-style address of a remote central installation. Endpoint precedence is `--server <url>`, then the `AW_SERVER` environment variable, then saved user configuration, then the loopback default. The command-line option is invocation-scoped and never modifies saved configuration. An invalid value at a higher-precedence layer produces a clear configuration error rather than silently falling back. A later deployment with coordinated service replicas can preserve this client contract by placing them behind one stable endpoint, so hypothetical distribution does not justify v1 discovery machinery.
+`awctl` is a local administrative client for the co-located control plane. It selects the operating-system transport automatically and has no `--server` option, server environment variable, saved network endpoint, or network discovery. The Local Control Interface uses a small non-HTTP JSON request/reply protocol whose exact framing and endpoint name remain implementation choices. On Unix, the service creates the socket in a private per-user runtime location and restricts it to the operating-system account that runs the control plane. On Windows, the named-pipe adapter applies the equivalent user-specific access control. Neither adapter adds application tokens, login, or authorization in the single-operator model. A future remote or distributed administration model requires an explicit architecture decision and may add another adapter without changing application commands and queries.
+
+Each Local Control Interface exchange is bounded. A query returns its structured projection. A mutating command returns after the control plane has durably accepted the command or completed its immediate action; when it creates an Operation, the response includes the Operation identity and current projection. Longer-running workflow work belongs to the control plane and continues independently of the `awctl` process or IPC connection. Disconnecting the client never cancels an Operation. Later queries and the dashboard report progress; a live watch mode may be added later without changing operation ownership or making streaming part of the initial contract.
+
+Every exchange identifies its Local Control Interface protocol version and returns either a structured result or a structured diagnostic. Pre-stable builds support only their matching current protocol version because `awctl` and the control plane are packaged together. A mismatch fails without executing the requested command and identifies the mismatched versions plus an explicit update or service-restart recovery action; v1 does not negotiate compatibility or silently reinterpret a request. Exact envelope property names, message framing, serialization mechanics, and endpoint names remain Implementation Latitude.
 
 AW configuration has two authoritative file scopes: one Global Configuration settings file for the installation and one Project Configuration TOML file for each registered Project. One AW Project is anchored to exactly one Git repository and contains all of the Workflows started for Tasks in that repository. Initial E2E maps it to exactly one Linear Project; supporting several Linear Projects as Task sources for the same repository is a future extension, not a reason to make Project multi-repository. One-time Project setup resolves and validates the repository, Linear, GitHub, Herdr, and Linear In Progress mappings to stable provider identities. Later Workflows reuse that validated configuration rather than asking the same integration questions at every start. A Workflow start revalidates the external facts that matter and stops before agent launch with an actionable configuration diagnostic when a saved identity or mapping has drifted.
 
@@ -1009,7 +1018,7 @@ Neither Global Configuration nor Project Configuration is a secret store, even w
 
 Workflow creation captures an immutable Workflow Integration Binding containing the exact repository, Linear Task and Project, GitHub target, Herdr execution target, and owned workspace identities resolved for that Workflow. These relationships use stable provider identities; names are display metadata. Renaming a bound Linear Project or another external resource therefore triggers revalidation and a display-metadata refresh without invalidating the binding or deleting Workflow data. Later Global or Project Configuration edits that select a different Integration Binding identity affect new Workflows but never silently redirect an existing one. A retained Workflow continues with its captured binding and stops the affected action with an actionable mismatch diagnostic if a bound target is missing, replaced, or unreachable. Non-identity settings continue to resolve at their documented Workflow or pass boundary under the established precedence and are recorded with the effective decision. Initial E2E does not rebind an existing Workflow; the supported choices are to restore the binding, finish or explicitly clean up the retained Workflow, or start new work under the new configuration. Configuration drift never authorizes automatic Workflow deletion. Credential rotation through the same credential reference remains live because it changes access rather than target identity.
 
-The HTTP API is part of the control plane, not a separate source of workflow truth. Its application commands and queries are the supported access boundary for the dashboard and `awctl`; SQLite remains an internal persistence detail.
+The HTTP API is part of the control plane, not a separate source of workflow truth. In v1 it is the dashboard-facing interface, with the co-hosted React application as its supported client; it is not a promised stable general-purpose integration API. The Local Control Interface is the supported access path for `awctl`. Both adapters invoke the same application commands and queries, while SQLite remains an internal persistence detail.
 
 One AW installation uses one transactional database for all registered projects and repositories. All authoritative AW-owned workflow data lives there: project and repository registrations, workflow and worktree identities, task snapshots, handoffs, result envelopes, reports, events, state transitions, evidence, measurements, decisions, warnings, recovery plans, and submission records. This central scope enables one dashboard to query and aggregate workflow state and token usage across the entire installation. A temporary `result.json` may remain the delivery boundary between an agent process and AW, but after validation and ingestion it is transport rather than a second durable source of truth. v1 should not reproduce the prototype's ambiguity about whether current workflow truth lives in the database or durable sidecar files.
 
@@ -1038,8 +1047,9 @@ Herdr is implemented in Rust, but Agentic Workflows does not need to share its i
 Detailed threat modeling remains future work, but the following boundaries are already required:
 
 - v1 is a single-trusted-operator system with no application-managed users, login, authentication, authorization, or RBAC;
-- the v1 dashboard and API rely on a trusted network perimeter, such as loopback access or a private Tailscale-style overlay network, and must not be treated as safe for direct public exposure;
+- the v1 dashboard and control-plane HTTP API rely on a trusted network perimeter, such as loopback access or a private Tailscale-style overlay network, and must not be treated as safe for direct public exposure;
 - the control-plane HTTP listener binds to loopback by default; listening on a private-network interface requires explicit configuration and a service restart but does not require a database migration;
+- the Local Control Interface accepts only the operating-system account that runs the control plane, enforced by owner-only Unix socket access or an equivalent Windows named-pipe ACL rather than application credentials;
 - v1 audit records distinguish command and automation origin where useful, such as CLI, dashboard, reconciliation, or system, but do not pretend to identify a human user;
 - named actors and permissions are deferred to the v3 organizational direction and may be introduced through database migrations and API middleware without changing workflow-domain identity or historical pass data;
 - task text, provider data, agent output, and repository contents are untrusted input;
@@ -1059,27 +1069,26 @@ The Initial E2E readiness gate is complete. The next architecture discussions sh
 
 1. The remaining domain aggregate boundaries and state names. Workflow scope is already settled as the value `WholeTask` or `NamedSlice(name)`, not a separate Task Slice aggregate.
 2. SQLite evolution beyond the settled Initial E2E schema, workflow-local event ordering, pre-stable reset boundary, and provisional local backup and corruption-recovery policy.
-3. The saved endpoint-configuration format and its validation. Endpoint precedence is already fixed as `--server`, `AW_SERVER`, saved user configuration, then loopback default.
-4. Operational guidance for explicit private-network exposure beyond the already selected loopback default, without v1 application authentication.
-5. `IHerdrGateway` expansion beyond the Initial E2E local Codex command set.
-6. Herdr version and capability negotiation beyond the minimum Initial E2E compatibility check.
-7. The post-stabilization compatibility and version-evolution policy for the universal JSON Result Envelope; pre-stable builds intentionally support only their current schema.
-8. Whether and when a raw-socket event subscriber is needed in addition to CLI wrappers.
-9. How remote execution output and evidence are retrieved after disconnection beyond the local Initial E2E path.
-10. The complete Codex and Pi capability model beyond the initial Codex path.
-11. Remaining validation and loop policy details, including the Managed Agent Pass Budget's broader saved-configuration scope, possible time-based budgets, provider usage-window behavior, and the exact classification of failed or unavailable checks during routing.
-12. Workspace, branch, and identifier naming rules beyond the settled Initial E2E Linear conventions.
-13. Local artifact export, rendering, and review semantics.
-14. GitHub submission behavior beyond the Initial E2E new-PR path, including updating an existing pull request and whether later evidence justifies adopting Git history more complex than one direct non-merge commit.
-15. Provider contracts for later Jira and GitLab support.
-16. Dashboard information architecture and interaction design beyond the two settled Initial E2E read-only views. React with TypeScript, served by the ASP.NET Core control plane in production, is already selected.
-17. The minimum v1 resource and token-usage telemetry, including attribution boundaries and behavior when a harness cannot report exact usage.
-18. Logging, event retention, audit history, and secret-redaction rules.
-19. The concrete filenames and schema layout for the settled configuration hierarchy. Precedence is explicit invocation or next-pass choice, retained Workflow selection, Project Configuration, Global Configuration, then built-in default; immutable Integration Binding identities are not overridable through that hierarchy.
-20. Lifecycle and recovery expansion beyond the settled Initial E2E cancellation, abandonment, retry, resume, and forced-cleanup semantics.
-21. The boundary between a retained completed workflow and a new follow-up operation.
-22. Installation, update, and packaging mechanics.
-23. Permanent public branding, including a proper domain, handle, and trademark check before adopting Paraorb or another name.
+3. Operational guidance for explicit private-network dashboard exposure beyond the already selected loopback default, without v1 application authentication.
+4. `IHerdrGateway` expansion beyond the Initial E2E local Codex command set.
+5. Herdr version and capability negotiation beyond the minimum Initial E2E compatibility check.
+6. The post-stabilization compatibility and version-evolution policy for the universal JSON Result Envelope and Local Control Interface; pre-stable builds intentionally support only their current schemas.
+7. Whether and when a raw-socket event subscriber is needed in addition to CLI wrappers.
+8. How remote execution output and evidence are retrieved after disconnection beyond the local Initial E2E path.
+9. The complete Codex and Pi capability model beyond the initial Codex path.
+10. Remaining validation and loop policy details, including the Managed Agent Pass Budget's broader saved-configuration scope, possible time-based budgets, provider usage-window behavior, and the exact classification of failed or unavailable checks during routing.
+11. Workspace, branch, and identifier naming rules beyond the settled Initial E2E Linear conventions.
+12. Local artifact export, rendering, and review semantics.
+13. GitHub submission behavior beyond the Initial E2E new-PR path, including updating an existing pull request and whether later evidence justifies adopting Git history more complex than one direct non-merge commit.
+14. Provider contracts for later Jira and GitLab support.
+15. Dashboard information architecture and interaction design beyond the two settled Initial E2E read-only views. React with TypeScript, served by the ASP.NET Core control plane in production, is already selected.
+16. The minimum v1 resource and token-usage telemetry, including attribution boundaries and behavior when a harness cannot report exact usage.
+17. Logging, event retention, audit history, and secret-redaction rules.
+18. The concrete filenames and schema layout for the settled configuration hierarchy. Precedence is explicit invocation or next-pass choice, retained Workflow selection, Project Configuration, Global Configuration, then built-in default; immutable Integration Binding identities are not overridable through that hierarchy.
+19. Lifecycle and recovery expansion beyond the settled Initial E2E cancellation, abandonment, retry, resume, and forced-cleanup semantics.
+20. The boundary between a retained completed workflow and a new follow-up operation.
+21. Installation, update, and packaging mechanics.
+22. Permanent public branding, including a proper domain, handle, and trademark check before adopting Paraorb or another name.
 
 These questions must be resolved without weakening low friction, human control, evidence, concurrency, replaceable integrations, or the Herdr execution boundary.
 
@@ -1088,6 +1097,8 @@ These questions must be resolved without weakening low friction, human control, 
 Agentic Workflows is one evolving C#/.NET product in the `agentic-workflows` repository. AWP remains the historical Python prototype and behavioral reference. The product is not called Lite, and Paraorb is only a possible later public brand.
 
 One authoritative local-first control plane owns workflow meaning, durable state, policy, evidence, reporting, and commands. Herdr owns local and remote execution, sessions, panes, worktrees, harness processes, and execution concurrency. Agentic Workflows has no worker process and no RabbitMQ. Multi-machine execution is available through Herdr without creating a distributed Agentic Workflows control plane.
+
+A co-located `awctl` invokes the control plane through the non-HTTP Local Control Interface over platform-local IPC, using a Unix-domain socket on Linux and macOS or a named pipe on Windows. Its versioned exchanges are bounded request/reply interactions; longer-running Operations remain owned by the control plane and survive client disconnection. The co-hosted React dashboard is the supported client of the separate control-plane HTTP API. Both adapters invoke the same application commands and queries; neither is a second workflow implementation.
 
 The first implementation is a narrow, production-shaped Initial E2E Milestone: captured Linear Task, Codex implementation through Herdr, exact proposed-tree capture, fresh independent review, deterministic `awctl pr` commit, push, and GitHub pull-request creation, and a minimal read-only dashboard. v1 expands that foundation to Codex and Pi, all required task sources, Git and local-artifact workflows, detailed reporting, concurrency, follow-up submission, and safe recovery. v2 is expected to add dashboard control through the same application commands used by `awctl`.
 
@@ -1121,7 +1132,10 @@ This section preserves discarded alternatives so future discussions do not accid
 | Limit execution to one machine | Rejected | Herdr can route work to local and saved remote machines while Agentic Workflows keeps one authoritative control plane. |
 | Require PostgreSQL in v1 in anticipation of future distribution | Rejected | One AW service process owns v1 state. SQLite avoids an external database service; PostgreSQL can be reconsidered if coordinated multi-writer replicas or high availability become real requirements. |
 | Silently start the AW service from ordinary `awctl` commands | Rejected | The `systemd` user service starts automatically. Connection failures receive explicit diagnostics and deliberate service lifecycle commands rather than hidden process creation. |
-| Automatically discover AW control-plane services on the network | Rejected for v1 | `awctl` uses one explicit endpoint, defaulting to loopback. Later coordinated replicas can remain behind the same logical endpoint. |
+| Use the control-plane HTTP API as `awctl` transport | Rejected | `awctl` is a co-located administrative client and uses the non-HTTP Local Control Interface over platform-local IPC; HTTP remains dashboard-facing. |
+| Make an `awctl` connection own or stream an Operation's lifetime | Rejected | Local IPC exchanges are bounded. The control plane durably owns longer-running work, which survives client disconnection and is observed through later queries or the dashboard. |
+| Automatically discover AW control-plane services on the network | Rejected for v1 | `awctl` selects its platform-local IPC transport automatically and has no remote server endpoint. A remote administration model requires a later explicit architecture decision. |
+| Promise the v1 HTTP interface as a stable third-party integration API | Rejected for v1 | The co-hosted React dashboard is its supported client. External consumers, compatibility, and authentication should be designed from real requirements rather than inferred from the internal dashboard interface. |
 | Add global concurrency limits or automatic CPU/memory throttling in v1 | Rejected for v1 | Users control capacity. Agentic Workflows enforces correctness locks and may report resource use. |
 | Block concurrency across an entire repository | Rejected | Isolated branches and worktrees must permit parallel work. |
 | Make the v1 dashboard the mutation interface | Deferred | v1 emphasizes detailed reporting. v2 controls use the same application commands as the CLI. |

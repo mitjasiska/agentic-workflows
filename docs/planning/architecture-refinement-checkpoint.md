@@ -28,7 +28,7 @@ Current readiness: **Ready for Initial E2E implementation-task preparation.** Th
 
 ## Last completed decision
 
-Question 96 makes cleanup the complete local recovery path for reusing a Task and scope. Ordinary cleanup removes the exact local Workflow branch only when no unique local work would be lost; `awctl cleanup --force` deletes that exact verified branch even if local-only work is discarded. Neither form changes a remote branch, pull request, or Task, so a remaining live remote branch continues to block `awctl start`.
+The post-DEV-119 local-control refinement separates the two control-plane presentation interfaces. A co-located `awctl` uses bounded, versioned, non-HTTP structured JSON request/reply exchanges over platform-local IPC: a Unix-domain socket on Linux and macOS or a named pipe on Windows, restricted to the operating-system account running the control plane. Mutating requests return after durable acceptance or completion of their immediate action; longer-running Operations remain owned by the control plane and survive CLI disconnection. Pre-stable CLI and service builds accept only their matching current protocol version. The control-plane HTTP API is reserved for the co-hosted React dashboard, may be exposed explicitly on a trusted private network, and is not a promised v1 third-party integration contract. Both adapters invoke the same application commands and queries. Remote Herdr execution remains independent of this local administration topology.
 
 ## Next question
 
@@ -48,6 +48,7 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 - [x] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR is explicitly the immediate post-milestone follow-up.
 - [x] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
 - [x] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
+- [x] Separate the co-located `awctl` Local Control Interface from the dashboard HTTP API, including cross-platform local IPC, single-operator access, bounded operation-independent exchanges, and pre-stable protocol compatibility.
 
 ## Explicitly deferred beyond the readiness gate
 
@@ -62,6 +63,7 @@ These matters remain important but do not block the first implementation task un
 - Production backup cadence and retention, off-machine storage, and host-level disaster recovery beyond the provisional Initial E2E SQLite backups.
 - GitLab, Jira, authentication/RBAC, PostgreSQL, dashboard mutation controls, scheduling, organization governance, and public branding.
 - The full dashboard UI/UX design beyond the minimal read-only lifecycle projection needed by the milestone.
+- Windows and macOS packaging, service hosting, and their platform adapters; the architecture is cross-platform, while the Initial E2E implementation and official v1 support remain Linux-first.
 
 ## Session-size estimate
 
@@ -70,4 +72,4 @@ These matters remain important but do not block the first implementation task un
 
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
-The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. The gate is closed; implementation still begins only from a separate Linear implementation issue with a defined outcome and acceptance boundary.
+The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. A 2026-10-22 owner-directed refinement then replaced CLI-over-HTTP and remote CLI endpoint configuration with the platform-local Local Control Interface while retaining dashboard HTTP and remote Herdr execution. The gate is closed; implementation still begins only from a separate Linear implementation issue with a defined outcome and acceptance boundary.
