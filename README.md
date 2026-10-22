@@ -2,7 +2,7 @@
 
 Agentic Workflows is a local-first control plane and dashboard for human-directed agentic work. It turns a captured task into implementation, independent review, durable evidence, and a human-approved submission or exported artifact.
 
-The current directory name is historical; the product is not named “Lite.” This repository contains the completed Initial E2E architecture and will grow into the production implementation in the same codebase.
+The repository and product are both named Agentic Workflows. This repository contains the completed Initial E2E architecture and will grow into the production implementation in the same codebase.
 
 ## Current status
 
