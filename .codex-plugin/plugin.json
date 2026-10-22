@@ -1,0 +1,21 @@
+{
+  "name": "agentic-workflows",
+  "version": "0.1.0",
+  "description": "Prepare architecture-ready development work and create verified Linear issues with reusable Agentic Workflows skills.",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agentic Workflows",
+    "shortDescription": "Prepare architecture-ready Linear development work",
+    "longDescription": "Coordinate architecture readiness and turn approved outcomes into concise, verified Linear issues using two focused, composable skills.",
+    "developerName": "Mitja Šiška",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Prepare the next architecture-ready development task.",
+      "Turn this outcome into a verified Linear issue."
+    ]
+  }
+}

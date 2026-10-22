@@ -29,7 +29,7 @@ For a blocked result, identify one focused decision and its evidence. Do not cre
 
 ## Validate the trace
 
-Write the evaluation in the schema accepted by `../scripts/validate_traceability.py`. Include the current work item's identifier when one exists, but never require a particular identifier format. Validate the file before any task-authoring call.
+Write the evaluation using [the traceability contract](traceability.md). Include the current work item's identifier when one exists, but never require a particular identifier format. Check every required field and readiness invariant before any task-authoring call.
 
 ## Delegate issue authoring
 

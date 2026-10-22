@@ -38,16 +38,10 @@ Default to a brief recommendation and the immediate next step. Present one decis
 
 Use `grilling` and `domain-modeling` when a focused architecture decision or canonical terminology update is needed. Once readiness is `Ready`, use `create-linear-task` as the sole owner of issue drafting, classification, labels, relationships, mutation safety, and verification. Do not reproduce its renderer or private configuration here.
 
-Use Linear MCP directly for Linear reads and writes. Do not depend on Orca or a command-line Linear client.
+Use Linear MCP directly for reads. Invoke `create-linear-task` for every approved issue creation, refinement, relationship change, state transition, or other issue write. Do not depend on Orca or a command-line Linear client.
 
 ## Record traceability
 
-Create a compact JSON trace for each readiness evaluation and validate it with:
-
-```text
-python <external-orchestrator-skill>/scripts/validate_traceability.py <trace.json>
-```
-
-Use the [traceability contract](references/traceability.md) for the required fields. The validator enforces the common evidence shape and readiness invariants. It does not decide architecture or write to Linear.
+Create a compact JSON trace for each readiness evaluation using the [traceability contract](references/traceability.md). Check every required field and readiness invariant before invoking `create-linear-task`. The trace records the decision; it does not decide architecture or authorize a Linear write.
 
 When validating changes to this skill, use the [forward-test scenarios](references/validation-scenarios.md).

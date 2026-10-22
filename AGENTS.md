@@ -4,9 +4,9 @@
 
 Linear is the canonical source for what work should be performed next. Repository documents are authoritative for product decisions, constraints, and detailed design, but they do not create work by themselves. Begin architecture refinement or implementation from the applicable Linear issue, and use the repository sources to interpret and execute that issue. Do not turn an open item in an architecture document into an unrequested task.
 
-For architecture refinement, task preparation, work-queue coordination, or deciding next actions outside an AW-managed Implementer or Reviewer pass, use the `external-orchestrator` skill.
+For architecture refinement, task preparation, work-queue coordination, or deciding next actions outside an AW-managed Implementer or Reviewer pass, use the `external-orchestrator` skill. For Linear issue creation, refinement, relationships, or other requested issue mutations, use the `create-linear-task` skill; the External Orchestrator delegates those writes to it.
 
-The current architecture-refinement continuation is tracked by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness). The local checkpoint records the exact question at which that issue should resume.
+The completed Initial E2E architecture refinement is recorded by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). The local checkpoint records that completed readiness state; any further refinement must begin from the currently applicable Linear issue.
 
 ## Start from the repository sources
 
@@ -89,3 +89,11 @@ Linear issues should contain task-specific outcomes, scope, exclusions, acceptan
 ## Keep planning and implementation distinct
 
 Architecture refinement and task preparation do not authorize application implementation. Begin implementation only from an explicit implementation request with a defined outcome and acceptance boundary.
+
+## Keep repository tooling in the product stack
+
+Agentic Workflows is a C#/.NET product. Repository-owned implementation, validation utilities, and automated tests must use the established .NET solution and its testing stack. The historical Python prototype is evidence, not a precedent for adding Python code here. Use another language only when the current task explicitly requires it.
+
+## Preserve user control of Git publication
+
+Leave changes uncommitted until the user reviews the diff and explicitly approves the commit. Commit approval does not authorize a push: show the resulting commit and obtain separate explicit approval before pushing it. Earlier or general authorization is not standing permission for later commits or pushes.

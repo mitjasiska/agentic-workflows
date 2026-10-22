@@ -21,7 +21,7 @@ For each change, record:
 
 Update authoritative documents when the active request authorizes it. Do not silently convert a task or chat decision into product authority.
 
-Create and validate the common traceability JSON with `../scripts/validate_traceability.py`. Use `affected_tasks` for the proposed task changes and set readiness from the resulting current truth.
+Create and check the common JSON using [the traceability contract](traceability.md). Use `affected_tasks` for the proposed task changes and set readiness from the resulting current truth.
 
 ## Apply approved task changes
 

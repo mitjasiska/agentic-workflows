@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-21
+Last updated: 2026-10-22
 
 ## Purpose and authority
 
@@ -8,7 +8,7 @@ This file is the durable continuation point for architecture grilling and implem
 
 It is not a source of product truth. Settled decisions belong in `docs/architecture/architecture.md`, `docs/architecture/workflow-specification.md`, `docs/architecture/GLOSSARY.md`, and the applicable ADR under `docs/architecture/adr/`. The broader unresolved inventory remains in `docs/architecture/architecture.md` under **Decisions still requiring refinement**. When this checkpoint conflicts with an authoritative document, fix the checkpoint.
 
-Linear is the canonical work queue. The architecture foundation is completed in [DEV-115](https://linear.app/mitjasiska/issue/DEV-115/define-agentic-workflows-architecture-foundation). Continue the remaining readiness work under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness); this checkpoint supplies that issue's exact local continuation point but does not replace it.
+Linear is the canonical work queue. The architecture foundation was completed in [DEV-115](https://linear.app/mitjasiska/issue/DEV-115/define-agentic-workflows-architecture-foundation), and the Initial E2E architecture was completed in [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). This checkpoint records that completed readiness state but does not authorize further refinement or implementation.
 
 ## How to continue
 
@@ -16,7 +16,7 @@ From this repository, invoke the installed `grilling` skill or the `grill-with-d
 
 > Continue the Agentic Workflows architecture refinement from `docs/planning/architecture-refinement-checkpoint.md`. Read the repository instructions and authoritative planning documents it identifies. Ask exactly one focused question at a time, give a candid recommendation, write each accepted decision into the authoritative documents, and keep this checkpoint current.
 
-Confirm that DEV-119 is still the applicable Linear work item before continuing. If it has been completed, canceled, or superseded, follow the current Linear queue instead of starting work merely because this checkpoint contains another question.
+Identify the currently applicable Linear work item before continuing. Do not resume DEV-119 or start work merely because this checkpoint records prior questions.
 
 At the end of every refinement session, update the date, last completed decision, exact next question, and readiness checklist below. Completion means that another repository-aware agent can resume with the next question without consulting chat history.
 
@@ -32,7 +32,7 @@ Question 96 makes cleanup the complete local recovery path for reusing a Task an
 
 ## Next question
 
-None. The Initial E2E architecture is ready for implementation-task preparation. Per `README.md`, the next work-queue action is to create the separate Initial E2E implementation issue in Linear and only then complete DEV-119.
+None. The Initial E2E architecture is complete and DEV-119 is Done. Implementation tasks will be prepared separately from the current Linear queue when requested.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -70,4 +70,4 @@ These matters remain important but do not block the first implementation task un
 
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
-The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. The gate is closed again; implementation still begins only from the separate Linear implementation issue required by `README.md`.
+The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. The gate is closed; implementation still begins only from a separate Linear implementation issue with a defined outcome and acceptance boundary.

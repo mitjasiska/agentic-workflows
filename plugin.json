@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agentic-workflows",
+  "version": "0.1.0",
+  "description": "Prepare architecture-ready development work and create verified Linear issues with reusable Agentic Workflows skills.",
+  "author": {
+    "name": "Mitja Šiška",
+    "url": "https://github.com/mitjasiska"
+  },
+  "homepage": "https://github.com/mitjasiska/agentic-workflows",
+  "repository": "https://github.com/mitjasiska/agentic-workflows",
+  "keywords": [
+    "agentic-workflows",
+    "linear",
+    "architecture",
+    "development-workflow"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Agentic Workflows",
+        "shortDescription": "Prepare architecture-ready Linear development work",
+        "longDescription": "Coordinate architecture readiness and turn approved outcomes into concise, verified Linear issues using two focused, composable skills.",
+        "developerName": "Mitja Šiška",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": [
+          "Prepare the next architecture-ready development task.",
+          "Turn this outcome into a verified Linear issue."
+        ]
+      }
+    }
+  }
+}

@@ -6,7 +6,7 @@ The repository and product are both named Agentic Workflows. This repository con
 
 ## Current status
 
-The Initial E2E architecture is ready for implementation-task preparation. Architecture refinement is tracked by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture-readiness). Application implementation must begin from a separate Linear issue with a defined outcome and acceptance boundary.
+The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Application implementation must begin from a separate Linear issue with a defined outcome and acceptance boundary.
 
 ## Documentation
 
@@ -21,7 +21,7 @@ Supporting material provides context without becoming a separate source of produ
 
 - [Architecture refinement checkpoint](docs/planning/architecture-refinement-checkpoint.md) records the current refinement and implementation-readiness position.
 - [Research](docs/research/) contains evidence used to inform decisions.
-- [External Orchestrator skill development](docs/development/external-orchestrator-skill.md) explains how to validate and install the repository-maintained skill.
+- [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, validation, and installation paths.
 
 As the product becomes usable, detailed product documentation belongs under `docs/user/` and technical reference material under `docs/reference/`. These sections should be created when they have real content rather than as empty placeholders.
 

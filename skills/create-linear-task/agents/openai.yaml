@@ -1,0 +1,13 @@
+interface:
+  display_name: "Create Linear Task"
+  short_description: "Draft and refine agent-ready Linear issues"
+  default_prompt: "Use $create-linear-task to prepare this work as a concise, agent-ready Linear issue."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "linear"
+      description: "Read and update Linear issues"
+
+policy:
+  allow_implicit_invocation: true
