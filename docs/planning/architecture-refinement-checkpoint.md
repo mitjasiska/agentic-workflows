@@ -24,9 +24,11 @@ At the end of every refinement session, update the date, last completed decision
 
 Reach a sufficiently specified Initial E2E Milestone to prepare and start its implementation task. The complete v1 architecture does not need to be finished first. An unanswered matter blocks implementation only when it could materially change the milestone's scope, observable behavior, acceptance criteria, domain ownership, persistence, integration boundaries, sequencing, safety, or recovery.
 
-Current readiness: **Ready for Initial E2E implementation-task preparation.** The original readiness grilling and the targeted pre-implementation consistency audit are complete. Broader v1 decisions remain deferred and do not block this milestone.
+Current readiness: **Ready for DEV-123 implementation.** The original readiness grilling, targeted pre-implementation consistency audit, and the gateway-ownership clarification prompted by the first DEV-123 readiness pass are complete. Broader v1 decisions remain deferred and do not block this milestone.
 
 ## Last completed decision
+
+DEV-123 implementation readiness clarified where the already-settled Herdr gateway guarantees live. `IHerdrGateway` provides AW-semantic idempotency, Operation correlation, reconciliation, and Result Envelope acknowledgement by composing AW's durable pending intent and Operation-scoped result delivery with existing structured Herdr CLI calls and verified Herdr, Git, and filesystem facts. Herdr continues to own workspace, worktree, pane, process, and session mechanics but does not need native AW Workflow or Operation fields, a turn tracker, a result store, or an acknowledgement API. Harness-specific Herdr hooks are optional aids rather than core prerequisites. This preserves the existing ownership and recovery invariants and is recorded as a clarification in the architecture, workflow specification, ADR 0032, and ADR 0034.
 
 DEV-122 refines the Local Control Interface Design Direction to JSON-RPC 2.0 using an established .NET implementation, replacing the custom envelope. The AW application protocol version is carried separately and validated before any application dispatch. Bounded exchanges, same-account local IPC, transport-independent application handlers, and control-plane ownership of accepted Operations remain unchanged. Notifications, batching, subscriptions, streaming, and remote administration are not introduced. The accepted decision is recorded in [ADR 0038](../architecture/adr/0038-adopt-json-rpc-for-local-control.md), the architecture, and the workflow specification; the implemented contract is in [Reference Documentation](../reference/local-control-interface.md). This issue does not reopen broader Initial E2E refinement or authorize other workflow implementation.
 
@@ -34,7 +36,7 @@ The post-DEV-119 local-control refinement separates the two control-plane presen
 
 ## Next question
 
-None. The Initial E2E architecture is complete and DEV-119 is Done. Implementation tasks will be prepared separately from the current Linear queue when requested.
+None. The Initial E2E architecture is complete, the gateway-ownership ambiguity is clarified, and DEV-123 may restart from the current Linear issue.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -76,3 +78,5 @@ These matters remain important but do not block the first implementation task un
 These are planning estimates, not completeness targets. Stop asking when the readiness checklist is resolved strongly enough to produce an implementation task with clear outcomes and acceptance boundaries; leave reversible code-level choices to Implementation Latitude.
 
 The 2026-10-21 pre-implementation audit reopened the readiness gate for a small set of concrete consistency gaps. Questions 89 through 96 resolved general Workflow continuation, shared Task ownership, configuration authority and precedence, stable external identity behavior, deterministic metadata for safe local commits, provisional forced-submission phase behavior, the Initial E2E new-pull-request boundary, and complete local branch cleanup. A 2026-10-22 owner-directed refinement then replaced CLI-over-HTTP and remote CLI endpoint configuration with the platform-local Local Control Interface while retaining dashboard HTTP and remote Herdr execution. The gate is closed; implementation still begins only from a separate Linear implementation issue with a defined outcome and acceptance boundary.
+
+The first DEV-123 readiness pass on 2026-10-24 exposed wording that could be read as requiring Herdr-native workflow idempotency, Operation correlation, result retention, acknowledgement, and Codex session-hook support. The clarified authority keeps those semantics in AW's gateway composition and durable result delivery without weakening conservative reconciliation or changing Herdr's ownership of execution resources.
