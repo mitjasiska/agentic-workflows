@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using System.Text.Json;
 using AgenticWorkflows.Application;
 using AgenticWorkflows.LocalControl;
+using AgenticWorkflows.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -21,8 +22,11 @@ try
     var builder = Host.CreateApplicationBuilder();
     builder.Services.AddSingleton(endpoint);
     builder.Services.AddSingleton<IControlPlaneStatusQuery, ControlPlaneStatusQuery>();
+    builder.Services.AddSingleton(_ => CreateWorkflowRuntime());
+    builder.Services.AddSingleton<IWorkflowRuntime>(provider => provider.GetRequiredService<WorkflowRuntime>());
     builder.Services.AddSingleton<LocalControlServer>();
     builder.Services.AddHostedService<LocalControlService>();
+    builder.Services.AddHostedService<WorkflowRuntimeService>();
     using var host = builder.Build();
     await host.RunAsync();
     return 0;
@@ -35,6 +39,27 @@ catch (Exception exception)
     return 1;
 }
 
+static WorkflowRuntime CreateWorkflowRuntime()
+{
+    string dataRoot = Environment.GetEnvironmentVariable("XDG_DATA_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+    string configRoot = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
+    string data = Path.Combine(dataRoot, "agentic-workflows");
+    var process = new ArgumentProcess();
+    var repository = new GitWorkflowRepository(process);
+    var client = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false });
+    return new(Path.Combine(data, "workflows.db"), new WorkflowConfiguration(Path.Combine(configRoot, "agentic-workflows", "global.toml"), data),
+        repository, new LinearGateway(client), new GitHubGateway(client), new HerdrGateway(process, repository), new PassDelivery());
+}
+
+internal sealed class WorkflowRuntimeService(WorkflowRuntime runtime) : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (Environment.GetEnvironmentVariable("AW_DATABASE_MAINTENANCE") == "1") runtime.MaintenanceOnly(); else runtime.Start();
+        return Task.CompletedTask;
+    }
+    public async Task StopAsync(CancellationToken cancellationToken) => await runtime.DisposeAsync();
+}
 [SupportedOSPlatform("linux")]
 internal sealed class LocalControlService(LocalControlServer server, LocalControlEndpoint endpoint,
     ILogger<LocalControlService> logger) : BackgroundService

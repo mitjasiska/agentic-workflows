@@ -2,6 +2,8 @@ using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using StreamJsonRpc;
+using AgenticWorkflows.Application;
+using AgenticWorkflows.Infrastructure;
 
 namespace AgenticWorkflows.LocalControl;
 
@@ -24,6 +26,22 @@ public sealed class LocalControlClient
 
     public async Task<StatusReply> StatusAsync(CancellationToken cancellationToken = default)
     {
+        var response = await ExchangeAsync<StatusReply>("status", new { protocolVersion }, cancellationToken);
+        if (response.Status is null || string.IsNullOrWhiteSpace(response.Status.SoftwareVersion) || response.Status.State != "running")
+            throw new LocalControlException(new("control_plane_unavailable", "Expected a running status result.",
+                "Start or check the control-plane terminal with: dotnet run --project src/AgenticWorkflows.ControlPlane --no-build. Use the same OS account and XDG_RUNTIME_DIR, then retry awctl status.", endpoint.SocketPath));
+        return response;
+    }
+
+    public Task<WorkflowCommandReply> CommandAsync(WorkflowCommand command, CancellationToken token = default) =>
+        ExchangeAsync<WorkflowCommandReply>("workflow.command", new { protocolVersion, command }, token);
+    public Task<WorkflowQueryResponse> QueryAsync(WorkflowQuery query, CancellationToken token = default) =>
+        ExchangeAsync<WorkflowQueryResponse>("workflow.query", new { protocolVersion, query }, token);
+    public Task<DatabaseResponse> DatabaseAsync(DatabaseCommand command, CancellationToken token = default) =>
+        ExchangeAsync<DatabaseResponse>("database", new { protocolVersion, command }, token);
+
+    private async Task<T> ExchangeAsync<T>(string method, object parameters, CancellationToken cancellationToken)
+    {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(exchangeTimeout);
         try
@@ -40,8 +58,13 @@ public sealed class LocalControlClient
             try
             {
                 // Cancellation closes this local exchange; it does not introduce a notification protocol.
-                result = await rpc.InvokeWithParameterObjectAsync<JsonElement>("status", new { protocolVersion })
+                result = await rpc.InvokeWithParameterObjectAsync<JsonElement>(method, parameters)
                     .WaitAsync(deadline.Token);
+            }
+            catch (RemoteInvocationException error) when (error.ErrorCode == -32002)
+            {
+                if (error.ErrorData is not JsonElement data) throw new JsonException("Missing workflow diagnostic.");
+                throw new LocalControlException(data.Deserialize<ControlDiagnostic>(LocalControlProtocol.Json) ?? throw new JsonException("Invalid workflow diagnostic."));
             }
             catch (RemoteInvocationException error) when (error.ErrorCode == LocalControlProtocol.ProtocolMismatch)
             {
@@ -58,10 +81,7 @@ public sealed class LocalControlClient
                 throw new JsonException("An integer application protocolVersion is required.");
             if (returnedVersion != protocolVersion)
                 throw new LocalControlException(LocalControlProtocol.Mismatch(protocolVersion, returnedVersion, endpoint.SocketPath));
-            var response = result.Deserialize<StatusReply>(LocalControlProtocol.Json);
-            if (response?.Status is null || string.IsNullOrWhiteSpace(response.Status.SoftwareVersion) || response.Status.State != "running")
-                throw new JsonException("Expected a running status result.");
-            return response;
+            return result.Deserialize<T>(LocalControlProtocol.Json) ?? throw new JsonException("Expected an application result.");
         }
         catch (Exception error) when (cancellationToken.IsCancellationRequested &&
             error is OperationCanceledException or ConnectionLostException)

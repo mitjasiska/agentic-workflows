@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Runtime.Versioning;
 using StreamJsonRpc;
 using AgenticWorkflows.Application;
+using AgenticWorkflows.Infrastructure;
 
 namespace AgenticWorkflows.LocalControl;
 
@@ -12,6 +13,7 @@ public sealed class LocalControlServer : IAsyncDisposable
     private readonly LocalControlEndpoint endpoint;
     private readonly int protocolVersion;
     private readonly TimeSpan exchangeTimeout;
+    private readonly IWorkflowRuntime? workflows;
     private readonly CancellationTokenSource stopping = new();
     private LocalControlEndpoint.EndpointLease? lease;
 
@@ -19,6 +21,9 @@ public sealed class LocalControlServer : IAsyncDisposable
 
     public LocalControlServer(IControlPlaneStatusQuery query, LocalControlEndpoint endpoint)
         : this(query, endpoint, LocalControlProtocol.CurrentVersion, LocalControlProtocol.ExchangeTimeout) { }
+
+    public LocalControlServer(IControlPlaneStatusQuery query, LocalControlEndpoint endpoint, IWorkflowRuntime workflows)
+        : this(query, endpoint, LocalControlProtocol.CurrentVersion, LocalControlProtocol.ExchangeTimeout) { this.workflows = workflows; }
 
     internal LocalControlServer(IControlPlaneStatusQuery query, LocalControlEndpoint endpoint,
         int protocolVersion, TimeSpan exchangeTimeout)
@@ -72,6 +77,12 @@ public sealed class LocalControlServer : IAsyncDisposable
                 await using var handler = new LocalControlMessageHandler(stream, true, protocolVersion, endpoint.SocketPath, deadline.Token);
                 using var rpc = new LocalControlRpc(handler);
                 rpc.AddLocalRpcMethod("status", (Func<int, StatusReply>)Status);
+                if (workflows is not null)
+                {
+                    rpc.AddLocalRpcMethod("workflow.command", (Func<int, WorkflowCommand, Task<WorkflowCommandReply>>)Command);
+                    rpc.AddLocalRpcMethod("workflow.query", (Func<int, WorkflowQuery, Task<WorkflowQueryResponse>>)Query);
+                    rpc.AddLocalRpcMethod("database", (Func<int, DatabaseCommand, Task<DatabaseResponse>>)Database);
+                }
                 rpc.StartListening();
                 await (await Task.WhenAny(handler.ResponseWritten, rpc.Completion)).WaitAsync(deadline.Token);
             }
@@ -83,6 +94,20 @@ public sealed class LocalControlServer : IAsyncDisposable
     }
 
     private StatusReply Status(int protocolVersion) => new(this.protocolVersion, query.Execute());
+
+    private async Task<WorkflowCommandReply> Command(int protocolVersion, WorkflowCommand command)
+    {
+        var accepted = await workflows!.ExecuteAsync(command);
+        WorkflowSummary? summary = null;
+        if (accepted.Current is not null)
+        {
+            var projection = await workflows.QueryAsync(new(command.WorkingDirectory, accepted.WorkflowId));
+            summary = projection.Workflows.Single();
+        }
+        return new(this.protocolVersion, accepted.WorkflowId, accepted.OperationId, accepted.Message, summary, accepted.ComponentOutcomes);
+    }
+    private async Task<WorkflowQueryResponse> Query(int protocolVersion, WorkflowQuery query) => new(this.protocolVersion, await workflows!.QueryAsync(query));
+    private async Task<DatabaseResponse> Database(int protocolVersion, DatabaseCommand command) => new(this.protocolVersion, await workflows!.DatabaseAsync(command));
 
     public async ValueTask DisposeAsync()
     {

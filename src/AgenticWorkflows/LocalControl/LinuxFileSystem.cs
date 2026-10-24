@@ -12,6 +12,7 @@ internal static class LinuxFileSystem
 {
     internal const ushort DirectoryType = 0x4000;
     internal const ushort SocketType = 0xc000;
+    internal const ushort RegularFileType = 0x8000;
     internal const UnixFileMode PrivateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     internal const UnixFileMode PrivateSocket = UnixFileMode.UserRead | UnixFileMode.UserWrite;
     internal static uint UserId => geteuid();
@@ -85,6 +86,22 @@ internal static class LinuxFileSystem
             handle.Dispose();
             throw;
         }
+    }
+
+    internal static SafeFileHandle OpenRegularRead(string path)
+    {
+        var before = Require(path, RegularFileType);
+        int descriptor = open(path, 0x800 | 0x20000 | 0x80000); // O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+        if (descriptor < 0) throw Failure("open regular delivery file", Marshal.GetLastPInvokeError());
+        var handle = new SafeFileHandle(descriptor, ownsHandle: true);
+        try
+        {
+            if (statx(descriptor, "", 0x1000, 0x10b, out var opened) != 0 ||
+                !before.SameFile(opened) || (opened.Mode & 0xf000) != RegularFileType || opened.UserId != UserId)
+                throw new IOException("Result delivery changed identity while being opened.");
+            return handle;
+        }
+        catch { handle.Dispose(); throw; }
     }
 
     internal static Socket Bind(string path)

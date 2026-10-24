@@ -1,0 +1,32 @@
+# Managed workflow validation and real-system smoke test
+
+Automated tests use the established .NET/xUnit solution. Workflow tests isolate SQLite, repositories, delivery files, and provider state under temporary directories. They never contact real Linear or launch live agents. Process tests isolate XDG runtime, data, and configuration directories from the operator's installation.
+
+Deterministic controlled validation is the blocking gate for this slice: restore, a warning-free build, focused regression coverage, the full automated suite, configuration/contract/documentation checks, and whitespace validation must pass. Live provider and harness integration is deferred, remains unverified, and is assigned to the future opt-in E2E kit. It is not a blocking validation requirement for this follow-up.
+
+```sh
+dotnet restore AgenticWorkflows.slnx
+dotnet build AgenticWorkflows.slnx --no-restore
+dotnet test AgenticWorkflows.slnx --no-build --filter 'FullyQualifiedName~WorkflowVerticalTests|FullyQualifiedName~WorkflowContractTests|FullyQualifiedName~WorkflowIntegrationTests|FullyQualifiedName~WorkflowRecoveryRegressionTests|FullyQualifiedName~GitReviewRegressionTests|FullyQualifiedName~SqliteRecoveryTests|FullyQualifiedName~HerdrAdapterTests|FullyQualifiedName~HerdrWorkspaceRecoveryTests|FullyQualifiedName~LinearGatewayTests|FullyQualifiedName~ConfigurationAndProviderTests'
+dotnet test AgenticWorkflows.slnx --no-build
+git diff --check
+```
+
+If a sandbox makes the usual NuGet cache read-only, point `NUGET_HTTP_CACHE_PATH` and the restore `--packages` option at writable temporary directories. Do not suppress package vulnerability diagnostics. The SQLite native bundle is selected explicitly because the transitive 2.1.11 bundle is reported vulnerable by NuGet.
+
+`SqliteRecoveryTests` kills a test-only .NET child after an open transaction spills to an isolated database. It verifies rollback-journal recovery, retention of committed evidence, and refusal to alter an incompatible committed schema even when the interrupted transaction changed its version. Git regressions query readiness after Clean and after filter-hidden changes, staging, and identical-tree commits. Source-decision regressions verify immutable retain history across restart and atomic rollback when its evidence cannot be saved.
+
+The following live smoke procedure is retained for the future opt-in E2E kit; it has not been executed or validated by the controlled tests. An explicitly authorized future run needs an operator-owned canonical checkout, an existing Linear Project/team/task that authorizes genuine work, a GitHub repository accessible for identity validation, and a running local Herdr session with authenticated Codex. Follow [Project setup](../user/managed-workflows.md). Use ordinary product configuration; this procedure has no repository-specific self-use exception. Keep the task and its work uncommitted throughout this slice.
+
+1. Record the source revision, task identifier, canonical repository, configured stable provider IDs, `herdr --version`, and `awctl status`. Record credential-reference names only, never values. Confirm the target task is neither Done nor Canceled.
+2. Run `awctl setup`, then `awctl start TASK-ID`. Retain the returned Workflow and Operation IDs. Verify the deterministic `aw/TASK-ID/whole` branch and Herdr-owned path in `awctl workflow WORKFLOW-ID`.
+3. Verify the event order: capture/intent, workspace preparation, Linear In Progress confirmation, Handoff, then launch. Inspect the first pass Handoff and snapshot through paginated queries. Confirm the authorized result path is outside the worktree.
+4. Let the genuine implementation finish. Inspect its detailed result and validation evidence. Confirm a fresh Reviewer session receives the same snapshot and exact Git Review Target. Do not deliberately break implementation to produce findings.
+5. If findings occur naturally, follow them through repair and re-review until Clean or a legitimate durable decision/dependency stop. If session reuse cannot be proven, explicitly choose a new session and resume; missing native session discovery must not require a hook installation. Findings alone are not a successful smoke-test conclusion.
+6. Stop and restart only the AW control plane while Herdr retains execution or a delivered result. Inspect status/history after restart. Confirm AW reattaches proven running execution or ingests the same correlated result once, without a duplicate prompt, workspace, or completion event. Use `resume` for a retained pending action when the restart requires explicit continuation.
+7. At Clean, verify `workflow` reports exact-tree eligibility and that the review result and validation limitations remain inspectable after another host restart. Verify Git HEAD has not advanced through an AW commit and no push or pull request was created. Do not mark the Linear task Done.
+8. Record the Workflow ID, relevant pass IDs, timestamps, Review Target tree IDs, actual checks/results, restart observations, and remaining warnings. A legitimate material decision or unavailable external dependency must have its precise durable diagnostic and Recovery Plan recorded; do not substitute fake provider success. Retain the workspace for inspection or use explicit cleanup after reviewing its consequence.
+
+Do not run live-provider validation as part of this follow-up. The future opt-in E2E kit owns live authentication, real workspace preparation, actual Codex execution and sandbox behavior, result-delivery wiring, and restart-safe live routing. These remain explicitly unverified until an authorized opt-in run records evidence; controlled tests do not establish those live facts.
+
+When naturally occurring findings lead to session reuse, inspect that each pass has a distinct Operation delivery directory beneath its retained session's recorded delivery root, and that Codex writes and AW ingests the repair/re-review results without new sandbox permission. A changed reasoning or model selection must either use an explicitly selected new session or stop with the session decision diagnostic; recorded effective configuration must match execution. The controlled regression tests cover these argument and correlation boundaries, but they do not establish live Codex sandbox behavior.

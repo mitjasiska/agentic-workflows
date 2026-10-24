@@ -5,6 +5,7 @@
 
 # dotenv files
 .env
+.agentic-workflows.toml
 
 # User-specific files
 *.rsuser
