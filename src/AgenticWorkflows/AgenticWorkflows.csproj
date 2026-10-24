@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <InternalsVisibleTo Include="AgenticWorkflows.Tests" />
+    <PackageReference Include="StreamJsonRpc" Version="2.26.150" />
   </ItemGroup>
 </Project>

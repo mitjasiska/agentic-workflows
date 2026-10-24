@@ -21,7 +21,7 @@ The authoritative local, repository-excluded TOML settings file in a Project's c
 _Avoid_: Per-Workflow setup, committed active configuration, mutable Task settings, secret store
 
 **Local Control Interface**:
-The platform-local, non-HTTP request/reply interface through which a co-located `awctl` invokes AW application commands and queries. It is available only to the operating-system account that runs the control plane and is not a remote administration interface.
+The platform-local, non-HTTP JSON-RPC 2.0 request/reply interface through which a co-located `awctl` invokes AW application commands and queries. Its application protocol version is separate from the JSON-RPC `"2.0"` marker. It is available only to the operating-system account that runs the control plane and is not a remote administration interface.
 _Avoid_: HTTP API, remote CLI endpoint, Herdr gateway
 
 **Control-plane HTTP API**:

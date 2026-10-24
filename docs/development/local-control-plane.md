@@ -44,7 +44,9 @@ Successful output is JSON on stdout, with exit code 0:
 {"protocolVersion":1,"status":{"state":"running","softwareVersion":"0.1.0"}}
 ```
 
-The software version comes from the application assembly and may include a build revision suffix. The protocol version belongs to the Local Control Interface envelope. Failures produce a JSON diagnostic on stderr and exit code 1; invalid command syntax returns 2. `awctl --help` shows the command syntax.
+The software version comes from the application assembly and may include a build revision suffix. `protocolVersion` is the AW application protocol version, separate from the JSON-RPC `"2.0"` marker used on the socket. The CLI prints the result projection, not the JSON-RPC envelope. Failures produce a JSON diagnostic on stderr and exit code 1; invalid command syntax returns 2. `awctl --help` shows the command syntax.
+
+Stop terminal one's process with Ctrl+C, then repeat terminal two's status command. It should return exit code 1 and an actionable `control_plane_unavailable` diagnostic naming the endpoint and start command. Restart terminal one and verify that status succeeds again.
 
 ## Endpoint discovery and recovery
 
@@ -69,7 +71,7 @@ The solution has four projects with executable behavior:
 - `src/awctl` is the local command-line executable.
 - `tests/AgenticWorkflows.Tests` uses xUnit and the .NET test SDK for real-socket and separate-process tests.
 
-Each connection carries one request and one reply. Frames have a four-byte signed positive big-endian byte length, followed by UTF-8 JSON, with a 16 KiB body limit and a five-second exchange deadline. The server allows at most 16 active exchanges and a bounded listen backlog. A request is `{"protocolVersion":1,"command":"status"}`. A reply carries `protocolVersion` and either `status` or `error`; diagnostics contain `code`, `message`, and `guidance`, plus endpoint and version details when applicable. Malformed, duplicate, and unsupported properties are rejected for the current version. Mismatches are rejected before interpreting the command schema. These framing and envelope details are provisional implementation choices.
+The socket adapter uses StreamJsonRpc with `SystemTextJsonFormatter` and a bounded message handler. Each connection admits one JSON-RPC 2.0 request and at most one reply, using the existing four-byte big-endian length prefix, 16 KiB body limit, five-second deadline, and limit of 16 active exchanges. A request is `{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":1}}`. Successful replies put the existing status projection in `result`; failures use JSON-RPC `error`, with structured version diagnostics in `error.data`. Application-version mismatches are rejected before method lookup, application parameter binding, or query execution. The former custom envelope is no longer accepted. Notifications, batching, streaming, and subscriptions are not supported product capabilities. See the [Local Control Interface contract](../reference/local-control-interface.md) for exact fields, error codes, admission rules, and cancellation behavior.
 
 For focused execution:
 
@@ -79,4 +81,4 @@ dotnet test AgenticWorkflows.slnx --no-build --filter FullyQualifiedName~Endpoin
 dotnet test AgenticWorkflows.slnx --no-build --filter FullyQualifiedName~ProcessTests
 ```
 
-Protocol tests inject endpoint and protocol settings in code, without exposing test configuration as CLI flags. Coverage includes successful version exchange, unavailable and incompatible services with no dispatch, malformed and fragmented frames, timeouts, private permissions, conservative stale recovery, preservation of active or unrelated paths, and real process shutdown/restart behavior. Run the complete suite for this initial slice using the command in the build section.
+Protocol tests inject endpoint and protocol settings in code, without exposing test configuration as CLI flags. Coverage includes raw JSON-RPC requests/replies and library-client interoperability, separate application version checks with no dispatch, malformed markers and messages, request correlation, fragmented and oversized frames, unsupported notifications/batches/extensions, timeouts and cancellation. Endpoint and process tests retain private permissions, conservative stale recovery, preservation of active or unrelated paths, competing processes, crash recovery, and graceful shutdown/restart coverage. Run the complete suite for this slice using the command in the build section.
