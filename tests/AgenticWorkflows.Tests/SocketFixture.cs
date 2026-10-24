@@ -56,10 +56,13 @@ internal sealed class SocketFixture : IAsyncDisposable
     {
         private int calls;
         internal int Calls => Volatile.Read(ref calls);
+        internal Exception? Failure { get; set; }
 
         public ControlPlaneStatus Execute()
         {
             Interlocked.Increment(ref calls);
+            if (Failure is not null)
+                throw Failure;
             return new("running", "test-software-1.2.3");
         }
     }

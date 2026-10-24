@@ -15,13 +15,10 @@ public sealed class LocalControlException(ControlDiagnostic diagnostic) : Except
 
 public sealed record StatusReply(int ProtocolVersion, ControlPlaneStatus Status);
 
-internal sealed record Request(int ProtocolVersion, string Command);
-internal sealed record Response(int ProtocolVersion, ControlPlaneStatus? Status = null,
-    ControlDiagnostic? Error = null);
-
 internal static class LocalControlProtocol
 {
     internal const int CurrentVersion = 1;
+    internal const int ProtocolMismatch = -32001;
     internal const int MaximumFrameBytes = 16 * 1024;
     internal static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(5);
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -52,9 +49,8 @@ internal static class LocalControlProtocol
         return body;
     }
 
-    internal static async Task WriteAsync<T>(Stream stream, T value, CancellationToken cancellationToken)
+    internal static async Task WriteAsync(Stream stream, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
     {
-        byte[] body = JsonSerializer.SerializeToUtf8Bytes(value, Json);
         if (body.Length > MaximumFrameBytes)
             throw new InvalidDataException("The JSON response exceeds the frame limit.");
         byte[] header = new byte[4];
@@ -62,7 +58,4 @@ internal static class LocalControlProtocol
         await stream.WriteAsync(header, cancellationToken);
         await stream.WriteAsync(body, cancellationToken);
     }
-
-    internal static T Deserialize<T>(byte[] body) =>
-        JsonSerializer.Deserialize<T>(body, Json) ?? throw new JsonException("A JSON object is required.");
 }

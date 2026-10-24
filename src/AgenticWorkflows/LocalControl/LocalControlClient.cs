@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Text.Json;
+using StreamJsonRpc;
 
 namespace AgenticWorkflows.LocalControl;
 
@@ -27,29 +28,48 @@ public sealed class LocalControlClient
         deadline.CancelAfter(exchangeTimeout);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             endpoint.ValidateForClient();
             using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             await socket.ConnectAsync(new UnixDomainSocketEndPoint(endpoint.SocketPath), deadline.Token);
             using var stream = new NetworkStream(socket);
-            await LocalControlProtocol.WriteAsync(stream, new Request(protocolVersion, "status"), deadline.Token);
-            var body = await LocalControlProtocol.ReadAsync(stream, deadline.Token);
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 16, AllowDuplicateProperties = false });
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("protocolVersion", out var version) ||
-                version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int serverVersion))
-                throw new JsonException("An integer protocolVersion is required.");
-            if (serverVersion != protocolVersion)
+            await using var handler = new LocalControlMessageHandler(stream, false, protocolVersion, endpoint.SocketPath, deadline.Token);
+            using var rpc = new LocalControlRpc(handler);
+            rpc.StartListening();
+            JsonElement result;
+            try
+            {
+                // Cancellation closes this local exchange; it does not introduce a notification protocol.
+                result = await rpc.InvokeWithParameterObjectAsync<JsonElement>("status", new { protocolVersion })
+                    .WaitAsync(deadline.Token);
+            }
+            catch (RemoteInvocationException error) when (error.ErrorCode == LocalControlProtocol.ProtocolMismatch)
+            {
+                if (error.ErrorData is not JsonElement data)
+                    throw new JsonException("Missing application protocol mismatch details.");
+                var diagnostic = data.Deserialize<ControlDiagnostic>(LocalControlProtocol.Json);
+                if (diagnostic is null || diagnostic.Code != "protocol_mismatch" ||
+                    diagnostic.ClientProtocolVersion != protocolVersion || diagnostic.ServerProtocolVersion is not int serverVersion)
+                    throw new JsonException("Invalid application protocol mismatch details.");
                 throw new LocalControlException(LocalControlProtocol.Mismatch(protocolVersion, serverVersion, endpoint.SocketPath));
-            var response = LocalControlProtocol.Deserialize<Response>(body);
-            if (response.Error is not null && response.Status is null)
-                throw new LocalControlException(response.Error);
-            if (response.Status is null || response.Error is not null ||
-                string.IsNullOrWhiteSpace(response.Status.SoftwareVersion) || response.Status.State != "running")
-                throw new JsonException("Expected a status result or a diagnostic.");
-            return new(response.ProtocolVersion, response.Status);
+            }
+            if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("protocolVersion", out var version) ||
+                version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int returnedVersion))
+                throw new JsonException("An integer application protocolVersion is required.");
+            if (returnedVersion != protocolVersion)
+                throw new LocalControlException(LocalControlProtocol.Mismatch(protocolVersion, returnedVersion, endpoint.SocketPath));
+            var response = result.Deserialize<StatusReply>(LocalControlProtocol.Json);
+            if (response?.Status is null || string.IsNullOrWhiteSpace(response.Status.SoftwareVersion) || response.Status.State != "running")
+                throw new JsonException("Expected a running status result.");
+            return response;
         }
-        catch (Exception error) when (error is IOException or SocketException or JsonException or InvalidDataException ||
-            (error is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        catch (Exception error) when (cancellationToken.IsCancellationRequested &&
+            error is OperationCanceledException or ConnectionLostException)
+        {
+            throw new OperationCanceledException("The local status exchange was canceled.", error, cancellationToken);
+        }
+        catch (Exception error) when (error is IOException or SocketException or JsonException or InvalidDataException or RemoteRpcException or ConnectionLostException ||
+            error is OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {
             throw new LocalControlException(new("control_plane_unavailable",
                 $"Cannot obtain control-plane status at '{endpoint.SocketPath}': {error.Message}",

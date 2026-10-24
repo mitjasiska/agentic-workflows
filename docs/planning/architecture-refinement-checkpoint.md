@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-22
+Last updated: 2026-10-24
 
 ## Purpose and authority
 
@@ -28,6 +28,8 @@ Current readiness: **Ready for Initial E2E implementation-task preparation.** Th
 
 ## Last completed decision
 
+DEV-122 refines the Local Control Interface Design Direction to JSON-RPC 2.0 using an established .NET implementation, replacing the custom envelope. The AW application protocol version is carried separately and validated before any application dispatch. Bounded exchanges, same-account local IPC, transport-independent application handlers, and control-plane ownership of accepted Operations remain unchanged. Notifications, batching, subscriptions, streaming, and remote administration are not introduced. The accepted decision is recorded in [ADR 0038](../architecture/adr/0038-adopt-json-rpc-for-local-control.md), the architecture, and the workflow specification; the implemented contract is in [Reference Documentation](../reference/local-control-interface.md). This issue does not reopen broader Initial E2E refinement or authorize other workflow implementation.
+
 The post-DEV-119 local-control refinement separates the two control-plane presentation interfaces. A co-located `awctl` uses bounded, versioned, non-HTTP structured JSON request/reply exchanges over platform-local IPC: a Unix-domain socket on Linux and macOS or a named pipe on Windows, restricted to the operating-system account running the control plane. Mutating requests return after durable acceptance or completion of their immediate action; longer-running Operations remain owned by the control plane and survive CLI disconnection. Pre-stable CLI and service builds accept only their matching current protocol version. The control-plane HTTP API is reserved for the co-hosted React dashboard, may be exposed explicitly on a trusted private network, and is not a promised v1 third-party integration contract. Both adapters invoke the same application commands and queries. Remote Herdr execution remains independent of this local administration topology.
 
 ## Next question
@@ -49,6 +51,7 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 - [x] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
 - [x] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
 - [x] Separate the co-located `awctl` Local Control Interface from the dashboard HTTP API, including cross-platform local IPC, single-operator access, bounded operation-independent exchanges, and pre-stable protocol compatibility.
+- [x] Refine the Local Control Interface to JSON-RPC 2.0 with separate pre-dispatch application compatibility checks (DEV-122), preserving the local-only boundary and bounded exchanges.
 
 ## Explicitly deferred beyond the readiness gate
 

@@ -1,6 +1,6 @@
 using System.Net.Sockets;
 using System.Runtime.Versioning;
-using System.Text.Json;
+using StreamJsonRpc;
 using AgenticWorkflows.Application;
 
 namespace AgenticWorkflows.LocalControl;
@@ -69,41 +69,20 @@ public sealed class LocalControlServer : IAsyncDisposable
             deadline.CancelAfter(exchangeTimeout);
             try
             {
-                Response response;
-                try
-                {
-                    var body = await LocalControlProtocol.ReadAsync(stream, deadline.Token);
-                    using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 16, AllowDuplicateProperties = false });
-                    var root = document.RootElement;
-                    if (root.ValueKind != JsonValueKind.Object ||
-                        !root.TryGetProperty("protocolVersion", out var version) || version.ValueKind != JsonValueKind.Number ||
-                        !version.TryGetInt32(out int requestedVersion))
-                        throw new JsonException("An integer protocolVersion is required.");
-
-                    // Check the envelope before interpreting or dispatching an application request.
-                    if (requestedVersion != protocolVersion)
-                        response = new(protocolVersion, Error: LocalControlProtocol.Mismatch(requestedVersion, protocolVersion, endpoint.SocketPath));
-                    else
-                    {
-                        var request = LocalControlProtocol.Deserialize<Request>(body);
-                        response = request.Command == "status"
-                            ? new(protocolVersion, query.Execute())
-                            : new(protocolVersion, Error: new("unknown_command", "The local command is not supported.", "Use awctl status."));
-                    }
-                }
-                catch (Exception error) when (error is JsonException or InvalidDataException or EndOfStreamException)
-                {
-                    response = new(protocolVersion, Error: new("invalid_request", "The Local Control Interface request is malformed or exceeds its bounds.",
-                        "Update awctl and the control plane together, then retry awctl status."));
-                }
-                await LocalControlProtocol.WriteAsync(stream, response, deadline.Token);
+                await using var handler = new LocalControlMessageHandler(stream, true, protocolVersion, endpoint.SocketPath, deadline.Token);
+                using var rpc = new LocalControlRpc(handler);
+                rpc.AddLocalRpcMethod("status", (Func<int, StatusReply>)Status);
+                rpc.StartListening();
+                await (await Task.WhenAny(handler.ResponseWritten, rpc.Completion)).WaitAsync(deadline.Token);
             }
-            catch (Exception error) when (error is IOException or SocketException or OperationCanceledException)
+            catch (Exception error) when (error is IOException or SocketException or OperationCanceledException or ConnectionLostException or InvalidDataException)
             {
                 // A disconnected or stalled client owns no service lifetime. Its deadline closes this exchange.
             }
         }
     }
+
+    private StatusReply Status(int protocolVersion) => new(this.protocolVersion, query.Execute());
 
     public async ValueTask DisposeAsync()
     {
