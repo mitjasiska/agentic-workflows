@@ -2,11 +2,13 @@
 
 Agentic Workflows is a local-first control plane and dashboard for human-directed agentic work. It turns a captured task into implementation, independent review, durable evidence, and a human-approved submission or exported artifact.
 
-The repository and product are both named Agentic Workflows. This repository contains the completed Initial E2E architecture and will grow into the production implementation in the same codebase.
+The repository and product are both named Agentic Workflows. This repository contains the completed Initial E2E architecture and the first runnable .NET control-plane slice.
 
 ## Current status
 
-The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Application implementation must begin from a separate Linear issue with a defined outcome and acceptance boundary.
+The Linux control plane runs as a long-lived process, and the local `awctl status` client reports its software and protocol versions through a private Unix-domain socket. See the development guide below for the two-terminal flow. Workflow execution, persistence, integrations, and the dashboard are not implemented yet.
+
+The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Further implementation begins from separate Linear issues with defined outcomes and acceptance boundaries.
 
 ## Documentation
 
@@ -17,11 +19,15 @@ Architecture Documentation is authoritative for product decisions, boundaries, a
 - [Glossary](docs/architecture/GLOSSARY.md) defines canonical domain language.
 - [Architecture decision records](docs/architecture/adr/) preserve durable decisions and their rationale.
 
+Development Documentation:
+
+- [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, restore, build, tests, running the control plane and `awctl status`, endpoint discovery, and recovery.
+- [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, validation, and installation paths.
+
 Supporting material provides context without becoming a separate source of product truth:
 
 - [Architecture refinement checkpoint](docs/planning/architecture-refinement-checkpoint.md) records the current refinement and implementation-readiness position.
 - [Research](docs/research/) contains evidence used to inform decisions.
-- [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, validation, and installation paths.
 
 As the product becomes usable, detailed product documentation belongs under `docs/user/` and technical reference material under `docs/reference/`. These sections should be created when they have real content rather than as empty placeholders.
 

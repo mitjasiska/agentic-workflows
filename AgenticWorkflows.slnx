@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AgenticWorkflows/AgenticWorkflows.csproj" />
+    <Project Path="src/AgenticWorkflows.ControlPlane/AgenticWorkflows.ControlPlane.csproj" />
+    <Project Path="src/awctl/awctl.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AgenticWorkflows.Tests/AgenticWorkflows.Tests.csproj" />
+  </Folder>
+</Solution>
