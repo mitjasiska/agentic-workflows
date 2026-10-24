@@ -1,6 +1,6 @@
 interface:
   display_name: "Create Linear Task"
-  short_description: "Draft and refine agent-ready Linear issues"
+  short_description: "Create and refine agent-ready Linear issues"
   default_prompt: "Use $create-linear-task to prepare this work as a concise, agent-ready Linear issue."
 
 dependencies:

@@ -24,4 +24,4 @@ For ChatGPT and Codex plugin installation, the repository root is a portable ski
 
 The repo-scoped [marketplace](../../.agents/plugins/marketplace.json) exposes the root plugin for local testing. Restart the ChatGPT desktop app after adding or refreshing the marketplace, install **Agentic Workflows**, and test in a new chat. Workspace or public publication is a separate administrative action and is not performed by repository validation.
 
-The plugin does not bundle an MCP server. Both skills declare their Linear tool dependency and stop with a draft or a focused configuration request when the host cannot provide Linear or repository context.
+The plugin does not bundle an MCP server. Both skills declare their Linear MCP dependency. `create-linear-task` requires direct, current Linear MCP reads before drafting and stops with a concise notice when the required Linear access is unavailable; it does not construct an offline issue draft from incomplete state. Repository-context gaps still produce a focused request when they prevent an unambiguous task.
