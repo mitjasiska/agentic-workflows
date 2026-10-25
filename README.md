@@ -23,7 +23,7 @@ Development Documentation:
 
 - [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, build/rebuild/tests, the edit-build-restart loop, manual debugging, and isolated validation.
 - [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, explicit external publication, validation, and installation paths.
-- [Managed workflow validation and smoke test](docs/development/managed-workflow-smoke-test.md) covers blocking controlled validation and the deferred live integration procedure for the future opt-in E2E kit.
+- [Managed workflow validation and deferred smoke-test notes](docs/development/managed-workflow-smoke-test.md) covers the DEV-123 slice's controlled-validation gate and unverified live integration notes; the complete acceptance procedure and future test-kit design remain separate work.
 
 Product Documentation:
 

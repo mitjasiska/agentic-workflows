@@ -61,7 +61,7 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 - [x] Finalize initial branch/worktree naming and safe path rules.
 - [x] Finalize new-PR creation, retry reconciliation, Linear-label classification, reviewer-produced public metadata, deterministic commit/PR title and PR body generation, closing Linear reference, and minimum safe GitHub/ancestry checks. Preserve the prototype's proven metadata behavior unless an explicit decision below changes it. Updating an existing PR is explicitly the immediate post-milestone follow-up.
 - [x] Specify the project configuration and secret boundaries required for Linear, GitHub, Herdr, repository identity, and the configured Linear In Progress state.
-- [x] Define the Initial E2E acceptance suite and the minimal read-only API/dashboard projection, including how tests exercise both clean review and findings-to-repair routing.
+- [x] Define the Initial E2E acceptance boundary and coverage obligations and the minimal read-only API/dashboard projection, including coverage of both clean review and findings-to-repair routing. The detailed live-test procedure and test cases remain open, as recorded in [architecture section 8.1](../architecture/architecture.md#81-initial-e2e-milestone); this check does not mark them specified or milestone acceptance achieved.
 - [x] Separate the co-located `awctl` Local Control Interface from the dashboard HTTP API, including cross-platform local IPC, single-operator access, bounded operation-independent exchanges, and pre-stable protocol compatibility.
 - [x] Refine the Local Control Interface to JSON-RPC 2.0 with separate pre-dispatch application compatibility checks (DEV-122), preserving the local-only boundary and bounded exchanges.
 
@@ -69,6 +69,7 @@ Resolve these in roughly this order. Each item may require several one-at-a-time
 
 These matters remain important but do not block the first implementation task unless that task expands to include them:
 
+- External-service E2E test-kit architecture under [DEV-124](https://linear.app/mitjasiska/issue/DEV-124/decide-the-external-service-e2e-test-kit-architecture), and the detailed live-test procedure and test cases requiring separate owner specification. DEV-125 clarifies the routine-pass boundary only; complete milestone acceptance still requires the separately scoped, operator-authorized live proof described in architecture section 8.1.
 - Workflow Variant CLI, comparison, winner selection, submission, and cleanup behavior; Variant support is planned for v1 or early v2.
 - Pi and additional harnesses beyond the initial Codex path.
 - Markdown, pasted-text, and standard-input Task Sources, which follow the Initial E2E Milestone promptly.
