@@ -3,11 +3,51 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using AgenticWorkflows.LocalControl;
+using AgenticWorkflows.Application;
+using AgenticWorkflows.Workflows;
 
 namespace AgenticWorkflows.Tests;
 
 public sealed class ProcessTests
 {
+    [Fact]
+    public async Task Retained_pending_intent_survives_process_restart_and_is_not_replayed()
+    {
+        await using var workflow = new WorkflowFixture();
+        workflow.Providers.FailLinear = true;
+        Guid id = await workflow.Start();
+        var stopped = await workflow.Until(id, d => d.State.Recovery is not null);
+        await workflow.Application.DisposeAsync();
+        var pending = new WorkflowOperation(Guid.NewGuid(), stopped.State.CurrentOperationId, "Startup", OperationStatus.Pending,
+            null, false, null, null, DateTimeOffset.UtcNow, null);
+        // Simulate a crash immediately after the accepted continuation transaction, before its external action.
+        workflow.Store.Save(stopped.State.Version, new(stopped.State with { CurrentOperationId = pending.Id, Recovery = null, Version = stopped.State.Version + 1 },
+            [new(0, "WorkflowResumed", "Accepted continuation fixture", pending.Id, null, DateTimeOffset.UtcNow)], [], [pending], [], [], []));
+        await using var socket = new SocketFixture();
+        string database = Path.Combine(socket.Root, "data", "agentic-workflows", "workflows.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        File.Copy(Path.Combine(workflow.Root, "workflows.db"), database);
+        var endpoint = LocalControlEndpoint.FromRuntimeDirectory(socket.Root);
+        for (int restart = 0; restart < 2; restart++)
+        {
+            await using var host = new ChildProcess("AgenticWorkflows.ControlPlane.dll", socket.Root);
+            await host.WaitForListeningAsync();
+            var client = new LocalControlClient(endpoint);
+            WorkflowSummary? summary = null;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (summary?.Recovery?.Code != "restart_continuation")
+            {
+                summary = (await client.QueryAsync(new(socket.Root, id))).Query.Workflows.Single();
+                if (summary.Recovery?.Code != "restart_continuation") await Task.Delay(20, deadline.Token);
+            }
+            Assert.Equal(pending.Id, summary.OperationId);
+            Assert.Equal(OperationStatus.Pending, summary.OperationStatus);
+            Assert.Equal(0, summary.TotalPasses);
+            Assert.Contains("awctl resume " + id, summary.Recovery!.Commands);
+            await host.KillAsync();
+        }
+    }
+
     [Fact]
     public async Task Executables_discover_endpoint_exchange_status_and_shut_down_cleanly()
     {
@@ -92,6 +132,8 @@ public sealed class ProcessTests
             foreach (string argument in arguments)
                 start.ArgumentList.Add(argument);
             start.Environment["XDG_RUNTIME_DIR"] = runtimeDirectory;
+            start.Environment["XDG_DATA_HOME"] = Path.Combine(runtimeDirectory, "data");
+            start.Environment["XDG_CONFIG_HOME"] = Path.Combine(runtimeDirectory, "config");
             process = new Process { StartInfo = start };
             process.OutputDataReceived += (_, args) =>
             {

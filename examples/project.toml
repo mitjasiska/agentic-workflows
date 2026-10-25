@@ -1,0 +1,20 @@
+# Copy to .agentic-workflows.toml in the canonical checkout; keep that file Git-ignored.
+# Replace every example identity/path. Values are ordinary settings, never raw credentials.
+base = "main"
+managed_root = "/home/example/.herdr/worktrees/example-project"
+linear_project_id = "00000000-0000-0000-0000-000000000001"
+linear_team_id = "00000000-0000-0000-0000-000000000002"
+in_progress_state_id = "00000000-0000-0000-0000-000000000003"
+github_repository_id = "123456789"
+herdr_target = "local:default"
+linear_credential = "env:AW_LINEAR_TOKEN"
+github_credential = "env:AW_GITHUB_TOKEN"
+
+[defaults]
+implementer_model = "default"
+reviewer_model = "default"
+reasoning = "medium"
+implementer_session = "reuse"
+reviewer_session = "reuse"
+instructions_policy = "warn"
+max_passes = "6"

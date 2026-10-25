@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgenticWorkflows.Application;
+using AgenticWorkflows.Infrastructure;
 
 namespace AgenticWorkflows.LocalControl;
 
@@ -14,6 +15,9 @@ public sealed class LocalControlException(ControlDiagnostic diagnostic) : Except
 }
 
 public sealed record StatusReply(int ProtocolVersion, ControlPlaneStatus Status);
+public sealed record WorkflowCommandReply(int ProtocolVersion, Guid? WorkflowId, Guid? OperationId, string Message, WorkflowSummary? Workflow, string[]? ComponentOutcomes);
+public sealed record WorkflowQueryResponse(int ProtocolVersion, WorkflowQueryReply Query);
+public sealed record DatabaseResponse(int ProtocolVersion, DatabaseReply Database);
 
 internal static class LocalControlProtocol
 {
@@ -28,7 +32,8 @@ internal static class LocalControlProtocol
         RespectRequiredConstructorParameters = true,
         AllowDuplicateProperties = false,
         MaxDepth = 16,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+        Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
     };
 
     internal static ControlDiagnostic Mismatch(int clientVersion, int serverVersion, string endpoint) =>

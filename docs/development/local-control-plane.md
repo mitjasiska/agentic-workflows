@@ -1,6 +1,6 @@
 # Local .NET development
 
-This first application slice supports Linux and provides a control-plane process and the local `awctl status` command. It does not require an HTTP listener, database, integration credentials, or a service installation.
+The Linux control plane provides `awctl status` and the managed workflow commands. Status remains available without integration credentials; workflow execution uses the SQLite store and configured providers. There is no HTTP listener or service installation in this slice. See [managed workflow usage](../user/managed-workflows.md) and [validation/smoke testing](managed-workflow-smoke-test.md).
 
 ## Prerequisites and build
 
@@ -66,10 +66,12 @@ If startup reports an occupied or unsafe path, inspect that exact path and the e
 
 The solution has four projects with executable behavior:
 
-- `src/AgenticWorkflows` contains the transport-independent `IControlPlaneStatusQuery` and its implementation under `Application/`, and the Local Control Interface adapter under `LocalControl/`. A later HTTP adapter can invoke the same query; the query has no socket, serialization, endpoint, or protocol dependency.
+- `src/AgenticWorkflows` contains transport-independent workflow commands and queries under `Application/`, domain facts and rules under `Workflows/`, SQLite/Git/provider/Herdr adapters under `Infrastructure/`, and the Local Control Interface under `LocalControl/`. A later HTTP adapter invokes the same application handlers.
 - `src/AgenticWorkflows.ControlPlane` composes the query and socket server through a .NET Generic Host and dependency injection.
 - `src/awctl` is the local command-line executable.
 - `tests/AgenticWorkflows.Tests` uses xUnit and the .NET test SDK for real-socket and separate-process tests.
+
+The host creates its SQLite store under the account's XDG data directory. Tests override `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` with private disposable paths. Workflow application tests use controlled providers; Git integration tests create commits only in their isolated fixture repositories. The application records durable intent before external actions and never ties accepted execution to a client connection cancellation token.
 
 The socket adapter uses StreamJsonRpc with `SystemTextJsonFormatter` and a bounded message handler. Each connection admits one JSON-RPC 2.0 request and at most one reply, using the existing four-byte big-endian length prefix, 16 KiB body limit, five-second deadline, and limit of 16 active exchanges. A request is `{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":1}}`. Successful replies put the existing status projection in `result`; failures use JSON-RPC `error`, with structured version diagnostics in `error.data`. Application-version mismatches are rejected before method lookup, application parameter binding, or query execution. The former custom envelope is no longer accepted. Notifications, batching, streaming, and subscriptions are not supported product capabilities. See the [Local Control Interface contract](../reference/local-control-interface.md) for exact fields, error codes, admission rules, and cancellation behavior.
 
