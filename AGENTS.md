@@ -96,6 +96,10 @@ Architecture refinement and task preparation do not authorize application implem
 
 Agentic Workflows is a C#/.NET product. Repository-owned implementation, validation utilities, and automated tests must use the established .NET solution and its testing stack. The historical Python prototype is evidence, not a precedent for adding Python code here. Use another language only when the current task explicitly requires it.
 
+## Keep routine validation within the task
+
+Follow the [architecture validation boundary](docs/architecture/architecture.md#141-handoff-composition) and [workflow evidence rules](docs/architecture/workflow-specification.md#5-validation-evidence-and-routing): routine implementation/review runs the task's required isolated checks. Do not run live external-service validation unless the task explicitly requires it and the human operator authorizes it; routine passes receive no live-service credentials for that purpose. Report out-of-scope live checks as deferred or unverified, never passed or failed. Do not improvise a harness hook, Herdr change, dogfooding exception, or substitute claim of success.
+
 ## Preserve user control of Git publication
 
 Permitted routine work without a Linear issue may use a pull request or, when explicitly chosen by the user, a direct commit to `main`. Neither a Linear issue nor a pull request is a prerequisite for that direct path. Follow the applicable commit-message convention and omit inapplicable task metadata rather than inventing a Linear identifier or review record. This contribution exception does not change AW-managed pass restrictions or AW product submission behavior.
