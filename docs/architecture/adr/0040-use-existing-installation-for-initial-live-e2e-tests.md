@@ -1,0 +1,5 @@
+# Use the existing installation for initial live E2E tests
+
+Initial live E2E runs on Aquila use the existing AW installation, Linux account, user service, `awctl`, and SQLite database, with a separately configured Linear test team/project and private GitHub testing repositories. Reusing the installed environment avoids a second service, account, authentication setup, and CLI instance-selection mechanism while exercising the actual deployment. This deliberately accepts shared application state and service lifecycle in exchange for simpler initial operation; a separate test environment can be introduced when concurrent use or disruptive testing justifies its cost.
+
+Ordinary workflows must be idle before a live run and remain idle throughout it. Test cleanup is confined to exactly identified test-owned workflows and resources; ordinary records and workspaces remain intact. Disruptive scenarios require explicit selection, and skipped checks remain visibly unverified. The [E2E test-kit architecture](../e2e-test-kit.md) owns the current detailed design and the remaining run-control, scenario, evidence, and cleanup decisions.

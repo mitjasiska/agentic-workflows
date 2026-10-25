@@ -15,6 +15,7 @@ The Initial E2E architecture was completed under [DEV-119](https://linear.app/mi
 Architecture Documentation is authoritative for product decisions, boundaries, and behavior:
 
 - [Architecture](docs/architecture/architecture.md) defines the complete product architecture, major boundaries, and design status.
+- [E2E test-kit architecture](docs/architecture/e2e-test-kit.md) records the live test kit's accepted design, remaining execution questions, and relevant decisions from the shared ADR series.
 - [Workflow specification](docs/architecture/workflow-specification.md) defines detailed workflow mechanics and edge cases.
 - [Glossary](docs/architecture/GLOSSARY.md) defines canonical domain language.
 - [Architecture decision records](docs/architecture/adr/) preserve durable decisions and their rationale.
