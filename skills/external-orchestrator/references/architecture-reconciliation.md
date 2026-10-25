@@ -25,10 +25,10 @@ Create and check the common JSON using [the traceability contract](traceability.
 
 ## Apply approved task changes
 
-Show the proposed task updates concisely and obtain explicit approval before mutating any existing issue. After approval:
+Use existing direct user authorization when it covers the exact affected issues and updates. For newly discovered changes outside that authorization, show the concise proposal and obtain approval. An unresolved material product decision still requires acceptance before dependent task updates. For each authorized update:
 
 1. Invoke `create-linear-task` for each approved refinement so it remains the sole task-authoring module.
-2. Reread each issue through Linear MCP and verify the exact change and relationships.
+2. Use that skill's fresh post-write verification of the exact change and preserved fields.
 3. Rerun task readiness against the reconciled authoritative sources.
 4. On repeat runs, compare the verified current issue to the proposal and make no write when it already matches.
 
