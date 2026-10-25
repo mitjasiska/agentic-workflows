@@ -1,6 +1,6 @@
 # Architecture refinement checkpoint
 
-Last updated: 2026-10-24
+Last updated: 2026-10-25
 
 ## Purpose and authority
 
@@ -22,11 +22,13 @@ At the end of every refinement session, update the date, last completed decision
 
 ## Current objective
 
-Reach a sufficiently specified Initial E2E Milestone to prepare and start its implementation task. The complete v1 architecture does not need to be finished first. An unanswered matter blocks implementation only when it could materially change the milestone's scope, observable behavior, acceptance criteria, domain ownership, persistence, integration boundaries, sequencing, safety, or recovery.
+Keep the completed Initial E2E architecture synchronized while preparing the next implementation outcome selected from Linear. The complete v1 architecture does not need to be finished first. An unanswered matter blocks implementation only when it could materially change the selected task's scope, observable behavior, acceptance criteria, domain ownership, persistence, integration boundaries, sequencing, safety, or recovery.
 
-Current readiness: **Ready for DEV-123 implementation.** The original readiness grilling, targeted pre-implementation consistency audit, and the gateway-ownership clarification prompted by the first DEV-123 readiness pass are complete. Broader v1 decisions remain deferred and do not block this milestone.
+Current readiness: **Ready to prepare a separate source-build, source-setup, and service-lifecycle implementation task.** The command meanings, service-manager boundary, lifecycle verification, source workflow, and safety exclusions are settled. Packaged installation and updates remain deferred and do not block this source-based outcome.
 
 ## Last completed decision
+
+Source-checkout building, source setup, and control-plane service operation remain separate. The repository owns `build.sh` build, rebuild, and test operations; `setup-source.sh` safely configures and enables the user-scoped service plus PATH launcher without building or starting; and `awctl service start|stop|restart|status|enable|disable` manages only the configured local service. `awctl start TASK-ID` and `awctl status` retain their Workflow-start and application-health meanings. Lifecycle completion is verified, ordinary commands never start the service implicitly, and service stop or restart never becomes Workflow or Herdr-resource cleanup. [ADR 0039](../architecture/adr/0039-separate-source-build-setup-and-service-control.md) records the accepted boundary. Packaged installer and update mechanics remain open.
 
 DEV-123 implementation readiness clarified where the already-settled Herdr gateway guarantees live. `IHerdrGateway` provides AW-semantic idempotency, Operation correlation, reconciliation, and Result Envelope acknowledgement by composing AW's durable pending intent and Operation-scoped result delivery with existing structured Herdr CLI calls and verified Herdr, Git, and filesystem facts. Herdr continues to own workspace, worktree, pane, process, and session mechanics but does not need native AW Workflow or Operation fields, a turn tracker, a result store, or an acknowledgement API. Harness-specific Herdr hooks are optional aids rather than core prerequisites. This preserves the existing ownership and recovery invariants and is recorded as a clarification in the architecture, workflow specification, ADR 0032, and ADR 0034.
 
@@ -36,7 +38,7 @@ The post-DEV-119 local-control refinement separates the two control-plane presen
 
 ## Next question
 
-None. The Initial E2E architecture is complete, the gateway-ownership ambiguity is clarified, and DEV-123 may restart from the current Linear issue.
+None for the source-build, source-setup, and service-lifecycle outcome. Prepare it as a separate Linear implementation task rather than expanding DEV-123.
 
 ## Initial E2E implementation-readiness checklist
 
@@ -69,6 +71,7 @@ These matters remain important but do not block the first implementation task un
 - GitLab, Jira, authentication/RBAC, PostgreSQL, dashboard mutation controls, scheduling, organization governance, and public branding.
 - The full dashboard UI/UX design beyond the minimal read-only lifecycle projection needed by the milestone.
 - Windows and macOS packaging, service hosting, and their platform adapters; the architecture is cross-platform, while the Initial E2E implementation and official v1 support remain Linux-first.
+- Packaged Linux installation, updates, distribution, and migration beyond the settled build-from-source path.
 
 ## Session-size estimate
 
