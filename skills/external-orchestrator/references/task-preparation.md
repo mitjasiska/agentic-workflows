@@ -40,3 +40,5 @@ Only after a valid `Ready` result:
 3. Report its verified result or remaining blocker. A repeat run must reuse the existing issue and make no write when the requested state already matches.
 
 Discussion and a readiness result do not themselves authorize a Linear write. Obtain the authorization required by the active tool and workflow before mutation.
+
+An authorized task creation or refinement ends with the verified issue and the next suggested action. Starting an `awctl`-managed Workflow, implementing the task, committing, pushing, and creating a PR are separate operations that require their own authorization; a PR requirement in the issue does not trigger them.

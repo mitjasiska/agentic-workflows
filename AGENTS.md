@@ -2,9 +2,11 @@
 
 ## Use Linear as the work queue
 
-Linear is the canonical source for what work should be performed next. Repository documents are authoritative for product decisions, constraints, and detailed design, but they do not create work by themselves. Begin architecture refinement or implementation from the applicable Linear issue, and use the repository sources to interpret and execute that issue. Do not turn an open item in an architecture document into an unrequested task.
+Linear is the canonical work queue for planned work. Repository documents are authoritative for product decisions, constraints, and detailed design, but they do not create work by themselves. Begin architecture decision refinement and planned implementation from the applicable Linear issue, and use the repository sources to interpret and execute that issue. Do not turn an open item in an architecture document into an unrequested task.
 
-For architecture refinement, task preparation, work-queue coordination, or deciding next actions outside an AW-managed Implementer or Reviewer pass, use the `external-orchestrator` skill. For Linear issue creation, refinement, relationships, or other requested issue mutations, use the `create-linear-task` skill; the External Orchestrator delegates those writes to it.
+For now, outside an AW-managed Implementer or Reviewer pass, small routine changes explicitly requested by the user may be implemented, reviewed, and committed without a Linear issue. Use the user's request as the scope and acceptance boundary; creating an issue is not required merely for bookkeeping. Examples include editorial corrections and minor maintenance that does not settle a material product or architecture decision. Judge the exception by impact and scope rather than line count. Architectural decisions and broader planned implementation still require a Linear issue; if routine work expands into either, establish the tracked outcome before continuing the expanded work. Git publication still requires the approvals below.
+
+For architecture refinement, task preparation, work-queue coordination, next-action decisions, or explicitly requested external publication outside an AW-managed Implementer or Reviewer pass, use the `external-orchestrator` skill. Planning and task preparation do not authorize execution or publication. For Linear issue creation, refinement, relationships, or other requested issue mutations, use the `create-linear-task` skill; the External Orchestrator delegates those writes to it.
 
 The completed Initial E2E architecture refinement is recorded by [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). The local checkpoint records that completed readiness state; any further refinement must begin from the currently applicable Linear issue.
 
@@ -51,7 +53,7 @@ Classify applicable Repository Guidance as follows:
 
 When a statement's status is ambiguous, infer it from explicit language and context only when the consequence is reversible. If the ambiguity could materially change the task, treat it as a documentation defect and resolve it first.
 
-Trace every implementation change to the current task. Use the architecture to select a compatible solution, not to expand the requested outcome. Preserve **Implementation Latitude** for reversible technical choices that the task and architecture intentionally leave open.
+Trace every implementation change to the current Linear task or, for permitted routine work without an issue, to the user's explicit request. Use the architecture to select a compatible solution, not to expand the requested outcome. Preserve **Implementation Latitude** for reversible technical choices that the task and architecture intentionally leave open.
 
 ## Enforce task readiness proportionately
 
@@ -95,5 +97,7 @@ Architecture refinement and task preparation do not authorize application implem
 Agentic Workflows is a C#/.NET product. Repository-owned implementation, validation utilities, and automated tests must use the established .NET solution and its testing stack. The historical Python prototype is evidence, not a precedent for adding Python code here. Use another language only when the current task explicitly requires it.
 
 ## Preserve user control of Git publication
+
+Permitted routine work without a Linear issue may use a pull request or, when explicitly chosen by the user, a direct commit to `main`. Neither a Linear issue nor a pull request is a prerequisite for that direct path. Follow the applicable commit-message convention and omit inapplicable task metadata rather than inventing a Linear identifier or review record. This contribution exception does not change AW-managed pass restrictions or AW product submission behavior.
 
 Leave changes uncommitted until the user reviews the diff and explicitly approves the commit. Commit approval does not authorize a push: show the resulting commit and obtain separate explicit approval before pushing it. Earlier or general authorization is not standing permission for later commits or pushes.

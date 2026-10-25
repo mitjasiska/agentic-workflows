@@ -35,6 +35,8 @@ If a requested mutation cannot use the required MCP write tool, report that Line
 
 Discover team names, project names, issue prefixes, workflow states, label IDs, and machine paths at runtime. Never derive a team or project from an issue-prefix convention.
 
+For task classification, follow the [fixed prototype publication conventions](references/publication-conventions.md). They are part of the skill source and need no external configuration. Metadata-only updates do not require classification.
+
 ## Draft one cohesive issue
 
 Do not split small work by activity. Split only when outcomes can genuinely be implemented and reviewed independently; ask before a split that materially changes scope.
@@ -54,9 +56,9 @@ Classify three independent facts:
 - `primary_category`: at most one of `feature`, `bug`, `chore`, `docs`, or `refactor`, or `null`;
 - `research_modifier`: `true` when research is part of the work.
 
-`task_kind = research` requires `research_modifier = true`. Map the primary categories to the active team labels `Feature`, `Bug`, `Chore`, `Docs`, and `Refactor`; `Research` is an independent modifier. Resolve label IDs from the current team and stop if a required label is missing or ambiguous. Preserve unrelated labels.
+`task_kind = research` requires `research_modifier = true`. Use the exact primary label and change type from the shared conventions, resolving the label ID from the current team. `Research` is an independent modifier. Stop if a required label is missing or ambiguous, and preserve unrelated labels.
 
-Task kind alone does not imply a primary category: investigating a bug can be pure research. Use `null` when a category genuinely does not apply instead of choosing the nearest-looking label. Change types are `feature` → `feat`, `bug` → `fix`, `chore` → `chore`, `docs` → `docs`, and `refactor` → `refactor`; pure research has no change type, while a primary category plus Research keeps its primary change type.
+Task kind alone does not imply a primary category: investigating a bug can be pure research. Use `null` when a category genuinely does not apply instead of choosing the nearest-looking label. Record the selected primary label and mapped change type. Pure research has no publication type unless a primary label is deliberately selected; adding a Research modifier does not change the selected primary type.
 
 ## Keep implementation guidance separate
 
