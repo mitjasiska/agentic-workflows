@@ -35,7 +35,7 @@ catch (Exception exception)
 {
     Console.Error.WriteLine(JsonSerializer.Serialize(new ControlDiagnostic("control_plane_failed",
         exception.Message, "Check the existing control-plane process and local runtime directory ownership and permissions, then restart: " +
-        "dotnet run --project src/AgenticWorkflows.ControlPlane --no-build", endpoint?.SocketPath), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        "awctl service restart. Inspect: journalctl --user -u agentic-workflows.service -n 100 --no-pager", endpoint?.SocketPath), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
     return 1;
 }
 

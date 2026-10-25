@@ -39,7 +39,7 @@ internal static class LocalControlProtocol
     internal static ControlDiagnostic Mismatch(int clientVersion, int serverVersion, string endpoint) =>
         new("protocol_mismatch",
             $"awctl protocol version {clientVersion} does not match control-plane protocol version {serverVersion}.",
-            "Update awctl and the control plane together, then restart the control plane and retry awctl status.",
+            "Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.",
             endpoint, clientVersion, serverVersion);
 
     internal static async Task<byte[]> ReadAsync(Stream stream, CancellationToken cancellationToken)

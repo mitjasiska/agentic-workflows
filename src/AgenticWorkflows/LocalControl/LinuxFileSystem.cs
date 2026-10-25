@@ -65,26 +65,47 @@ internal static class LinuxFileSystem
         Require(path, DirectoryType, PrivateDirectory);
     }
 
-    internal static SafeFileHandle LockDirectory(string path)
+    internal static DirectoryLease LockDirectory(string path)
     {
         var before = Require(path, DirectoryType, PrivateDirectory);
         int descriptor = open(path, 0x10000 | 0x20000 | 0x80000); // O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
         if (descriptor < 0)
             throw Failure($"open runtime directory '{path}'", Marshal.GetLastPInvokeError());
         var handle = new SafeFileHandle(descriptor, ownsHandle: true);
+        DirectoryLease? lease = null;
         try
         {
             if (flock(handle, 2 | 4) != 0) // LOCK_EX | LOCK_NB; released by the kernel even after a crash.
                 throw new IOException($"Another control plane holds runtime directory '{path}'. Check the running control plane before restarting.");
+            lease = new(handle);
             if (statx(descriptor, "", 0x1000, 0x10b, out var opened) != 0 || // AT_EMPTY_PATH
                 !before.SameFile(opened) || !before.SameFile(Require(path, DirectoryType, PrivateDirectory)))
                 throw new IOException($"Runtime directory '{path}' changed during startup; inspect it before retrying.");
-            return handle;
+            return lease;
         }
         catch
         {
-            handle.Dispose();
+            if (lease is not null) lease.Dispose(); else handle.Dispose();
             throw;
+        }
+    }
+
+    internal sealed class DirectoryLease(SafeFileHandle handle) : IDisposable
+    {
+        internal SafeFileHandle Handle { get; } = handle;
+        private int disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+            try
+            {
+                // A concurrent fork can inherit this open file description until exec.
+                // Explicit unlock releases the lease even while such a duplicate is open.
+                if (flock(Handle, 8) != 0) // LOCK_UN
+                    throw Failure("release directory lock", Marshal.GetLastPInvokeError());
+            }
+            finally { Handle.Dispose(); }
         }
     }
 
