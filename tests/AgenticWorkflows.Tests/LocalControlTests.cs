@@ -540,7 +540,7 @@ public sealed class LocalControlTests
     {
         Assert.Equal("control_plane_unavailable", diagnostic.Code);
         Assert.Equal(fixture.Endpoint.SocketPath, diagnostic.Endpoint);
-        Assert.Contains("dotnet run --project src/AgenticWorkflows.ControlPlane --no-build", diagnostic.Guidance);
+        Assert.Contains("awctl service start", diagnostic.Guidance);
     }
 
     private static async Task<T> FakeResponseAsync<T>(SocketFixture fixture, string body, TimeSpan? timeout = null) where T : Exception

@@ -21,12 +21,13 @@ Architecture Documentation is authoritative for product decisions, boundaries, a
 
 Development Documentation:
 
-- [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, restore, build, tests, running the control plane and `awctl status`, endpoint discovery, and recovery.
+- [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, build/rebuild/tests, the edit-build-restart loop, manual debugging, and isolated validation.
 - [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, validation, and installation paths.
 - [Managed workflow validation and smoke test](docs/development/managed-workflow-smoke-test.md) covers blocking controlled validation and the deferred live integration procedure for the future opt-in E2E kit.
 
 Product Documentation:
 
+- [Linux source installation and service operation](docs/user/source-installation.md) covers fresh-checkout setup, PATH, first start, automatic startup, logs, lifecycle commands, safe removal, and recovery.
 - [Managed Linear workflows](docs/user/managed-workflows.md) covers setup, configuration, inspection, continuation, interruption, abandonment, cleanup, and database recovery.
 
 Reference Documentation:

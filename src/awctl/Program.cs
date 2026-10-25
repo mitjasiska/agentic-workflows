@@ -3,6 +3,7 @@ using AgenticWorkflows.LocalControl;
 using AgenticWorkflows.Application;
 using AgenticWorkflows.Infrastructure;
 using AgenticWorkflows.Workflows;
+using AgenticWorkflows.Source;
 
 return await AwctlCommand.RunAsync(args, Console.Out, Console.Error);
 
@@ -12,6 +13,7 @@ internal static class AwctlCommand
     { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
     private const string Usage = """
         Usage: awctl status
+               awctl service start|stop|restart|status|enable|disable
                awctl setup
                awctl start TASK-ID [--max-passes N|unlimited]
                awctl workflows [--offset N]
@@ -28,8 +30,9 @@ internal static class AwctlCommand
         """;
 
     internal static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error,
-        LocalControlClient? client = null)
+        LocalControlClient? client = null, ServiceControl? service = null)
     {
+        bool inspectService = client is null;
         if (args is ["--help"] or ["-h"])
         {
             await output.WriteLineAsync(Usage);
@@ -48,6 +51,12 @@ internal static class AwctlCommand
         try
         {
             object? request = Parse(args);
+            if (request is ServiceCommand serviceCommand)
+            {
+                var result = await (service ?? ServiceControl.Create()).ExecuteAsync(serviceCommand, error);
+                await output.WriteLineAsync(JsonSerializer.Serialize(result, Json));
+                return serviceCommand.Action == "status" && (result.Service.ActiveState != "active" || result.Application is null || result.ServiceDiagnostic is not null) ? 1 : 0;
+            }
             client ??= new LocalControlClient(LocalControlEndpoint.Discover());
             object reply = request switch
             {
@@ -67,7 +76,25 @@ internal static class AwctlCommand
         }
         catch (LocalControlException exception)
         {
-            await WriteErrorAsync(error, exception.Diagnostic);
+            var diagnostic = exception.Diagnostic;
+            if (inspectService && diagnostic.Code == "control_plane_unavailable")
+            {
+                try
+                {
+                    var observed = await ServiceControl.Create().InspectManagerAsync();
+                    diagnostic = diagnostic with { Message = diagnostic.Message + " Observed user service: " + JsonSerializer.Serialize(observed, Json) };
+                }
+                catch (Exception unavailable) when (unavailable is IOException or LocalControlException or UnauthorizedAccessException)
+                { diagnostic = diagnostic with { Message = diagnostic.Message + " User-service state unavailable; run awctl service status." }; }
+            }
+            await WriteErrorAsync(error, diagnostic);
+            return 1;
+        }
+        catch (Exception exception) when (args[0] == "service" && exception is IOException or UnauthorizedAccessException)
+        {
+            await WriteErrorAsync(error, new("source_setup_invalid", exception.Message,
+                "Inspect the source ownership files; from the configured checkout rerun ./setup-source.sh. " +
+                "Build missing support artifacts with ./build.sh. Logs: " + SourceSetup.Logs));
             return 1;
         }
         catch (IOException exception)
@@ -80,6 +107,8 @@ internal static class AwctlCommand
 
     internal static object? Parse(string[] args)
     {
+        if (args is ["service", "start" or "stop" or "restart" or "status" or "enable" or "disable"])
+            return new ServiceCommand(args[1]);
         if (args is ["status"]) return null;
         if (args.Length == 0 || args[0] == "status") throw new ArgumentException();
         string action = args[0];

@@ -1,86 +1,87 @@
 # Local .NET development
 
-The Linux control plane provides `awctl status` and the managed workflow commands. Status remains available without integration credentials; workflow execution uses the SQLite store and configured providers. There is no HTTP listener or service installation in this slice. See [managed workflow usage](../user/managed-workflows.md) and [validation/smoke testing](managed-workflow-smoke-test.md).
+Use the [Linux source setup and service guide](../user/source-installation.md) for first installation, automatic startup, service status, logs, safe removal, and recovery. See [managed workflow usage](../user/managed-workflows.md) and [validation/smoke testing](managed-workflow-smoke-test.md) for provider configuration and workflow validation. The dashboard and HTTP listener remain separate work.
 
 ## Prerequisites and build
 
-Use Linux with the .NET 10 SDK (10.0.100 or a later stable 10.0 feature band, as selected by `global.json`). The implementation uses Linux `statx` (kernel 4.11 or later with libc support) for filesystem ownership checks. Validation for this slice uses Ubuntu 24.04, Linux 6.8, and SDK 10.0.113. Windows and macOS are not supported by this implementation.
+Use Linux with Bash, systemd user services, and the .NET 10 SDK (10.0.100 or a later stable 10.0 feature band selected by `global.json`). Linux `statx` (kernel 4.11 or later with libc support) is required for ownership checks. Validation uses Ubuntu 24.04, Linux 6.8, and SDK 10.0.113. Git is needed for repository tests. Workflow execution additionally needs the operator's configured Herdr/Codex and provider access; automated tests use controlled substitutes.
 
 From the repository root:
 
 ```sh
-dotnet restore AgenticWorkflows.slnx
-dotnet build AgenticWorkflows.slnx --no-restore
-dotnet test AgenticWorkflows.slnx --no-build
+./build.sh
+./build.sh rebuild
+./build.sh test
 ```
 
-Restore needs access to NuGet. Tests need permission to create local Unix sockets and start child processes; a sandbox that denies socket binding cannot run this suite. Tests use private temporary directories under `/tmp` and do not contact a developer's running control plane. No test requires root or external services.
+The default is an incremental complete solution build with implicit restore. `rebuild` cleans the solution then builds it; `test` builds it then runs the complete automated suite. Failures propagate their exit code and invalidate the source-build seal. None of these operations installs files or invokes a service manager. The successful build seal covers all files under both application output directories and requires identical shared AW libraries. Setup checks the seal to prevent independently refreshed client/host outputs.
 
-## Run in two terminals
-
-Run both terminals as the same OS user, with the same `XDG_RUNTIME_DIR`, from the repository root. After building, start the control plane in terminal one:
+Manual equivalents for compilation and tests are:
 
 ```sh
+dotnet restore AgenticWorkflows.slnx
+dotnet build AgenticWorkflows.slnx --no-restore
+dotnet clean AgenticWorkflows.slnx
+dotnet build AgenticWorkflows.slnx
+dotnet test AgenticWorkflows.slnx --no-build --no-restore
+```
+
+Use `./build.sh` after manual compilation to seal the matching outputs for source setup. Outputs live under each project's `bin/Debug/net10.0/`; source setup pins those paths and never builds. Packaged installation, release output layouts, migration, and updates are outside this source workflow.
+
+Restore needs NuGet access and writable caches. For a restricted environment, set `DOTNET_CLI_HOME`, `NUGET_PACKAGES`, and `NUGET_HTTP_CACHE_PATH` to writable disposable locations before build/test; do not change the real account's home or credentials. Tests need Unix sockets and child-process permissions. A sandbox that forbids socket binding cannot execute the suite.
+
+## Edit, build, restart
+
+After the one-time source setup:
+
+```sh
+./build.sh
+awctl service restart
+awctl status
+```
+
+Restart is explicit; building does not replace the running process. Repeating setup is only needed for missing setup artifacts or intentional non-secret environment changes. For a clean rebuild use `./build.sh rebuild`, then restart. Never independently rebuild one executable and treat it as a supported source installation update. Before changing pre-stable storage formats, follow the existing [database recovery contract](../user/managed-workflows.md); service setup never migrates or deletes data.
+
+For debugging without systemd, first stop the configured service, then run the host in a terminal as the same account with the same XDG locations:
+
+```sh
+awctl service stop
 dotnet run --project src/AgenticWorkflows.ControlPlane --no-build
 ```
 
-Wait for `Local Control Interface listening at ...`. The process stays running until Ctrl+C or SIGTERM.
-
-In terminal two:
+Wait for `Local Control Interface listening at ...`. In another terminal:
 
 ```sh
 dotnet run --project src/awctl --no-build -- status
 ```
 
-The built executable can also be invoked directly:
+Ctrl+C or SIGTERM stops the foreground host. Only after it has stopped, explicitly resume the configured service with `awctl service start`. Never run two hosts against the same runtime directory. Foreground hosting is a debugging equivalent, not an alternative installation.
 
-```sh
-./src/awctl/bin/Debug/net10.0/awctl status
-```
+## Endpoint and application protocol
 
-Successful output is JSON on stdout, with exit code 0:
+Both applications discover `$XDG_RUNTIME_DIR/agentic-workflows/control.sock`, or `/tmp/agentic-workflows-UID/control.sock` when XDG runtime is absent or empty. The parent runtime directory must be physical, owned by the current user, and `0700`. The control plane atomically creates its own private directory and `0600` socket. It rejects insecure existing paths and symlinks. Socket paths must fit Linux's 107-byte UTF-8 limit.
 
-```json
-{"protocolVersion":1,"status":{"state":"running","softwareVersion":"0.1.0"}}
-```
+A kernel lock on the runtime directory excludes competing hosts and is released after crashes. Startup recovers only an unchanged owned socket after positively refused connection. Normal shutdown removes only the socket created by that host; it preserves replacement paths. Service commands never unlink an endpoint to force a lifecycle success. Check the [source service guide](../user/source-installation.md) for status/log diagnostics and recovery.
 
-The software version comes from the application assembly and may include a build revision suffix. `protocolVersion` is the AW application protocol version, separate from the JSON-RPC `"2.0"` marker used on the socket. The CLI prints the result projection, not the JSON-RPC envelope. Failures produce a JSON diagnostic on stderr and exit code 1; invalid command syntax returns 2. `awctl --help` shows the command syntax.
+`awctl status` prints JSON and returns 0 for a compatible running application, 1 for a diagnostic, and 2 for invalid syntax. It queries application health even when manually hosted. `awctl service status` separately reports user-manager state plus available application health. Neither query starts anything.
 
-Stop terminal one's process with Ctrl+C, then repeat terminal two's status command. It should return exit code 1 and an actionable `control_plane_unavailable` diagnostic naming the endpoint and start command. Restart terminal one and verify that status succeeds again.
-
-## Endpoint discovery and recovery
-
-Both programs automatically select `$XDG_RUNTIME_DIR/agentic-workflows/control.sock`. If `XDG_RUNTIME_DIR` is unset or empty, they use `/tmp/agentic-workflows-UID/control.sock`, where `UID` is the effective Unix user ID. `XDG_RUNTIME_DIR` is an OS runtime-directory convention, not a server URL. There is no remote CLI configuration or transport selection.
-
-The runtime directory must be a physical directory owned by the current user with mode `0700`; when XDG is set, its directory must meet the same requirements. The control plane creates its own private subdirectory atomically and creates a `0600` socket inside it. Existing insecure directories or symlinks are refused, not repaired silently. The socket pathname must fit Linux's 107-byte UTF-8 limit.
-
-The control plane holds an exclusive kernel lock on its runtime directory for its lifetime. It preserves active sockets, ordinary files, directories, and symlinks at the expected socket path. A stale, owned socket is removed only after a connection is positively refused and its filesystem identity is rechecked. Normal shutdown removes only the socket created by that process; the private directory remains for later starts. After a crash, the kernel releases the lock and the next startup safely recovers the stale socket.
-
-If `awctl status` reports `control_plane_unavailable`, its diagnostic includes the expected endpoint and the exact development start command. Check the control-plane terminal for startup failures, start it with the command above, and confirm that both terminals use the same account and runtime directory. The CLI never starts the service implicitly.
-
-If it reports `protocol_mismatch`, the diagnostic includes the client and server protocol versions. Stop the old process, restore and rebuild both executables together, then start the rebuilt control plane and retry the status command. Only an exact protocol-version match is accepted, before the application query runs.
-
-If startup reports an occupied or unsafe path, inspect that exact path and the existing process. Stop the active control plane before restarting it. Do not delete an active endpoint or an unrelated file to force startup. This slice supplies no systemd unit or lifecycle commands; service packaging is later work.
+The socket adapter uses StreamJsonRpc, a four-byte big-endian length prefix, a 16 KiB body bound, a five-second exchange deadline, and at most 16 active exchanges. Every connection admits one request and at most one reply. Application protocol versioning is distinct from JSON-RPC's `"2.0"` marker and is checked before application dispatch. Mismatch retains both versions and explicit rebuild/restart guidance. Disconnecting a client never cancels accepted Workflow work. See the [Local Control Interface contract](../reference/local-control-interface.md).
 
 ## Implementation and tests
 
-The solution has four projects with executable behavior:
+`src/AgenticWorkflows` contains application/workflow behavior, infrastructure adapters, local control, and tested source-setup/service modules. `src/AgenticWorkflows.ControlPlane` composes the Generic Host and runtime. `src/awctl` owns CLI parsing. `tools/AgenticWorkflows.SourceTools` exposes only the build seal and source-setup support for the two thin Bash entry scripts. Product validation and automated tests use .NET/xUnit.
 
-- `src/AgenticWorkflows` contains transport-independent workflow commands and queries under `Application/`, domain facts and rules under `Workflows/`, SQLite/Git/provider/Herdr adapters under `Infrastructure/`, and the Local Control Interface under `LocalControl/`. A later HTTP adapter invokes the same application handlers.
-- `src/AgenticWorkflows.ControlPlane` composes the query and socket server through a .NET Generic Host and dependency injection.
-- `src/awctl` is the local command-line executable.
-- `tests/AgenticWorkflows.Tests` uses xUnit and the .NET test SDK for real-socket and separate-process tests.
-
-The host creates its SQLite store under the account's XDG data directory. Tests override `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` with private disposable paths. Workflow application tests use controlled providers; Git integration tests create commits only in their isolated fixture repositories. The application records durable intent before external actions and never ties accepted execution to a client connection cancellation token.
-
-The socket adapter uses StreamJsonRpc with `SystemTextJsonFormatter` and a bounded message handler. Each connection admits one JSON-RPC 2.0 request and at most one reply, using the existing four-byte big-endian length prefix, 16 KiB body limit, five-second deadline, and limit of 16 active exchanges. A request is `{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":1}}`. Successful replies put the existing status projection in `result`; failures use JSON-RPC `error`, with structured version diagnostics in `error.data`. Application-version mismatches are rejected before method lookup, application parameter binding, or query execution. The former custom envelope is no longer accepted. Notifications, batching, streaming, and subscriptions are not supported product capabilities. See the [Local Control Interface contract](../reference/local-control-interface.md) for exact fields, error codes, admission rules, and cancellation behavior.
-
-For focused execution:
+Focused checks after a build:
 
 ```sh
-dotnet test AgenticWorkflows.slnx --no-build --filter FullyQualifiedName~LocalControlTests
-dotnet test AgenticWorkflows.slnx --no-build --filter FullyQualifiedName~EndpointTests
-dotnet test AgenticWorkflows.slnx --no-build --filter FullyQualifiedName~ProcessTests
+dotnet test AgenticWorkflows.slnx --no-build --filter 'FullyQualifiedName~ServiceControlTests|FullyQualifiedName~SourceSetupTests|FullyQualifiedName~SourceScriptTests'
+dotnet test AgenticWorkflows.slnx --no-build --filter 'FullyQualifiedName~LocalControlTests|FullyQualifiedName~EndpointTests|FullyQualifiedName~ProcessTests'
+bash -n build.sh setup-source.sh
+git diff --check
 ```
 
-Protocol tests inject endpoint and protocol settings in code, without exposing test configuration as CLI flags. Coverage includes raw JSON-RPC requests/replies and library-client interoperability, separate application version checks with no dispatch, malformed markers and messages, request correlation, fragmented and oversized frames, unsupported notifications/batches/extensions, timeouts and cancellation. Endpoint and process tests retain private permissions, conservative stale recovery, preservation of active or unrelated paths, competing processes, crash recovery, and graceful shutdown/restart coverage. Run the complete suite for this slice using the command in the build section.
+Source-script tests create disposable checkouts with spaces and metacharacters, homes, PATH launchers, XDG config/data/runtime locations, and service-manager substitutes. `tests/AgenticWorkflows.ScriptHost` is a test-only .NET executable that records arguments and injects failures; it never invokes the real service manager. Tests exercise root scripts, built-support behavior, generated-unit parsing with `systemd-analyze --user verify`, ownership conflicts, same-checkout reruns, partial failure, and safe removal. Unit parser tests require the systemd tools but do not start a user service. Repository documentation-link tests verify relative Markdown file targets.
+
+All service mutations are controlled substitutions. Real-socket tests validate compatible readiness and protocol mismatch. Workflow/application tests isolate repositories/providers and preserve accepted work across host restart. Tests do not modify the developer's live PATH files, service, AW data, configuration, or credentials. Optional manual verification against a real user manager belongs to a disposable account after review; it is not part of automated validation.
+
+Regression tests retain an uncertain earlier Reviewer after its replacement completes and verify the pre-stop/restart inventory warning. Directory leases explicitly unlock before closing their handles so a descriptor inherited during another thread's fork cannot extend a finished setup operation. Tests cover duplicate descriptors, setup/removal recovery under concurrent subprocess activity, and exclusion of genuinely concurrent setups.

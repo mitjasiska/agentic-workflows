@@ -1,7 +1,6 @@
 using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Text;
-using Microsoft.Win32.SafeHandles;
 
 namespace AgenticWorkflows.LocalControl;
 
@@ -100,7 +99,7 @@ public sealed class LocalControlEndpoint
     }
 
     internal sealed class EndpointLease(LocalControlEndpoint endpoint, Socket listener,
-        SafeFileHandle directoryLock, LinuxFileSystem.Metadata bound) : IDisposable
+        LinuxFileSystem.DirectoryLease directoryLock, LinuxFileSystem.Metadata bound) : IDisposable
     {
         internal Socket Listener { get; } = listener;
 

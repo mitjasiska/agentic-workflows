@@ -5,11 +5,26 @@ using System.Text.Json;
 using AgenticWorkflows.LocalControl;
 using AgenticWorkflows.Application;
 using AgenticWorkflows.Workflows;
+using AgenticWorkflows.Infrastructure;
 
 namespace AgenticWorkflows.Tests;
 
 public sealed class ProcessTests
 {
+    [Fact]
+    public async Task Argument_process_preserves_metacharacters_without_shell_interpolation()
+    {
+        await using var fixture = new SocketFixture();
+        string log = Path.Combine(fixture.Root, "arguments.jsonl"), sentinel = Path.Combine(fixture.Root, "must-not-exist");
+        string payload = "$(touch " + sentinel + ") ; ' \" space";
+        string executable = Path.Combine(SourceScriptTests.RepositoryRoot(), "tests/AgenticWorkflows.ScriptHost/bin/Debug/net10.0/AgenticWorkflows.ScriptHost");
+        var result = await new ArgumentProcess().RunAsync(executable, ["--user", payload], fixture.Root,
+            new Dictionary<string, string?> { ["AW_TEST_PROCESS_LOG"] = log }, CancellationToken.None);
+        Assert.Equal(0, result.ExitCode); Assert.False(File.Exists(sentinel));
+        using var call = JsonDocument.Parse(File.ReadAllText(log));
+        Assert.Equal(new[] { "--user", payload }, call.RootElement.GetProperty("args").EnumerateArray().Select(e => e.GetString()));
+    }
+
     [Fact]
     public async Task Retained_pending_intent_survives_process_restart_and_is_not_replayed()
     {
@@ -75,7 +90,7 @@ public sealed class ProcessTests
         var diagnostic = JsonSerializer.Deserialize<ControlDiagnostic>(unavailable.Error, LocalControlProtocol.Json)!;
         Assert.Equal(endpoint.SocketPath, diagnostic.Endpoint);
         Assert.Equal("control_plane_unavailable", diagnostic.Code);
-        Assert.Contains("dotnet run", diagnostic.Guidance);
+        Assert.Contains("awctl service start", diagnostic.Guidance);
     }
 
     [Fact]

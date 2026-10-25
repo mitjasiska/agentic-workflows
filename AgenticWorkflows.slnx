@@ -6,5 +6,9 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AgenticWorkflows.Tests/AgenticWorkflows.Tests.csproj" />
+    <Project Path="tests/AgenticWorkflows.ScriptHost/AgenticWorkflows.ScriptHost.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/AgenticWorkflows.SourceTools/AgenticWorkflows.SourceTools.csproj" />
   </Folder>
 </Solution>

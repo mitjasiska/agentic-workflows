@@ -43,7 +43,7 @@ After validating the JSON-RPC request shape, the adapter checks `params.protocol
 A version mismatch response has the request ID, no `result`, and this shape:
 
 ```json
-{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 1.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 1.","guidance":"Update awctl and the control plane together, then restart the control plane and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":1}}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 1.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 1.","guidance":"Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":1}}}
 ```
 
 The endpoint and version values depend on the exchange. Error messages are diagnostic text, not identifiers to parse. A JSON-RPC response contains exactly one of `result` or `error`.
@@ -60,11 +60,13 @@ The endpoint and version values depend on the exchange. Error messages are diagn
 
 No notification is dispatched. A structurally valid notification (a request without `id`) is closed without a reply, including unknown methods and incompatible application versions. Batches are rejected as a whole with `-32600` and `id:null`; no element executes. There are no subscriptions, streaming results, or server callbacks. This intentionally restricted request/reply profile does not advertise the optional product behaviors of a general RPC endpoint.
 
-Invalid frames/messages, disconnects, incorrect response IDs, unsupported protocol markers, unexpected responses, and deadlines produce an actionable `control_plane_unavailable` client diagnostic with the expected endpoint and explicit development start command. Wrong response IDs cannot satisfy the outstanding request and expire within the deadline. A valid application-version mismatch produces `protocol_mismatch` with both versions and update/restart guidance. CLI diagnostics go to stderr with exit code 1 and no status on stdout; invalid CLI syntax returns 2. The client never starts a control plane implicitly.
+Invalid frames/messages, disconnects, incorrect response IDs, unsupported protocol markers, unexpected responses, and deadlines produce an actionable `control_plane_unavailable` client diagnostic with the expected endpoint and explicit `awctl service status`/`awctl service start` recovery guidance. Wrong response IDs cannot satisfy the outstanding request and expire within the deadline. A valid application-version mismatch produces `protocol_mismatch` with both versions and update/restart guidance. Application-command diagnostics go to stderr with exit code 1 and no status on stdout; invalid CLI syntax returns 2. The client never starts a control plane implicitly.
 
 ## Implementation boundary
 
 The adapter uses StreamJsonRpc 2.26.150 with `SystemTextJsonFormatter`. `LocalControlMessageHandler` implements bounded framing and admission policy through the library's message-handler extension point. StreamJsonRpc performs request correlation, parameter binding, method dispatch, and message serialization. `LocalControlRpc` disables cancellation notifications, maps application diagnostics to `-32002`, and maps unexpected exceptions to internal errors. Application handlers remain independent of RPC and sockets.
+
+`awctl service start|stop|restart|status|enable|disable` is a separate fixed-unit Linux host-management adapter, not a JSON-RPC method. Its application-health and retained-execution queries use the existing methods here; lifecycle and startup-policy changes go directly to the systemd user manager. See [source setup and service operation](../user/source-installation.md).
 
 ## Workflow and database methods
 

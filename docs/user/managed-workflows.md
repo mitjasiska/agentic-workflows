@@ -1,6 +1,6 @@
 # Managed Linear workflows on Linux
 
-This slice retains a Linear task, prepares a Herdr workspace, runs a Codex Implementer and an independent Reviewer, and stops at a Clean Review Report or a durable condition requiring recovery. It does not commit, push, create a pull request, or mark Linear Done. Keep the development-hosted control plane running; closing `awctl` does not stop accepted work.
+This slice retains a Linear task, prepares a Herdr workspace, runs a Codex Implementer and an independent Reviewer, and stops at a Clean Review Report or a durable condition requiring recovery. It does not commit, push, create a pull request, or mark Linear Done. Use the [source installation guide](source-installation.md) to build, set up, and explicitly start the background control plane; closing `awctl` does not stop accepted work.
 
 ## One-time setup
 
@@ -14,7 +14,7 @@ Inject the variables named by `linear_credential` and `github_credential` into t
 
 Git must also have noninteractive read access to `origin` through its normal credential helper or SSH authentication. The GitHub credential reference authenticates API identity checks; AW never inserts that token into a Git URL or command argument. Admission verifies live remote branch collisions, and ordinary cleanup uses live remote evidence when local work is not already recoverable from the selected base.
 
-Start the control plane using the [development guide](../development/local-control-plane.md). From the canonical checkout, run:
+Start the control plane using the [source installation guide](source-installation.md). From the canonical checkout, run:
 
 ```sh
 awctl setup
@@ -131,5 +131,7 @@ awctl database restore --backup /absolute/path/to/verified-daily-backup.db
 ```
 
 If an ordinary compatible runtime is already active, stop the host and restart it with `AW_DATABASE_MAINTENANCE=1` before reset or restore. Reset explicitly archives the complete old database and `-wal`, `-shm`, and `-journal` companions into a timestamped directory, then creates a fresh store. Restore verifies the selected compatible backup, archives the damaged/current database, and installs the restored copy. Restart without maintenance mode afterward. Neither operation adopts or tears down external resources automatically.
+
+For the source service, enter maintenance with `awctl service stop`, `systemctl --user set-environment AW_DATABASE_MAINTENANCE=1`, then `awctl service start`. Perform the explicit database operation above. Afterwards run `systemctl --user unset-environment AW_DATABASE_MAINTENANCE` and `awctl service restart` to resume ordinary reconciliation. An interactive shell export alone does not update a systemd user service's environment.
 
 AW uses SQLite's online backup API, verifies each copy, and retains the seven most recent daily backups under `workflows.db.daily`. Reset archives are separate. These same-host backups do not protect against losing the host. Corruption is never repaired in place and restore is never automatic.

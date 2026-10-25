@@ -29,7 +29,7 @@ public sealed class LocalControlClient
         var response = await ExchangeAsync<StatusReply>("status", new { protocolVersion }, cancellationToken);
         if (response.Status is null || string.IsNullOrWhiteSpace(response.Status.SoftwareVersion) || response.Status.State != "running")
             throw new LocalControlException(new("control_plane_unavailable", "Expected a running status result.",
-                "Start or check the control-plane terminal with: dotnet run --project src/AgenticWorkflows.ControlPlane --no-build. Use the same OS account and XDG_RUNTIME_DIR, then retry awctl status.", endpoint.SocketPath));
+                "Inspect awctl service status, then run awctl service start. If setup is missing, run ./build.sh then ./setup-source.sh from the source checkout. Use the same OS account and XDG_RUNTIME_DIR, then retry awctl status.", endpoint.SocketPath));
         return response;
     }
 
@@ -93,7 +93,7 @@ public sealed class LocalControlClient
         {
             throw new LocalControlException(new("control_plane_unavailable",
                 $"Cannot obtain control-plane status at '{endpoint.SocketPath}': {error.Message}",
-                "From the repository root, start or check the control-plane terminal with: dotnet run --project src/AgenticWorkflows.ControlPlane --no-build. " +
+                "Inspect awctl service status, then run awctl service start. If setup is missing, run ./build.sh then ./setup-source.sh from the source checkout. " +
                 "Use the same OS account and XDG_RUNTIME_DIR in both terminals, then retry awctl status.", endpoint.SocketPath));
         }
     }
