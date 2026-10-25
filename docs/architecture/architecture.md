@@ -2,7 +2,7 @@
 
 > Working architecture — October 21, 2026
 >
-> This document is the canonical current product architecture. It captures settled boundaries, design directions, and questions that still require refinement. ADRs preserve durable decision rationale and history; the workflow specification owns detailed workflow mechanics.
+> This document is the canonical current product architecture. It captures settled boundaries, design directions, and questions that still require refinement. ADRs preserve durable decision rationale and history; the workflow specification owns detailed workflow mechanics. The [E2E test-kit architecture](e2e-test-kit.md) owns the kit-specific design within these product boundaries.
 
 ## How to read this document
 
@@ -366,6 +366,8 @@ The Initial E2E Milestone is the first implementation step, not another product 
 Controlled tests alone cannot prove live integration, while dogfooding or one successful live run cannot provide deterministic regression coverage. Using AW to develop its own repository is ordinary use under the same validation, review, recovery, and human-controlled publication rules. It supplies no special validation mode, product exception, or acceptance shortcut and is not itself a milestone acceptance requirement. The milestone must make later self-hosting possible, but self-hosted development may begin only in a later stage. Until then, development may continue through the existing prototype. Merge remains a separate human action.
 
 The detailed live-test procedure and test cases remain open and require separate owner specification. [DEV-125](https://linear.app/mitjasiska/issue/DEV-125/clarify-the-external-service-e2e-validation-boundary) clarifies this policy boundary only; it does not choose step-by-step run instructions, a scenario matrix, detailed pass/fail checks, or how the test kit works. [DEV-124](https://linear.app/mitjasiska/issue/DEV-124/decide-the-external-service-e2e-test-kit-architecture) owns the separate kit-architecture decision. The existing [managed-workflow smoke-test notes](../development/managed-workflow-smoke-test.md) describe the deferred DEV-123 slice, not a specification of complete Initial E2E acceptance or the future kit.
+
+The external-service E2E test-kit source lives in the Agentic Workflows monorepo and evolves with the AW version it tests. Live scenarios use a separately configured Linear test team and project and private GitHub testing repositories. The [E2E test-kit architecture](e2e-test-kit.md) owns the detailed kit design and its open questions; E2E decisions use the existing shared ADR series. This product architecture retains ownership of milestone acceptance and shared product boundaries.
 
 The initial submission milestone needs to create a new GitHub pull request safely. Updating an already-open pull request with a later reviewed batch and additional commit is an immediate follow-up, not a capability deferred to the end of v1. It may be sequenced alongside the first Task Source expansion according to implementation and end-to-end test evidence.
 
