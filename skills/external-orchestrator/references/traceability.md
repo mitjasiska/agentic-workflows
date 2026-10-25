@@ -1,6 +1,8 @@
 # Traceability contract
 
-Use one JSON object per readiness evaluation:
+Use one JSON object per actual readiness evaluation, not per conversation or queue lookup. The readiness field has a fixed value; the human-facing response also explains the evidence and next action. A factual context blocker that prevents evaluation has no readiness verdict yet.
+
+Keep the object in the response or a permitted temporary artifact for handoff. A repository file is needed only when requested by the task. Use actual observed source metadata; the values below illustrate the shape:
 
 ```json
 {

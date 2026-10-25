@@ -1,13 +1,16 @@
 interface:
   display_name: "External Orchestrator"
-  short_description: "Coordinate architecture and implementation tasks"
-  default_prompt: "Use $external-orchestrator to prepare the next implementation task."
+  short_description: "Plan work and handle requested publication"
+  default_prompt: "Use $external-orchestrator to recommend the next action from the current Linear queue and repository context."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "linear"
-      description: "Read and update the current work queue"
+      description: "Read the current work queue; delegate writes to create-linear-task"
+    - type: "mcp"
+      value: "github"
+      description: "Inspect and create PRs only when requested; taskless local commits need no forge tool"
 
 policy:
   allow_implicit_invocation: true

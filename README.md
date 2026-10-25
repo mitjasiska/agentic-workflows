@@ -8,7 +8,7 @@ The repository and product are both named Agentic Workflows. This repository con
 
 The Linux control plane exposes `awctl` commands through JSON-RPC 2.0 over a private Unix-domain socket. The managed Linear workflow slice persists requirements and evidence in SQLite, prepares local Herdr workspaces, and routes Codex implementation through independent review. It stops before commit, push, and pull-request creation. The dashboard and submission slice remain separate work. Deterministic controlled validation is the blocking gate for this slice. Live Linear/Herdr/Codex integration remains deferred and unverified; validation belongs to the future opt-in E2E kit.
 
-The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Further implementation begins from separate Linear issues with defined outcomes and acceptance boundaries.
+The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Planned implementation begins from separate Linear issues with defined outcomes and acceptance boundaries. Small routine changes explicitly requested by the user may proceed without an issue under the contribution exception in [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
@@ -22,7 +22,7 @@ Architecture Documentation is authoritative for product decisions, boundaries, a
 Development Documentation:
 
 - [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, build/rebuild/tests, the edit-build-restart loop, manual debugging, and isolated validation.
-- [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, validation, and installation paths.
+- [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, explicit external publication, validation, and installation paths.
 - [Managed workflow validation and smoke test](docs/development/managed-workflow-smoke-test.md) covers blocking controlled validation and the deferred live integration procedure for the future opt-in E2E kit.
 
 Product Documentation:
@@ -45,4 +45,4 @@ The README and Architecture Documentation must remain clear to humans. Agent-ori
 
 ## Development
 
-Linear is the canonical work queue. Repository documents constrain and explain the selected work, but they do not authorize unrelated implementation. Read and follow [AGENTS.md](AGENTS.md) before planning or changing this repository.
+Linear is the canonical work queue for planned work. Repository documents constrain and explain the selected work, but they do not authorize unrelated implementation. Read and follow [AGENTS.md](AGENTS.md) for the routine-change exception and Git approval requirements before planning or changing this repository.
