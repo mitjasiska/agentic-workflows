@@ -6,7 +6,7 @@ The repository and product are both named Agentic Workflows. This repository con
 
 ## Current status
 
-The Linux control plane exposes `awctl` commands through JSON-RPC 2.0 over a private Unix-domain socket. The managed Linear workflow slice persists requirements and evidence in SQLite, prepares local Herdr workspaces, and routes Codex implementation through independent review. It stops before commit, push, and pull-request creation. The dashboard and submission slice remain separate work. Deterministic controlled validation is the blocking gate for this slice. Live Linear/Herdr/Codex integration remains deferred and unverified; validation belongs to the future opt-in E2E kit.
+The Linux control plane exposes `awctl` commands through JSON-RPC 2.0 over a private Unix-domain socket. Managed Linear workflows persist requirements and evidence in SQLite, prepare local Herdr workspaces, and route Codex implementation through independent review. Explicit `awctl pr [WORKFLOW-ID]` freezes the authorized change, establishes one commit, safely pushes the task branch, and creates its first non-draft GitHub pull request. Repeating the command verifies and resumes that same submission. Clean review alone never publishes. The dashboard and later PR updates remain separate work. Automated validation uses isolated Git repositories, SQLite, and controlled providers; live Linear/Herdr/Codex/GitHub smoke testing remains unverified and does not yet establish Initial E2E milestone acceptance.
 
 The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Planned implementation begins from separate Linear issues with defined outcomes and acceptance boundaries. Small routine changes explicitly requested by the user may proceed without an issue under the contribution exception in [AGENTS.md](AGENTS.md).
 
@@ -24,7 +24,7 @@ Development Documentation:
 
 - [Local .NET development](docs/development/local-control-plane.md) covers prerequisites, build/rebuild/tests, the edit-build-restart loop, manual debugging, and isolated validation.
 - [Skills and plugin development](docs/development/external-orchestrator-skill.md) explains the canonical skill sources, explicit external publication, validation, and installation paths.
-- [Managed workflow validation and deferred smoke-test notes](docs/development/managed-workflow-smoke-test.md) covers the DEV-123 slice's controlled-validation gate and unverified live integration notes; the complete acceptance procedure and future test-kit design remain separate work.
+- [Managed workflow validation and deferred smoke-test notes](docs/development/managed-workflow-smoke-test.md) covers isolated review-to-PR validation and unverified live integration notes; the complete acceptance procedure and future test kit remain separate work.
 
 Product Documentation:
 

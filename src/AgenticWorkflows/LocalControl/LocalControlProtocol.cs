@@ -21,7 +21,7 @@ public sealed record DatabaseResponse(int ProtocolVersion, DatabaseReply Databas
 
 internal static class LocalControlProtocol
 {
-    internal const int CurrentVersion = 1;
+    internal const int CurrentVersion = 2;
     internal const int ProtocolMismatch = -32001;
     internal const int MaximumFrameBytes = 16 * 1024;
     internal static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(5);

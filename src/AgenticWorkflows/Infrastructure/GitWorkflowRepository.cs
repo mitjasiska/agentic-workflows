@@ -5,10 +5,11 @@ using AgenticWorkflows.Workflows;
 
 namespace AgenticWorkflows.Infrastructure;
 
-public sealed class GitWorkflowRepository(IArgumentProcess process) : IWorkflowRepository
+public sealed partial class GitWorkflowRepository(IArgumentProcess process) : IWorkflowRepository
 {
     private static readonly IReadOnlyDictionary<string, string?> ReadEnvironment = new Dictionary<string, string?>
-    { ["GIT_OPTIONAL_LOCKS"] = "0", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_INDEX_FILE"] = null, ["GIT_DIR"] = null, ["GIT_WORK_TREE"] = null };
+    { ["GIT_OPTIONAL_LOCKS"] = "0", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_INDEX_FILE"] = null, ["GIT_DIR"] = null, ["GIT_WORK_TREE"] = null,
+        ["GIT_NO_REPLACE_OBJECTS"] = "1" };
 
     public async Task<RepositoryIdentity> InspectCanonicalAsync(string checkout, CancellationToken cancellationToken)
     {

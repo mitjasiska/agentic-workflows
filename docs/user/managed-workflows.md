@@ -1,6 +1,6 @@
 # Managed Linear workflows on Linux
 
-This slice retains a Linear task, prepares a Herdr workspace, runs a Codex Implementer and an independent Reviewer, and stops at a Clean Review Report or a durable condition requiring recovery. It does not commit, push, create a pull request, or mark Linear Done. Use the [source installation guide](source-installation.md) to build, set up, and explicitly start the background control plane; closing `awctl` does not stop accepted work.
+AW retains a Linear task, prepares a Herdr workspace, and runs a Codex Implementer and an independent Reviewer. A Clean Review Report leaves the change available for inspection. Explicit `awctl pr` submits that exact change as one commit and the first non-draft GitHub PR. AW does not merge it or mark Linear Done. Use the [source installation guide](source-installation.md) to build, set up, and explicitly start the background control plane; closing `awctl` does not stop accepted work.
 
 ## One-time setup
 
@@ -8,7 +8,7 @@ Install the .NET 10 SDK, Git, the official Herdr CLI, and Codex for the same Lin
 
 Use the canonical repository checkout, with a credential-free `origin` URL for its GitHub repository. Copy the [safe Project Configuration example](../../examples/project.toml) to `.agentic-workflows.toml` in that checkout. Ensure the active file is ignored by Git. Managed worktrees find this original file through their durable Project registration.
 
-Replace the example paths and identities. The Linear Project and team identifiers and numeric GitHub repository ID must be stable provider IDs, not display names. `managed_root` must be an absolute path accepted by Herdr's managed-worktree policy. `base` must resolve to an existing commit. The first Whole Task branch is exactly `aw/TASK-ID/whole`; no title-derived suffix or random collision workaround is used.
+Replace the example paths and identities. The Linear Project and team identifiers and numeric GitHub repository ID must be stable provider IDs, not display names. `managed_root` must be an absolute path accepted by Herdr's managed-worktree policy. For submission, `base` must identify an existing GitHub branch, such as `main`, `refs/heads/main`, or `origin/main`; its resolved starting commit and branch are retained. The first Whole Task branch is exactly `aw/TASK-ID/whole`; no title-derived suffix or random collision workaround is used.
 
 Inject the variables named by `linear_credential` and `github_credential` into the control-plane process using your existing credential tooling. Do not put their values in TOML, command arguments, task descriptions, or reports. AW accepts only `env:VARIABLE` references and resolves their current values when accessing the provider. Restart the process after replacing environment-injected values. AW provides no secret vault. Codex authentication remains owned by its tooling.
 
@@ -52,9 +52,42 @@ Every Implementer and Reviewer Handoff forbids the managed agent from connecting
 
 Deterministic controlled validation is the blocking gate. Live integration validation is deferred and unverified, and belongs to the separately scoped [future opt-in E2E kit](../development/managed-workflow-smoke-test.md). Routine managed passes report that limitation; they do not execute the live smoke procedure.
 
-The first Reviewer always has a separate fresh session. Review captures the baseline and proposed Git trees using a private temporary index and verifies HEAD, index, content, and modes again afterward. Unmanaged changes invalidate review authority. A Clean Review Report makes the exact unchanged tree eligible for a later submission slice; no publication action follows automatically. Failed or unrun validation remains visible and is never relabeled as passing. Supported unrelated failures may proceed to independent review with a warning.
+The first Reviewer always has a separate fresh session. Review captures the baseline and proposed Git trees using a private temporary index and verifies HEAD, index, content, and modes again afterward. Unmanaged changes invalidate review authority. A Clean Review Report makes the exact unchanged tree eligible for explicit submission; no publication action follows automatically. Failed or unrun validation remains visible and is never relabeled as passing. Supported unrelated failures may proceed to independent review with a warning.
 
 After Clean, status also compares current materialized bytes and modes with the accepted review checkpoint. A change hidden by Git normalization or a clean filter makes current review and submission eligibility invalid while preserving the historical report. Pure staging changes and a commit of the identical reviewed tree preserve eligibility.
+
+## Submit the reviewed change
+
+```sh
+awctl pr WORKFLOW-ID
+awctl workflow WORKFLOW-ID
+awctl report WORKFLOW-ID
+awctl history WORKFLOW-ID
+```
+
+The ID is optional only inside the proven Workflow worktree. The command returns a correlated Operation ID after durable acceptance; inspect `workflow` for completion or failure. Submission continues in the control plane if the CLI disconnects. The `submission` projection exposes the frozen intent, expected and verified commit, pushed revision, PR identity/link, force disclosure, and current stage. `report` without `--pass` pages the frozen submission metadata and recovery details; `report --pass PASS-ID` still returns the independent pass evidence.
+
+The service account needs a configured public Git author/committer name and email, Git transport permission to create the bound task branch, and GitHub API access to read the repository/PRs and create a PR. Git transport authentication (SSH agent/key or a credential helper for credential-free HTTPS) is separate from the configured GitHub API credential reference. The origin fetch and push URLs must both equal the Workflow's bound repository. URL rewriting, shallow/grafted history, and ambiguous targets are refused. Git hooks are not a submission validation engine. No raw credentials belong in TOML, URLs, SQLite, reports, or public metadata.
+
+Exactly one Linear label selects the public type: Feature → `feat`, Bug → `fix`, Chore → `chore`, Docs → `docs`, or Refactor → `refactor`. Research and unrelated labels do not select a type. Missing or ambiguous categories stop before publication; AW never relabels the task. The Reviewer supplies public-safe summary, description and validation text. Titles use `<type>: <reviewed action summary> (<TASK-ID>)` within 72 characters; commits include `Task-Review: <pass-id>`. PRs have Summary, Tracking and Validation sections, the canonical Linear link, and `Fixes TASK-ID`. A clean review that accepts an unrelated failed or deferred check permits ordinary submission, with that limitation disclosed. Invalid or stale metadata never falls back to the task title.
+
+AW freezes one PR Intent before creating a commit, replacing a branch ref, pushing, or writing to GitHub. It commits only the frozen tree and checks the tree again immediately before advancing the branch. Staging changes alone do not invalidate review. An existing local commit is eligible only when it is clean checked-out Workflow HEAD, has exactly the expected base as its sole parent, contains the reviewed tree, and is proven unpublished with no descendant ref. An exact complete message is adopted unchanged. Otherwise AW may replace only that one unpublished commit with identical tree and parent and deterministic metadata, preserving the index/worktree and auditing the original SHA. Merges, multiple commits, pushed history, unexpected parents, wrong branches and races are refused.
+
+Unpublished-history verification includes all advertised remote refs, including retained GitHub PR refs after a source branch is deleted. The final local branch update verifies the direct Workflow ref while Git holds its transaction lock; a competing symbolic ref is preserved without advancing its target. An unfinished merge, cherry-pick, revert, rebase, sequencer operation or bisect also stops submission, including retries and `--force`. Finish or abort that operation manually before rerunning `awctl pr`; AW preserves its Git state and does not finish or abort it for you.
+
+An advanced base must descend from the frozen base. Non-overlapping changes can be verified with a private index. Overlapping paths are conservatively refused for manual reconciliation, including cases that might admit a textual merge; AW never merges or rebases during submission. An unexpected remote task revision is also refused with expected/observed IDs. `--force` does not bypass either check.
+
+```sh
+awctl pr WORKFLOW-ID --force
+```
+
+Force is the complete invocation-scoped confirmation to bypass current clean-review/freshness policy. It is available from Implementation, Review, or Submission after preparation, with no active or uncertain Managed Agent Pass. The exclusive mutation gate and all other attention, content, history, credential, repository and remote protections still apply. Without current usable reviewed metadata, the title is `<type>: complete requested change (<TASK-ID>)`, the trailer is `Task-Review: bypassed-by-force`, and the PR explicitly discloses bypassed independent review. Intent storage and advancing to Submission are one transaction; refused preflight leaves the phase unchanged. A retry that needs force must repeat the flag; there is no saved force setting.
+
+To continue a stopped submission, rerun `awctl pr WORKFLOW-ID` (or explicitly include `--force` for a forced intent). Each accepted retry has a new Operation linked to the earlier attempt and reuses the frozen strings and content. AW verifies an existing exact commit, pushed revision and intended PR instead of duplicating them. It never publishes newer worktree content. Preserve later edits separately and restore the frozen content when recovering drift. Fetch and reconcile unexpected remote work manually, then rerun the command; no database repair or mark-resolved command is needed.
+
+When a PR write might have succeeded but an exact PR cannot be found, AW stops without resending it. Restore provider visibility and inspect `report` for the frozen title/body and intent marker. If manual provider reconciliation is necessary, it must establish that exact head/base/revision and metadata; a similar branch or URL is insufficient. A positively rejected create can be retried after access is restored. A PR whose identity or public metadata changed is preserved and reported for reconciliation, not automatically updated.
+
+A completed command verifies/reuses its first PR on repetition. Another reviewed batch, existing-PR updates, drafts, `awctl integrate`, merge, Linear Done, and automatic cleanup are outside this release. Worktrees, passes, reports and failure evidence remain available after success or refusal. Use explicit cleanup only when those retained resources are no longer needed. The live Linear-to-PR smoke test remains unverified; isolated regression results are not live milestone acceptance.
 
 ## Continue and recover
 
@@ -122,7 +155,7 @@ The installed build accepts only its application schema version. Incompatibility
 
 A hot SQLite rollback journal after process death is a recoverable interrupted transaction. Startup first checks native recovery on an isolated copy to establish committed-schema compatibility and integrity, then permits SQLite to recover the unchanged retained store. An incompatible store and its companions remain untouched. Access and locking failures have separate diagnostics and require correcting permissions or releasing the lock, not resetting or restoring the database. Actual corruption still requires explicit restore.
 
-This build uses application schema 2, which includes materialized worktree fingerprints and retained session reasoning/delivery grants. Schema 1 stores require the explicit archive-and-reset path below; missing evidence is never inferred or silently migrated. The Result Envelope and Local Control Interface versions remain 1.
+This build uses application schema 3, including immutable Workflow-owned PR intents and submission progress. Older stores require the explicit archive-and-reset path below; missing evidence is never inferred or silently migrated. The Result Envelope remains version 1; the Local Control Interface is version 2. Upgrade CLI and service together, and restart explicitly. An old database is preserved until an operator chooses reset or a compatible restore.
 
 ```sh
 awctl database status

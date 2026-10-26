@@ -12,6 +12,38 @@ namespace AgenticWorkflows.Tests;
 public sealed class WorkflowIntegrationTests
 {
     [Fact]
+    public async Task Pr_CLI_uses_versioned_protocol_and_disconnected_command_remains_owned_by_control_plane()
+    {
+        await using var fixture = new WorkflowFixture(); Guid id = await SubmissionPolicyTests.Clean(fixture);
+        var parsed = Assert.IsType<WorkflowCommand>(AwctlCommand.Parse(["pr", id.ToString(), "--force"]));
+        Assert.Equal("pr", parsed.Action); Assert.True(parsed.Force); Assert.Equal(id, parsed.WorkflowId);
+        Assert.Null(Assert.IsType<WorkflowCommand>(AwctlCommand.Parse(["pr"])).WorkflowId);
+        Assert.Throws<ArgumentException>(() => AwctlCommand.Parse(["pr", "--draft"]));
+        Assert.Throws<ArgumentException>(() => AwctlCommand.Parse(["pr", "--max-passes", "2"]));
+        await using var socket = new SocketFixture();
+        var runtime = new ControlledRuntime(fixture) { HoldReply = true };
+        await using var server = new LocalControlServer(new ControlPlaneStatusQuery(), socket.Endpoint, runtime);
+        await server.StartAsync();
+        using (var connection = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified))
+        {
+            await connection.ConnectAsync(new UnixDomainSocketEndPoint(socket.Endpoint.SocketPath));
+            using var stream = new NetworkStream(connection);
+            byte[] request = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                jsonrpc = "2.0", id = 1, method = "workflow.command",
+                @params = new { protocolVersion = LocalControlProtocol.CurrentVersion, command = new WorkflowCommand("pr", fixture.Root, id) }
+            }, LocalControlProtocol.Json);
+            await LocalControlProtocol.WriteAsync(stream, request, default);
+            await runtime.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        runtime.Release.SetResult();
+        var done = await fixture.Until(id, d => d.State.Submission?.PullRequest is not null);
+        Assert.Equal(runtime.Last!.OperationId, done.State.CurrentOperationId);
+        var query = await socket.Client().QueryAsync(new(fixture.Root, id));
+        Assert.Equal(done.State.Submission!.PullRequest, query.Query.Workflows.Single().Submission!.PullRequest);
+        Assert.True(JsonSerializer.SerializeToUtf8Bytes(query, LocalControlProtocol.Json).Length < LocalControlProtocol.MaximumFrameBytes);
+    }
+    [Fact]
     public async Task Unicode_history_summaries_remain_bounded_on_the_actual_local_transport()
     {
         await using var fixture = new WorkflowFixture();
@@ -147,7 +179,7 @@ public sealed class WorkflowIntegrationTests
             await LocalControlProtocol.WriteAsync(stream, JsonSerializer.SerializeToUtf8Bytes(new
             {
                 jsonrpc = "2.0", id = 1, method = "workflow.command",
-                @params = new { protocolVersion = 1, command = new WorkflowCommand("start", fixture.Root, TaskIdentifier: "DEV-123") }
+                @params = new { protocolVersion = LocalControlProtocol.CurrentVersion, command = new WorkflowCommand("start", fixture.Root, TaskIdentifier: "DEV-123") }
             }, LocalControlProtocol.Json), default);
             await runtime.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(10));
         }

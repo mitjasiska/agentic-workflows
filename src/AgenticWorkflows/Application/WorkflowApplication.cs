@@ -11,7 +11,7 @@ public sealed record WorkflowAcceptance(Guid? WorkflowId, Guid? OperationId, str
     string[]? ComponentOutcomes = null);
 
 /// <summary>Transport-independent commands. Durable intents own work after the caller disconnects.</summary>
-public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfiguration configuration, ILinearGateway linear,
+public sealed partial class WorkflowApplication(IWorkflowStore store, IWorkflowConfiguration configuration, ILinearGateway linear,
     IGitHubGateway github, IHerdrGateway herdr, IWorkflowRepository repository, IPassDelivery delivery) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> gates = new();
@@ -35,6 +35,9 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
             var data = Get(id); var state = data.State;
             switch (command.Action)
             {
+                case "pr":
+                    AcceptSubmission(data, command.Force);
+                    break;
                 case "abandon":
                     Save(state with { Abandoned = true }, "WorkflowAbandoned", "Automatic routing stopped; all work and evidence retained.");
                     break;
@@ -76,7 +79,7 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
                 default: throw Error("unknown_command", "Unsupported workflow command.");
             }
             var current = Get(id).State;
-            if (command.Action is "resume" or "continue" or "review") Kick(id);
+            if (command.Action is "resume" or "continue" or "review" or "pr") Kick(id);
             return new(id, current.CurrentOperationId, "Command durably accepted.", current);
         }
         finally { gate.Release(); }
@@ -131,7 +134,7 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
             var binding = new IntegrationBinding(project.Id, identity.Checkout, identity.GitDirectory, identity.RemoteUrl, task.Id,
                 settings.LinearProjectId, settings.LinearTeamId, settings.InProgressStateId, settings.GitHubRepositoryId,
                 settings.HerdrTarget, settings.LinearCredentialReference, settings.GitHubCredentialReference, identity.Stamp);
-            var intent = new WorkspaceIntent(id, identity.Checkout, identity.GitDirectory, baseline, branch, path, settings.HerdrTarget, workspaces.ExistingWorkspaceIds, Now, identity.Stamp);
+            var intent = new WorkspaceIntent(id, identity.Checkout, identity.GitDirectory, baseline, branch, path, settings.HerdrTarget, workspaces.ExistingWorkspaceIds, Now, identity.Stamp, settings.BaseReference);
             var operation = NewOperation("Startup", null);
             var state = new WorkflowState(id, Guid.NewGuid(), binding, intent, snapshot.Id, WorkflowPhase.WorkspacePreparation, null,
                 operation.Id, false, false, WorkflowRules.Budget(command.MaxPasses ?? settings.Defaults.MaxPasses ?? global.MaxPasses), 0, 0,
@@ -243,6 +246,13 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
                 }
                 else if (operation.PassId is not null)
                     observeAgain = await Observe(data, operation, token);
+                else if (operation.Kind == "Submission")
+                {
+                    if (reconciliationOnly)
+                        StopWithDiagnostic(data, Error("submission_interrupted", "Submission was interrupted. Run awctl pr again to verify the frozen chain; repeat --force only when deliberately bypassing review."));
+                    else await Submit(data, operation, token);
+                    return;
+                }
                 else if (data.State.Abandoned || data.State.Attention.Length > 0) return;
                 else if (reconciliationOnly)
                 {
@@ -260,7 +270,7 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
                 if (data is not null) StopWithDiagnostic(data, exception);
                 return;
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.Data.Common.DbException)
             {
                 var data = store.Find(id);
                 if (data is not null) StopWithDiagnostic(data, Error("workflow_action_unconfirmed", "The action could not establish its required facts; preserved evidence must be reconciled."));
@@ -513,6 +523,8 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
     private async Task Resume(WorkflowData data, WorkflowCommand command, CancellationToken token)
     {
         var state = data.State;
+        if (state.Submission is not null && (command.Action == "review" || command.SourceDecision == "adopt"))
+            throw Error("submission_frozen", "A frozen submission cannot begin a follow-up batch or adopt another snapshot. Reconcile it using awctl pr.");
         await ValidateBinding(state, token);
         var current = Current(data);
         if (current.PassId is not null && !current.ExternalActionAttempted && current.Status == OperationStatus.Pending)
@@ -580,8 +592,8 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
             Save(state, "ContinuationGated", "Applicable Attention Requirements remain; no continuation guessed.", snapshots: snapshots, sourceRetention: sourceRetention);
             return;
         }
-        if (state.Phase == WorkflowPhase.Submission && state.Review?.AuthorityValid == true)
-        { Save(state with { Abandoned = false }, "WorkflowRetained", "Reviewed work remains retained for the later submission slice.", snapshots: snapshots, sourceRetention: sourceRetention); return; }
+        if (state.Submission is not null || state.Phase == WorkflowPhase.Submission && state.Review?.AuthorityValid == true)
+        { Save(state with { Abandoned = false }, "WorkflowRetained", "Retained submission is continued explicitly with awctl pr.", snapshots: snapshots, sourceRetention: sourceRetention); return; }
         if (current.PassId is null && current.ExternalActionAttempted && current.Kind == "Handoff")
             throw Error("session_preparation_uncertain", "An earlier session preparation has no proven result; restore exact owned-resource evidence or use explicit cleanup.");
         var next = NewOperation(state.StartupLinearCompleted ? "Handoff" : "Startup", current.Id);
@@ -713,6 +725,9 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
     {
         var operation = Current(data);
         var plan = Plan(data.State, exception.Code, exception.Message);
+        if (operation.Kind == "Submission") plan = plan with { Commands =
+            [ $"awctl workflow {data.State.Id}", $"awctl report {data.State.Id}", $"awctl pr {data.State.Id}" + (operation.Force || exception.Code == "force_not_inherited" ? " --force" : ""),
+                .. plan.Commands.Where(c => !c.StartsWith("awctl resume", StringComparison.Ordinal) || data.State.Attention.Length > 0 || exception.Code is "workflow_abandoned" or "workspace_incomplete") ] };
         bool uncertain = operation.ExternalActionAttempted && operation.PassId is not null;
         var updated = operation.Status is OperationStatus.Pending or OperationStatus.Running
             ? new[] { operation with { Status = uncertain ? operation.Status : OperationStatus.Failed,
@@ -753,7 +768,7 @@ public sealed class WorkflowApplication(IWorkflowStore store, IWorkflowConfigura
             }
         if (code == "session_reuse_unavailable") commands.Add($"awctl select {state.Id} --role {(state.Phase == WorkflowPhase.Review ? "reviewer" : "implementer")} --session new");
         if (code == "pass_continuation_decision" && commands.Count == 0) commands.Add($"awctl resume {state.Id} --decision 'ACCEPTED RESOLUTION'");
-        if (code == "review_invalidated") commands.Add($"awctl review {state.Id}");
+        if (code == "review_invalidated" || state.Submission is null && code is "review_required" or "publication_metadata_invalid") commands.Add($"awctl review {state.Id}");
         if (commands.Count == 0 || code == "session_reuse_unavailable") commands.Add($"awctl resume {state.Id}");
         commands.Add($"awctl cleanup {state.Id} --force");
         return new(code, message, [.. commands], "Workspace, sessions, snapshots, pass reports, delivery evidence, and audit history are retained.");

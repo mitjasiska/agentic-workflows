@@ -9,6 +9,22 @@ namespace AgenticWorkflows.Tests;
 public sealed class LinearGatewayTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Task_classification_reads_complete_labels_without_relabeling(bool more)
+    {
+        var value = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(Issue("started")))!;
+        value["issue"]!["labels"] = JsonSerializer.SerializeToNode(new
+        { nodes = new[] { new { name = "Feature" }, new { name = "Research" }, new { name = "Unrelated" } }, pageInfo = new { hasNextPage = more } });
+        using var fixture = new Transport(value);
+        if (more)
+            Assert.Equal("linear_labels_incomplete", (await Assert.ThrowsAsync<WorkflowException>(() => fixture.Gateway.ReadTaskAsync("issue", fixture.Reference, default))).Code);
+        else
+            Assert.Equal(new[] { "Feature", "Research", "Unrelated" }, (await fixture.Gateway.ReadTaskAsync("issue", fixture.Reference, default)).Labels);
+        Assert.Single(fixture.Requests); Assert.DoesNotContain("mutation", fixture.Requests[0]);
+        Assert.Contains("labels(first:100)", fixture.Requests[0]);
+    }
+    [Theory]
     [InlineData(null, 1, true)]
     [InlineData(null, 2, false)]
     [InlineData("started", 2, true)]

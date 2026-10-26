@@ -74,7 +74,7 @@ The expected proof is a correlated Linear task, real implementation and clean in
 
 Submission remains explicitly authorized by the operator through the normal product path. The question of whether one future automated-run invocation grants advance authorization for commit, push, PR creation, and cleanup is deferred; it was not accepted during this session. Managed Implementers and Reviewers do not acquire publication authority through the test.
 
-The current implementation described by the [repository status](../../README.md#current-status) stops at independent review and does not yet implement `awctl pr`. Complete the product's normal PR-submission capability before running the first complete smoke scenario. Reaching clean review can supply partial evidence but cannot be reported as a passing Linear-to-PR run, and the kit must not bypass missing product functionality. This one smoke scenario does not replace the broader controlled coverage or dashboard requirements of the full Initial E2E Milestone.
+The product's normal PR-submission capability is a prerequisite for the first complete smoke scenario; see [repository status](../../README.md#current-status) for implemented capabilities. Reaching clean review can supply partial evidence but cannot be reported as a passing Linear-to-PR run, and the kit must not bypass missing product functionality. Implementing submission with isolated validation does not itself verify the live scenario. This one smoke scenario does not replace the broader controlled coverage or dashboard requirements of the full Initial E2E Milestone.
 
 ## Reusable fixture and cleanup
 

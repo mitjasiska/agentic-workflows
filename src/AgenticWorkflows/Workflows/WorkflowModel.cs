@@ -34,7 +34,7 @@ public sealed record ValidatedResult(int SchemaVersion, Guid OperationId, Guid P
     PassResult Payload, string CompleteJson);
 
 public sealed record LinearTask(string Id, string Identifier, string Title, string Description, string Revision,
-    string ProjectId, string TeamId, string StateId, string StateType, string Url);
+    string ProjectId, string TeamId, string StateId, string StateType, string Url, string[]? Labels = null);
 public sealed record LinearObservation(string Revision, string StateId, string StateType, DateTimeOffset ObservedAt);
 public sealed record TaskSnapshot(Guid Id, string Identifier, string Title, string Description,
     string Requirements, string Fingerprint, string SourceRevision, DateTimeOffset CapturedAt, bool HasAgentInstructions);
@@ -46,7 +46,8 @@ public sealed record IntegrationBinding(Guid ProjectId, string Repository, strin
     string LinearTaskId, string LinearProjectId, string LinearTeamId, string InProgressStateId,
     string GitHubRepositoryId, string HerdrTarget, string LinearCredentialReference, string GitHubCredentialReference, string? RepositoryStamp = null);
 public sealed record WorkspaceIntent(Guid WorkflowId, string Repository, string GitDirectory, string BaseCommit,
-    string Branch, string ManagedPath, string HerdrTarget, string[] ExistingWorkspaceIds, DateTimeOffset AdmittedAt, string? RepositoryStamp = null);
+    string Branch, string ManagedPath, string HerdrTarget, string[] ExistingWorkspaceIds, DateTimeOffset AdmittedAt, string? RepositoryStamp = null,
+    string BaseReference = "main");
 public sealed record OwnedPane(string PaneId, string TerminalId);
 public sealed record WorkspaceIdentity(string Target, string WorkspaceId, string Path, string Branch, string GitDirectory, OwnedPane[]? InitialPanes = null);
 public sealed record AgentSession(Guid Id, AgentRole Role, string WorkspaceId, string PaneId, string TerminalId,
@@ -70,7 +71,7 @@ public sealed record ManagedPass(Guid Id, Guid OperationId, AgentRole Role, Guid
     Finding[] SuppliedFindings, DateTimeOffset CreatedAt);
 public sealed record WorkflowOperation(Guid Id, Guid? PredecessorId, string Kind, OperationStatus Status,
     Guid? PassId, bool ExternalActionAttempted, ExecutionObservation? Observation, RecoveryPlan? Recovery,
-    DateTimeOffset CreatedAt, DateTimeOffset? FinishedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset? FinishedAt, bool Force = false);
 public sealed record ReviewReport(Guid PassId, Guid SnapshotId, ReviewTarget Target, string Outcome,
     bool AuthorityValid, string? InvalidationReason, PublicationMetadata? PublicMetadata);
 public sealed record SourceRetention(string SourceRevision, string SourceFingerprint, Guid SnapshotId);
@@ -84,7 +85,16 @@ public sealed record WorkflowState(Guid Id, Guid TaskId, IntegrationBinding Bind
     string HandledSourceFingerprint, string? AcceptedCancellationRevision, LinearObservation LatestLinearObservation,
     Attention[] Attention, Notice[] Warnings, ReviewReport? Review, RecoveryPlan? Recovery,
     Dictionary<AgentRole, string> ModelSelections, Dictionary<AgentRole, string> NextSessionChoices,
-    DateTimeOffset LastActivity, long Version);
+    DateTimeOffset LastActivity, long Version, SubmissionState? Submission = null);
+
+// One immutable authorization per retained Workflow. Progress never changes its content or targets.
+public sealed record PrIntent(Guid Id, Guid WorkflowId, Guid SnapshotId, IntegrationBinding Binding,
+    ReviewTarget Target, string WorktreeIdentity, string BaseCommit, string BaseBranch, string Branch,
+    string OriginalHead, string Commit, string? CommitObject, string CommitMessage, string Title, string Body,
+    Guid? ReviewPassId, bool Forced, WorkflowPhase PreviousPhase, string? BypassReason, DateTimeOffset CreatedAt);
+public sealed record PullRequestIdentity(long Id, int Number, string Url);
+public sealed record SubmissionState(PrIntent Intent, string? Commit, string? PushedRevision,
+    bool ForgeWriteAttempted, PullRequestIdentity? PullRequest);
 
 public sealed record WorkflowData(WorkflowState State, TaskSnapshot[] Snapshots, WorkflowOperation[] Operations,
     ManagedPass[] Passes, AgentSession[] Sessions, ValidatedResult[] Results, WorkflowEvent[] Events, ReviewReport[] ReviewReports);

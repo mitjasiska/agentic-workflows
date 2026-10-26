@@ -92,7 +92,7 @@ public sealed class ServiceControlTests
         var service = f.Service(probe: new ServiceApplicationProbe(f.Socket.Client()));
         var error = await Assert.ThrowsAsync<LocalControlException>(() => service.ExecuteAsync(new("start"), TextWriter.Null));
         Assert.Equal("protocol_mismatch", error.Diagnostic.Code);
-        Assert.Equal(1, error.Diagnostic.ClientProtocolVersion); Assert.Equal(42, error.Diagnostic.ServerProtocolVersion);
+        Assert.Equal(LocalControlProtocol.CurrentVersion, error.Diagnostic.ClientProtocolVersion); Assert.Equal(42, error.Diagnostic.ServerProtocolVersion);
         Assert.Contains("./build.sh", error.Diagnostic.Guidance); Assert.Equal(0, f.Socket.Query.Calls);
         Assert.Equal(["start"], f.Manager.Actions);
     }

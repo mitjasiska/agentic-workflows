@@ -27,6 +27,8 @@ public interface IGitHubGateway
 {
     Task<ProviderProjection> ValidateRepositoryAsync(string repositoryId, string remoteUrl,
         string credentialReference, CancellationToken cancellationToken);
+    Task<PullRequestIdentity?> FindPullRequestAsync(PrIntent intent, CancellationToken cancellationToken);
+    Task<PullRequestIdentity> CreatePullRequestAsync(PrIntent intent, CancellationToken cancellationToken);
 }
 
 public sealed record HerdrCapabilities(string Target, string Version, int Protocol, string[] Operations);
@@ -62,7 +64,14 @@ public interface IWorkflowRepository
     Task<bool> HasUniqueWorkAsync(WorkspaceIdentity workspace, string baseline, string boundRemoteUrl, CancellationToken cancellationToken);
     Task<string> ReadBranchTipAsync(WorkspaceIntent intent, CancellationToken cancellationToken);
     Task DeleteBranchAsync(WorkspaceIntent intent, string expectedTip, CancellationToken cancellationToken);
+    Task<SubmissionCommit> PrepareSubmissionAsync(WorkflowState state, RepositoryCheckpoint checkpoint,
+        string message, CancellationToken cancellationToken);
+    Task VerifySubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken cancellationToken);
+    Task CommitSubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken cancellationToken);
+    Task PushSubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken cancellationToken);
 }
+
+public sealed record SubmissionCommit(string BaseBranch, string Commit, string? CommitObject);
 
 public sealed record WorkflowSettings(string? ImplementerModel = null, string? ReviewerModel = null,
     string? Reasoning = null, string? ImplementerSession = null, string? ReviewerSession = null,

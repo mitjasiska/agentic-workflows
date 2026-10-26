@@ -121,14 +121,8 @@ public static class ResultEnvelopeContract
 
     private static void ValidatePublicMetadata(PublicationMetadata metadata)
     {
-        Nonempty(metadata.Summary, "Public action summary"); Nonempty(metadata.Description, "Public description");
-        Nonempty(metadata.Validation, "Public validation");
-        Require(metadata.Summary.Length <= 60 && !metadata.Summary.Any(char.IsControl) &&
-            metadata.Summary == metadata.Summary.ToLowerInvariant() && !metadata.Summary.Contains(':') &&
-            !".!?".Contains(metadata.Summary[^1]), "Invalid public action summary.");
-        Require(metadata.Description.Length <= 2000 && metadata.Validation.Length <= 2000 &&
-            !metadata.Description.Split('\n').Any(l => l.TrimStart().StartsWith('#')) &&
-            !metadata.Validation.Split('\n').Any(l => l.TrimStart().StartsWith('#')), "Invalid public description or validation.");
+        try { SubmissionMetadata.Validate(metadata); }
+        catch (WorkflowException) { throw Invalid("Invalid public action summary, description, or validation."); }
     }
 
     private static void Nonempty(string? value, string field) => Require(!string.IsNullOrWhiteSpace(value), $"{field} is required.");

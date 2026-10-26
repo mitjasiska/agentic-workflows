@@ -9,7 +9,7 @@ namespace AgenticWorkflows.Infrastructure;
 /// <summary>One transactional store: current state is read directly; events explain it without replay.</summary>
 public sealed class SqliteWorkflowStore : IWorkflowStore
 {
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
     private readonly string path;
     private readonly object gate = new();
     private bool corrupt;
@@ -123,6 +123,31 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
     private static void InsertEvidence(SqliteConnection db, SqliteTransaction transaction, WorkflowChange change)
     {
         Guid workflow = change.State.Id;
+        var frozen = ReadOne<PrIntent>(db, "SELECT intent FROM submissions WHERE workflow_id=$id", workflow, transaction);
+        if (frozen is not null && Encode(frozen) != Encode(change.State.Submission?.Intent))
+            throw new InvalidOperationException("A retained PR Intent is immutable.");
+        if (change.State.Submission is { } submission)
+        {
+            if (submission.Intent.WorkflowId != workflow || submission.Intent.Binding != change.State.Binding ||
+                submission.Intent.SnapshotId != change.State.ActiveSnapshotId)
+                throw new InvalidOperationException("Submission must belong to this Workflow, binding and snapshot.");
+            var previous = ReadOne<SubmissionState>(db, "SELECT json FROM submissions WHERE workflow_id=$id", workflow, transaction);
+            if (submission.Commit is not null && submission.Commit != submission.Intent.Commit ||
+                submission.PushedRevision is not null && (submission.PushedRevision != submission.Commit || submission.Commit is null) ||
+                submission.PullRequest is not null && (submission.PushedRevision is null || !submission.ForgeWriteAttempted) ||
+                previous?.Commit is not null && previous.Commit != submission.Commit ||
+                previous?.PushedRevision is not null && previous.PushedRevision != submission.PushedRevision ||
+                previous?.PullRequest is { } priorPr && (submission.PullRequest is null || priorPr.Id != submission.PullRequest.Id || priorPr.Number != submission.PullRequest.Number))
+                throw new InvalidOperationException("Verified submission effects cannot be replaced, forgotten, or detached from the frozen commit.");
+            Execute(db, """
+                INSERT INTO submissions(workflow_id,intent_id,intent,commit_sha,pushed_sha,forge_attempted,pr_id,json)
+                VALUES($workflow,$intent_id,$intent,$commit,$pushed,$attempted,$pr,$json)
+                ON CONFLICT(workflow_id) DO UPDATE SET commit_sha=excluded.commit_sha,pushed_sha=excluded.pushed_sha,
+                    forge_attempted=excluded.forge_attempted,pr_id=excluded.pr_id,json=excluded.json
+                """, transaction, ("workflow", workflow), ("intent_id", submission.Intent.Id), ("intent", Encode(submission.Intent)),
+                ("commit", submission.Commit), ("pushed", submission.PushedRevision), ("attempted", submission.ForgeWriteAttempted),
+                ("pr", submission.PullRequest?.Id), ("json", Encode(submission)));
+        }
         foreach (var snapshot in change.Snapshots)
             Execute(db, "INSERT INTO snapshots(id,workflow_id,json) VALUES($id,$workflow,$json)", transaction,
                 ("id", snapshot.Id), ("workflow", workflow), ("json", Encode(snapshot)));
@@ -372,7 +397,7 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
     { using var command = Command(db, sql, transaction, values); return (T)(command.ExecuteScalar() ?? throw new InvalidOperationException("Missing database record.")); }
 
     private const string Schema = """
-        PRAGMA user_version=2;
+        PRAGMA user_version=3;
         CREATE TABLE projects(id TEXT PRIMARY KEY, checkout TEXT NOT NULL UNIQUE, git_directory TEXT NOT NULL UNIQUE, json TEXT NOT NULL);
         CREATE TABLE tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), provider_id TEXT NOT NULL, UNIQUE(project_id,provider_id), UNIQUE(id,project_id));
         CREATE TABLE workflows(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, scope TEXT NOT NULL CHECK(scope='WholeTask'),
@@ -397,6 +422,10 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
         CREATE TABLE review_reports(pass_id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,json TEXT NOT NULL,
             FOREIGN KEY(pass_id,workflow_id) REFERENCES results(pass_id,workflow_id));
         CREATE TABLE events(workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,position INTEGER NOT NULL CHECK(position>0),kind TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(workflow_id,position));
+        CREATE TABLE submissions(workflow_id TEXT PRIMARY KEY REFERENCES workflows(id) ON DELETE CASCADE,intent_id TEXT NOT NULL UNIQUE,
+            intent TEXT NOT NULL,commit_sha TEXT,pushed_sha TEXT,forge_attempted INTEGER NOT NULL,pr_id INTEGER,json TEXT NOT NULL);
+        CREATE TRIGGER immutable_pr_intent BEFORE UPDATE OF intent,intent_id,workflow_id ON submissions BEGIN SELECT RAISE(ABORT,'PR intents are immutable'); END;
+        CREATE TRIGGER retained_submission BEFORE DELETE ON submissions WHEN EXISTS(SELECT 1 FROM workflows WHERE id=OLD.workflow_id) BEGIN SELECT RAISE(ABORT,'Retained submission evidence is immutable'); END;
         CREATE TRIGGER immutable_snapshot BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(ABORT,'Snapshots are immutable'); END;
         CREATE TRIGGER immutable_session BEFORE UPDATE ON sessions
             WHEN OLD.workflow_id<>NEW.workflow_id OR json_remove(OLD.json,'$.nativeResumeReference')<>json_remove(NEW.json,'$.nativeResumeReference')

@@ -18,15 +18,17 @@ internal static class AwctlCommand
                awctl start TASK-ID [--max-passes N|unlimited]
                awctl workflows [--offset N]
                awctl workflow|history|snapshot|warnings|attention [WORKFLOW-ID] [--after N] [--offset N]
-               awctl report|handoff [WORKFLOW-ID] --pass PASS-ID [--offset N]
+               awctl report [WORKFLOW-ID] [--pass PASS-ID] [--offset N]
+               awctl handoff [WORKFLOW-ID] --pass PASS-ID [--offset N]
                awctl resume [WORKFLOW-ID] [--source retain|adopt|stop] [--cancellation continue|stop] [--decision TEXT]
                awctl continue [WORKFLOW-ID] [--max-passes N|unlimited]
                awctl review|interrupt|abandon [WORKFLOW-ID]
                awctl select [WORKFLOW-ID] --role implementer|reviewer [--model MODEL|clear] [--session new|reuse|clear]
                awctl cleanup [WORKFLOW-ID] [--force]
+               awctl pr [WORKFLOW-ID] [--force]
                awctl database status|reset|restore [--force] [--backup PATH]
         Existing workflows require their immutable ID outside a proven managed worktree.
-        No command in this slice commits, pushes, creates a pull request, or marks Linear Done.
+        pr explicitly submits one frozen change. Merge and Linear completion remain external.
         """;
 
     internal static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error,
@@ -135,13 +137,13 @@ internal static class AwctlCommand
             Guid? pass = Take("--pass") is string passText ? Guid.TryParse(passText, out var parsed) ? parsed : throw new ArgumentException() : null;
             result = new WorkflowQuery(cwd, Id(), action == "workflows" ? "list" : action, after, pass, Offset());
         }
-        else if (action is "setup" or "start" or "resume" or "continue" or "review" or "interrupt" or "abandon" or "cleanup" or "select")
+        else if (action is "setup" or "start" or "resume" or "continue" or "review" or "interrupt" or "abandon" or "cleanup" or "select" or "pr")
         {
             if (action == "setup" && positional is not null || action == "start" && positional is null) throw new ArgumentException();
             AgentRole? role = Take("--role") switch { "implementer" => AgentRole.Implementer, "reviewer" => AgentRole.Reviewer, null => null, _ => throw new ArgumentException() };
             string? budget = Take("--max-passes"), source = Take("--source"), canceled = Take("--cancellation"), decision = Take("--decision"), model = Take("--model"), session = Take("--session");
             bool force = Take("--force") == "true";
-            if (budget is not null && action is not ("start" or "continue") || force && action != "cleanup" ||
+            if (budget is not null && action is not ("start" or "continue") || force && action is not ("cleanup" or "pr") ||
                 (source is not null || canceled is not null || decision is not null) && action != "resume" ||
                 (role is not null || model is not null || session is not null) && action != "select") throw new ArgumentException();
             result = new WorkflowCommand(action, cwd, action is "setup" or "start" ? null : Id(), action == "start" ? positional : null,

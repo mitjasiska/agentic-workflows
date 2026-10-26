@@ -6,19 +6,22 @@ namespace AgenticWorkflows.Tests;
 
 internal sealed class WorkflowFixture : IAsyncDisposable
 {
-    internal string Root { get; } = Path.Combine(Path.GetTempPath(), "aw-workflow-" + Guid.NewGuid().ToString("N"));
+    internal string Root { get; }
+    internal IWorkflowRepository Repository { get; }
     internal SqliteWorkflowStore Store { get; }
     internal ControlledProviders Providers { get; }
     internal WorkflowApplication Application { get; set; }
     internal PassDelivery Delivery { get; } = new();
-    internal WorkflowFixture()
+    internal WorkflowFixture(string? root = null, IWorkflowRepository? repository = null)
     {
+        Root = root ?? Path.Combine(Path.GetTempPath(), "aw-workflow-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Root);
         Providers = new(Root);
+        Repository = repository ?? Providers;
         Store = new(Path.Combine(Root, "workflows.db"));
         Application = CreateApplication();
     }
-    internal WorkflowApplication CreateApplication() => new(Store, Providers, Providers, Providers, Providers, Providers, Delivery);
+    internal WorkflowApplication CreateApplication() => new(Store, Providers, Providers, Providers, Providers, Repository, Delivery);
     internal async Task<Guid> Start()
     {
         await Application.ExecuteAsync(new("setup", Root));
@@ -70,7 +73,7 @@ internal sealed class WorkflowFixture : IAsyncDisposable
 
 internal sealed class ControlledProviders(string root) : IWorkflowConfiguration, ILinearGateway, IGitHubGateway, IHerdrGateway, IWorkflowRepository
 {
-    internal LinearTask Source = new("issue-123", "DEV-123", "Durable task", "# Agent instructions\nImplement durable work.\n", "r1", "project", "team", "todo", "unstarted", "https://linear.app/example/issue/DEV-123");
+    internal LinearTask Source = new("issue-123", "DEV-123", "Durable task", "# Agent instructions\nImplement durable work.\n", "r1", "project", "team", "todo", "unstarted", "https://linear.app/example/issue/DEV-123", ["Feature"]);
     internal readonly List<string> Calls = [];
     internal int Launches;
     internal int Creations;
@@ -88,11 +91,26 @@ internal sealed class ControlledProviders(string root) : IWorkflowConfiguration,
     internal Func<CancellationToken, Task<RepositoryCheckpoint>>? CaptureOverride;
     internal Func<CancellationToken, Task<Guidance>>? GuidanceOverride;
     internal Func<CancellationToken, Task<string>>? BranchTipOverride;
+    internal Func<WorkspaceIntent, Task<WorkspaceIdentity>>? WorkspaceFactory;
     internal string? TeardownFailure;
     internal ManagedLocation? CopiedLocation;
     internal ExecutionState Execution = ExecutionState.Idle;
     internal readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, ExecutionState> SessionObservations = new();
     internal WorkflowSettings Settings = new();
+    internal PullRequestIdentity? PullRequest;
+    internal string? SubmissionFailure;
+    internal bool LosePrResponse;
+    public Task<SubmissionCommit> PrepareSubmissionAsync(WorkflowState state, RepositoryCheckpoint checkpoint, string message, CancellationToken token)
+    { Calls.Add("preflight"); if (SubmissionFailure is not null) throw Failure(SubmissionFailure); return Task.FromResult(new SubmissionCommit("main", "frozen-commit", "frozen-object")); }
+    public Task VerifySubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken token)
+    { if (SubmissionFailure is not null) throw Failure(SubmissionFailure); return Task.CompletedTask; }
+    public Task CommitSubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken token)
+    { Calls.Add("commit"); return Task.CompletedTask; }
+    public Task PushSubmissionAsync(WorkflowState state, PrIntent intent, CancellationToken token)
+    { Calls.Add("push"); return Task.CompletedTask; }
+    public Task<PullRequestIdentity?> FindPullRequestAsync(PrIntent intent, CancellationToken token) => Task.FromResult(PullRequest);
+    public Task<PullRequestIdentity> CreatePullRequestAsync(PrIntent intent, CancellationToken token)
+    { Calls.Add("pr"); PullRequest = new(42, 1, "https://github.com/owner/repo/pull/1"); if (LosePrResponse) throw Failure("github_pr_unconfirmed"); return Task.FromResult(PullRequest); }
     private WorkspaceIdentity? workspace;
     private Guid? bound;
     public ProjectSettings ReadProject(string canonicalCheckout) => new(root, "main", Path.Combine(root, "managed"), "project", "team", "started", "1", "local:test", "env:AW_TEST_LINEAR", "env:AW_TEST_GITHUB", Settings);
@@ -114,16 +132,20 @@ internal sealed class ControlledProviders(string root) : IWorkflowConfiguration,
     public Task<HerdrCapabilities> InspectTargetAsync(string target, CancellationToken cancellationToken) => Task.FromResult(new HerdrCapabilities(target, "test", 22, ["workspace", "pass"]));
     public Task<WorkspaceInspection> InspectWorkspacesAsync(string target, string repository, CancellationToken cancellationToken) =>
         Task.FromResult(new WorkspaceInspection(workspace is null ? [] : [workspace], workspace is null ? [] : [workspace.WorkspaceId]));
-    public Task<WorkspaceIdentity> PrepareWorkspaceAsync(WorkspaceIntent intent, bool alreadyAttempted, CancellationToken cancellationToken)
+    public async Task<WorkspaceIdentity> PrepareWorkspaceAsync(WorkspaceIntent intent, bool alreadyAttempted, CancellationToken cancellationToken)
     {
         Calls.Add("workspace");
-        if (workspace is not null && alreadyAttempted) return Task.FromResult(workspace);
+        if (workspace is not null && alreadyAttempted) return workspace;
         if (alreadyAttempted) throw Failure("workspace_uncertain");
         Creations++;
-        Directory.CreateDirectory(intent.ManagedPath);
-        workspace = new(intent.HerdrTarget, Guid.NewGuid().ToString(), intent.ManagedPath, intent.Branch, intent.GitDirectory);
+        if (WorkspaceFactory is not null) workspace = await WorkspaceFactory(intent);
+        else
+        {
+            Directory.CreateDirectory(intent.ManagedPath);
+            workspace = new(intent.HerdrTarget, Guid.NewGuid().ToString(), intent.ManagedPath, intent.Branch, intent.GitDirectory);
+        }
         if (WorkspaceResponseLost) throw Failure("workspace_response_lost");
-        return Task.FromResult(workspace);
+        return workspace;
     }
     public Task VerifyWorkspaceAsync(WorkspaceIdentity value, CancellationToken cancellationToken)
     {
