@@ -14,11 +14,19 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
     private readonly object gate = new();
     private bool corrupt;
     private bool admitted;
+    private WorkflowException? admissionFailure;
+    internal WorkflowException? AdmissionFailure => Volatile.Read(ref admissionFailure);
     private static readonly JsonSerializerOptions Json = ResultEnvelopeContract.Json;
 
     public SqliteWorkflowStore(string path)
     {
         this.path = Path.GetFullPath(path);
+        SqliteMaintenance.RequireComplete(this.path);
+        WithResource("active database", this.path, () => { Initialize(); return true; });
+    }
+
+    private void Initialize()
+    {
         Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
         if (File.Exists(this.path)) AdmitFile(this.path);
         using var connection = Open();
@@ -212,66 +220,72 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
     public void Backup(DateOnly day)
     {
         lock (gate)
-        {
-            string directory = path + ".daily";
-            Directory.CreateDirectory(directory);
-            string destination = Path.Combine(directory, day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + ".db");
-            if (File.Exists(destination)) { VerifyFile(destination); return; }
-            string temporary = destination + "." + Guid.NewGuid().ToString("N");
-            using (var db = Open())
-            using (var backup = Connect(temporary, SqliteOpenMode.ReadWriteCreate)) db.BackupDatabase(backup);
-            VerifyFile(temporary);
-            File.Move(temporary, destination);
-            foreach (string old in Directory.GetFiles(directory, "*.db").OrderDescending(StringComparer.Ordinal).Skip(7)) File.Delete(old);
-        }
+            WithResource("current daily backup set", path + ".daily", () => { BackupCore(day); return true; });
+    }
+
+    private void BackupCore(DateOnly day)
+    {
+        SqliteMaintenance.RequireComplete(path);
+        string directory = path + ".daily";
+        Directory.CreateDirectory(directory);
+        string destination = Path.Combine(directory, day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + ".db");
+        // Admit the complete current set, including older days, before retention can discard anything.
+        foreach (string file in Directory.GetFiles(directory, "*.db")) VerifyFile(file);
+        if (!File.Exists(destination)) CopyVerified(path, destination);
+        foreach (string old in Directory.GetFiles(directory, "*.db").OrderDescending(StringComparer.Ordinal).Skip(7)) File.Delete(old);
     }
 
     public static string Reset(string path, bool force)
     {
         if (!force) throw new WorkflowException("force_required", "Database reset requires an explicit force choice.", "Use awctl database reset --force; clean retained workflows before a breaking upgrade.");
-        string archive = Archive(path);
-        _ = new SqliteWorkflowStore(path);
-        return archive;
+        return SqliteMaintenance.Replace(path, null);
     }
 
     public static string Restore(string path, string backup)
     {
-        VerifyFile(backup);
-        string temporary = path + ".restore-" + Guid.NewGuid().ToString("N");
-        using (var source = Connect(backup, SqliteOpenMode.ReadOnly))
-        using (var destination = Connect(temporary, SqliteOpenMode.ReadWriteCreate)) source.BackupDatabase(destination);
-        VerifyFile(temporary);
-        string archive = Archive(path);
-        File.Move(temporary, path);
-        return archive;
+        return SqliteMaintenance.Replace(path, backup);
     }
 
-    private static string Archive(string path)
+    internal static void CopyVerified(string source, string destination)
     {
-        string archive = path + ".archive-" + DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ", System.Globalization.CultureInfo.InvariantCulture);
-        Directory.CreateDirectory(archive);
-        foreach (string suffix in new[] { "", "-wal", "-shm", "-journal" })
-            if (File.Exists(path + suffix)) File.Move(path + suffix, Path.Combine(archive, Path.GetFileName(path) + suffix));
-        return archive;
+        VerifyFile(source);
+        string temporary = destination + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var db = Connect(source, SqliteOpenMode.ReadOnly))
+            using (var backup = Connect(temporary, SqliteOpenMode.ReadWriteCreate)) db.BackupDatabase(backup);
+            VerifyFile(temporary);
+            File.Move(temporary, destination);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     private SqliteConnection Open()
     {
-        if (corrupt) throw Corruption(path);
-        if (admitted)
+        try
         {
-            try { AdmitFile(path); }
-            catch (WorkflowException exception) when (exception.Code == "database_corrupt") { corrupt = true; throw; }
+            var connection = WithResource("active database", path, () =>
+            {
+                SqliteMaintenance.RequireComplete(path);
+                if (corrupt) throw Corruption(path);
+                if (admitted) AdmitFile(path);
+                return Connect(path, SqliteOpenMode.ReadWriteCreate);
+            });
+            Volatile.Write(ref admissionFailure, null);
+            return connection;
         }
-        try { return Connect(path, SqliteOpenMode.ReadWriteCreate); }
-        catch (SqliteException exception)
-        { corrupt = exception.SqliteErrorCode is 11 or 26; throw DatabaseError(path, exception); }
+        catch (WorkflowException error)
+        {
+            if (error.Code == "database_corrupt") corrupt = true;
+            Volatile.Write(ref admissionFailure, error);
+            throw;
+        }
     }
 
-    private static SqliteConnection Connect(string file, SqliteOpenMode mode)
+    private static SqliteConnection Connect(string file, SqliteOpenMode mode, int timeout = 5)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        { DataSource = file, Mode = mode, Pooling = false, ForeignKeys = true, DefaultTimeout = 5 }.ToString());
+        { DataSource = file, Mode = mode, Pooling = false, ForeignKeys = true, DefaultTimeout = timeout }.ToString());
         try { connection.Open(); return connection; }
         catch { connection.Dispose(); throw; }
     }
@@ -286,17 +300,61 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
         catch (SqliteException exception) { throw DatabaseError(path, exception); }
     }
 
+    internal static long? ObserveSchema(string path)
+    {
+        try
+        {
+            using var db = Connect(path, SqliteOpenMode.ReadOnly, 1);
+            return Scalar<long>(db, "PRAGMA user_version");
+        }
+        catch (Exception error) when (error is SqliteException or IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    internal static T WithResource<T>(string resource, string path, Func<T> action)
+    {
+        try { return action(); }
+        catch (WorkflowException error) { throw new WorkflowException(error.Code, $"{resource} '{path}': {error.Message}", error.Guidance); }
+        catch (SqliteException error) { throw DatabaseError(path, error); }
+        catch (UnauthorizedAccessException) { throw new WorkflowException("database_access", $"Cannot access {resource} '{path}'.", "Restore directory/file permissions, then retry the same command. Preserved material must not be deleted."); }
+        catch (IOException error) { throw new WorkflowException("database_unavailable", $"Cannot use {resource} '{path}': {error.Message}", "Preserve the files, restore storage access, then retry the same command."); }
+    }
+
+    internal static WorkflowException SchemaIncompatibility(string path, long version) =>
+        new("schema_incompatible", $"Database '{path}' schema {version} differs from supported schema {SchemaVersion}.",
+            "Use a compatible build, or explicitly run awctl database reset --force to archive the complete old store. No external reconciliation was performed.");
+
     private static void VerifyConnection(SqliteConnection db, string path)
     {
         using var transaction = db.BeginTransaction(deferred: true);
         long version = Scalar<long>(db, "PRAGMA user_version", transaction);
         if (version != SchemaVersion)
-            throw new WorkflowException("schema_incompatible", $"Database schema {version} differs from supported schema {SchemaVersion}.",
-                "Use a compatible build, or explicitly run awctl database reset --force to archive the complete old store. No external reconciliation was performed.");
+            throw SchemaIncompatibility(path, version);
         if (Scalar<string>(db, "PRAGMA integrity_check", transaction) != "ok") throw Corruption(path);
         using var query = Command(db, "PRAGMA foreign_key_check", transaction);
         using var reader = query.ExecuteReader();
         if (reader.Read()) throw Corruption(path);
+        reader.Close();
+        var actual = Structure(db, transaction);
+        foreach (var (name, sql) in ExpectedStructure.Value)
+            if (!actual.TryGetValue(name, out string? found) || found != sql)
+                throw new WorkflowException("database_structure_invalid", $"Database '{path}' declares schema {version} but lacks supported AW structure '{name}'.",
+                    "Preserve this file. Use an intact backup from a compatible build or explicitly archive and reset; changing user_version cannot convert a database.");
+    }
+
+    private static readonly Lazy<Dictionary<string, string>> ExpectedStructure = new(() =>
+    {
+        using var db = Connect(":memory:", SqliteOpenMode.ReadWriteCreate);
+        Execute(db, Schema);
+        return Structure(db, null);
+    });
+
+    private static Dictionary<string, string> Structure(SqliteConnection db, SqliteTransaction? transaction)
+    {
+        using var command = Command(db, "SELECT type || ':' || name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'", transaction);
+        using var reader = command.ExecuteReader();
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        while (reader.Read()) result.Add(reader.GetString(0), reader.GetString(1));
+        return result;
     }
 
     private static void AdmitFile(string path)
@@ -349,10 +407,10 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
     private static WorkflowException DatabaseError(string path, SqliteException exception) => exception.SqliteErrorCode switch
     {
         11 or 26 => Corruption(path),
-        5 or 6 => new("database_busy", "The database is locked by another connection.", "Allow the current database user to finish, then retry. The retained store has not been classified as corrupt."),
+        5 or 6 => new("database_busy", $"Database '{path}' is locked by another connection.", "Allow the current database user to finish, then retry. The retained store has not been classified as corrupt."),
         8 when exception.SqliteExtendedErrorCode == 776 => new("database_recovery_required", "SQLite requires rollback of an interrupted transaction before the database can be read.", "Start the control plane with write access to the database and its directory so compatible-store admission can permit native SQLite recovery."),
-        3 or 8 or 14 => AccessError(),
-        _ => new("database_unavailable", $"SQLite could not verify the store (error {exception.SqliteErrorCode}/{exception.SqliteExtendedErrorCode}).", "Preserve the database and companions, resolve the storage or connection failure, and retry. Corruption has not been established.")
+        3 or 8 or 14 => new("database_access", $"Database '{path}' or its companions cannot be accessed.", AccessError().Guidance),
+        _ => new("database_unavailable", $"SQLite could not verify '{path}' (error {exception.SqliteErrorCode}/{exception.SqliteExtendedErrorCode}).", "Preserve the database and companions, resolve the storage or connection failure, and retry. Corruption has not been established.")
     };
 
     private static WorkflowException Corruption(string path)
@@ -363,11 +421,11 @@ public sealed class SqliteWorkflowStore : IWorkflowStore
                 try
                 {
                     VerifyFile(backup);
-                    return new("database_corrupt", "Database integrity could not be verified; ordinary mutation is blocked and the database is preserved.",
+                    return new("database_corrupt", $"Database '{path}' integrity could not be verified; ordinary mutation is blocked and the database is preserved.",
                         $"Explicitly restore the verified compatible backup: awctl database restore --backup '{backup}'. Restore archives the damaged database first.");
                 }
                 catch (WorkflowException) { }
-        return new("database_corrupt", "Database integrity could not be verified; ordinary mutation is blocked and the database is preserved.",
+        return new("database_corrupt", $"Database '{path}' integrity could not be verified; ordinary mutation is blocked and the database is preserved.",
             "No verified compatible daily backup was found. Preserve the damaged store and supply a known compatible backup to awctl database restore --backup PATH.");
     }
     private static string Encode<T>(T item) => JsonSerializer.Serialize(item, Json);

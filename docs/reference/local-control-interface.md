@@ -14,27 +14,29 @@ The client has a five-second deadline covering connection, request, and reply. T
 
 Messages use [JSON-RPC 2.0](https://www.jsonrpc.org/specification). The `jsonrpc` marker must be the exact string `"2.0"`. Method and parameter names are case-sensitive. Request `id` must be a string or a signed 64-bit integer; null, fractional, and other IDs are outside this profile. The server echoes the ID in its reply and the library correlates client responses by ID.
 
-Named `params` are required and contain the signed 32-bit integer `protocolVersion`. The current AW application protocol version is **2**, distinct from the JSON-RPC marker. `status` accepts no additional parameters; positional arrays are not supported. Requests accept only the envelope members `jsonrpc`, `id`, `method`, and `params`; library extension metadata is outside this profile. Methods beginning with `$/` or `rpc.` are rejected after the application-version gate, before the library can interpret extensions.
+Named `params` are required and contain the signed 32-bit integer `protocolVersion`. The current AW application protocol version is **3**, distinct from the JSON-RPC marker, service software version, and integer database schema 3. `status` accepts no additional parameters; positional arrays are not supported. Requests accept only the envelope members `jsonrpc`, `id`, `method`, and `params`; library extension metadata is outside this profile. Methods beginning with `$/` or `rpc.` are rejected after the application-version gate, before the library can interpret extensions.
 
 Request body (the binary length prefix is omitted here):
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2}}
+{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3}}
 ```
 
 Successful response body:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"status":{"state":"running","softwareVersion":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":3,"status":{"state":"running","softwareVersion":"0.1.0"}}}
 ```
 
 `softwareVersion` is the application assembly's informational version and may include a revision suffix. The client checks `result.protocolVersion` before interpreting the remaining application result. `awctl status` prints the result projection itself, preserving its existing stdout shape and exit code 0:
 
 ```json
-{"protocolVersion":2,"status":{"state":"running","softwareVersion":"0.1.0"}}
+{"protocolVersion":3,"status":{"state":"running","softwareVersion":"0.1.0"}}
 ```
 
-The old `{"protocolVersion":1,"command":"status"}` custom envelope is no longer accepted. The current application protocol is version 2, adding the submission command and projection. Clients and services must be upgraded together; version 1 is rejected before dispatch. JSON-RPC's envelope version remains `2.0`.
+The old `{"protocolVersion":1,"command":"status"}` custom envelope is no longer accepted. Protocol 3 adds database readiness to health and database inspection; strict readers require a matching build. Clients and services must be upgraded together; protocols 1 and 2 are rejected before dispatch. JSON-RPC's envelope version remains `2.0`.
+
+Production health also includes `status.database`: `state`, active `path`, integer `supportedSchema`, nullable integer `activeSchema`, `databaseReady`, `workflowReady`, `message`, and nullable `guidance`. The observed active schema is read from SQLite; null means unreadable/absent, never inferred compatibility. Inspection itself reports an observed incompatible schema as `schema_incompatible`, with the active path, both versions, and compatible-build/reset guidance, before any Workflow command or query fails. A `database_maintenance` restriction retains its continuation guidance alongside the observed schema. `databaseReady` records successful active-store admission; `workflowReady` additionally requires admission of the current backup set and an available Workflow runtime. A detected active-store admission failure in either a command or query makes both flags false and supplies its original diagnostic in health and database status, even when `user_version` still matches. A successful active-store retry clears a transient admission failure; provider and current-backup errors do not become active-store failures. `status.state:"running"` and service start success describe compatible interface availability even when Workflow readiness is false. Transport unavailability remains a separate diagnostic. The compact examples above omit the optional database projection.
 
 ## Compatibility and errors
 
@@ -43,7 +45,7 @@ After validating the JSON-RPC request shape, the adapter checks `params.protocol
 A version mismatch response has the request ID, no `result`, and this shape:
 
 ```json
-{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 2.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 2.","guidance":"Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":2}}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 3.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 3.","guidance":"Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":3}}}
 ```
 
 The endpoint and version values depend on the exchange. Error messages are diagnostic text, not identifiers to parse. A JSON-RPC response contains exactly one of `result` or `error`.
@@ -86,7 +88,9 @@ Workflow summaries include nullable `submission`: `intentId`, `stage`, `expected
 
 `TaskSnapshotRetained` history entries carry `sourceRetention: {sourceRevision, sourceFingerprint, snapshotId}`; other entries use null. The revision is bounded to 100 characters in the history projection, with the complete value retained in immutable SQLite evidence. The fingerprint and snapshot identify the requirements examined and the snapshot explicitly retained. `reviewValid` and `submissionReadiness` compare accepted materialized content/mode evidence as well as the Git Review Target; post-review HEAD and staging changes alone do not revoke eligibility.
 
-`database.command` has `action` (`status`, `reset`, or `restore`), optional invocation-scoped `force`, and optional `backup` path. A maintenance-only host can serve these methods when schema/integrity admission blocks ordinary workflows. Reset requires `force:true`; restore requires an explicit verified compatible backup. The old database and companion files are archived before replacement.
+`database.command` has `action` (`status`, `reset`, or `restore`), optional invocation-scoped `force`, and optional `backup` path. Its result has `state`, `message`, and nullable `readiness`; status returns the same readiness projection as health. A maintenance-only host can serve these methods when schema/integrity admission blocks ordinary workflows. Reset requires `force:true`; restore requires an explicit file passing exact integer schema, integrity, foreign-key, and supported AW structure checks. Each operation stages its replacement and fresh daily backup, archives the old database/companions and complete current daily set together, and completes by installing the staged set. Historical archives are excluded from ordinary admission/retention. Repeating interrupted maintenance continues its staged operation, including when the selected source was in the set now archived. A pending restore retains its original normalized absolute backup selection; a different selection is refused with `database_maintenance` and the original continuation command, without changing staged or retained material. See [recovery commands and interruption guidance](../user/managed-workflows.md#database-recovery).
+
+`schema_incompatible`, `database_structure_invalid`, `database_corrupt`, `database_access`, `database_busy`, and `database_unavailable` preserve distinct failure meanings and identify the resource path; incompatibility reports expected/observed schemas. Current-backup and selected-restore diagnostics identify those resources rather than classifying the active schema by a backup. `database_maintenance`, `database_in_use`, and `restart_required` identify maintenance restrictions. No command automatically restores, migrates, rewrites schema numbers, interrupts agents, or cleans external resources.
 
 Mutation acceptance is durable. When it creates an Operation, the reply names that Operation and the current projection. Agent work continues after CLI exit or socket disconnection. A timeout never means cancellation or proves that an action did not happen; inspect retained Workflow state before retrying. The five-second transport deadline does not cancel an admitted application handler. No streaming, notification, batch, or subscription interface is added. Null facts are represented explicitly in workflow replies.
 

@@ -9,8 +9,38 @@ using AgenticWorkflows.Infrastructure;
 
 namespace AgenticWorkflows.Tests;
 
-public sealed class ProcessTests
+public sealed class ProcessTests(Xunit.Abstractions.ITestOutputHelper testOutput)
 {
+    [Fact]
+    public async Task Incompatible_database_reset_through_CLI_then_host_restart_has_fresh_current_backup_set()
+    {
+        await using var fixture = new SocketFixture();
+        string path = Path.Combine(fixture.Root, "data", "agentic-workflows", "workflows.db");
+        _ = new SqliteWorkflowStore(path); DatabaseLifecycleTests.SetVersion(path, 2);
+        Directory.CreateDirectory(path + ".daily");
+        string backup = Path.Combine(path + ".daily", DateTime.UtcNow.ToString("yyyy-MM-dd") + ".db"); File.Copy(path, backup);
+        await using (var host = new ChildProcess("AgenticWorkflows.ControlPlane.dll", fixture.Root))
+        {
+            await host.WaitForListeningAsync();
+            var client = new LocalControlClient(LocalControlEndpoint.FromRuntimeDirectory(fixture.Root));
+            Assert.Equal("schema_incompatible", (await client.DatabaseAsync(new("status"))).Database.State);
+            await using var reset = new ChildProcess("awctl.dll", fixture.Root, "database", "reset", "--force");
+            await reset.WaitForExitAsync(); Assert.True(reset.ExitCode == 0, reset.Output + reset.Error);
+            Assert.Contains("maintenance_complete", reset.Output);
+            Assert.Equal("restart_required", (await client.DatabaseAsync(new("status"))).Database.State);
+            await host.StopAsync(); Assert.True(host.ExitCode == 0, host.Output + host.Error);
+        }
+        await using var restart = new ChildProcess("AgenticWorkflows.ControlPlane.dll", fixture.Root);
+        await restart.WaitForListeningAsync();
+        var status = await new LocalControlClient(LocalControlEndpoint.FromRuntimeDirectory(fixture.Root)).DatabaseAsync(new("status"));
+        Assert.True(status.Database.Readiness!.WorkflowReady, restart.Output + restart.Error);
+        Assert.Equal((long)SqliteWorkflowStore.SchemaVersion, status.Database.Readiness.ActiveSchema);
+        string archive = Directory.GetDirectories(Path.GetDirectoryName(path)!, "*.archive-*").Single();
+        Assert.Equal(2, DatabaseLifecycleTests.Version(Path.Combine(archive, "workflows.db.daily", Path.GetFileName(backup))));
+        Assert.Equal(SqliteWorkflowStore.SchemaVersion, DatabaseLifecycleTests.Version(backup));
+        await restart.StopAsync(); Assert.True(restart.ExitCode == 0, restart.Output + restart.Error);
+    }
+
     [Fact]
     public async Task Argument_process_preserves_metacharacters_without_shell_interpolation()
     {
@@ -70,6 +100,7 @@ public sealed class ProcessTests
         var endpoint = LocalControlEndpoint.FromRuntimeDirectory(fixture.Root);
         await using (var host = new ChildProcess("AgenticWorkflows.ControlPlane.dll", fixture.Root))
         {
+            var elapsed = Stopwatch.StartNew();
             await host.WaitForListeningAsync();
             Assert.True(File.Exists(endpoint.SocketPath));
             await using var cli = new ChildProcess("awctl.dll", fixture.Root, "status");
@@ -80,6 +111,8 @@ public sealed class ProcessTests
             Assert.Equal(LocalControlProtocol.CurrentVersion, response.RootElement.GetProperty("protocolVersion").GetInt32());
             Assert.StartsWith("0.1.0", response.RootElement.GetProperty("status").GetProperty("softwareVersion").GetString());
             Assert.Equal("running", response.RootElement.GetProperty("status").GetProperty("state").GetString());
+            Assert.True(response.RootElement.GetProperty("status").GetProperty("database").GetProperty("workflowReady").GetBoolean());
+            testOutput.WriteLine($"Isolated fresh host: listening within {host.ListeningMilliseconds} ms of process launch; CLI compatible health and database readiness within {elapsed.ElapsedMilliseconds} ms of wait start.");
             await host.StopAsync();
             Assert.True(host.ExitCode == 0, host.Output + host.Error);
         }
@@ -133,6 +166,8 @@ public sealed class ProcessTests
         private readonly StringBuilder output = new();
         private readonly StringBuilder error = new();
         private readonly TaskCompletionSource listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Stopwatch startup = new();
+        internal long ListeningMilliseconds { get; private set; }
 
         internal ChildProcess(string assembly, string runtimeDirectory, params string[] arguments)
         {
@@ -155,14 +190,17 @@ public sealed class ProcessTests
                 if (args.Data is null) return;
                 lock (output) output.AppendLine(args.Data);
                 if (args.Data.Contains("Local Control Interface listening", StringComparison.Ordinal))
+                {
+                    ListeningMilliseconds = startup.ElapsedMilliseconds;
                     listening.TrySetResult();
+                }
             };
             process.ErrorDataReceived += (_, args) =>
             {
                 if (args.Data is not null)
                     lock (error) error.AppendLine(args.Data);
             };
-            process.Start();
+            startup.Start(); process.Start();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
         }

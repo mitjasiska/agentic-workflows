@@ -21,7 +21,7 @@ try
     endpoint = LocalControlEndpoint.Discover();
     var builder = Host.CreateApplicationBuilder();
     builder.Services.AddSingleton(endpoint);
-    builder.Services.AddSingleton<IControlPlaneStatusQuery, ControlPlaneStatusQuery>();
+    builder.Services.AddSingleton<IControlPlaneStatusQuery>(provider => new ControlPlaneStatusQuery(provider.GetRequiredService<WorkflowRuntime>().Inspect));
     builder.Services.AddSingleton(_ => CreateWorkflowRuntime());
     builder.Services.AddSingleton<IWorkflowRuntime>(provider => provider.GetRequiredService<WorkflowRuntime>());
     builder.Services.AddSingleton<LocalControlServer>();
@@ -51,11 +51,13 @@ static WorkflowRuntime CreateWorkflowRuntime()
         repository, new LinearGateway(client), new GitHubGateway(client), new HerdrGateway(process, repository), new PassDelivery());
 }
 
-internal sealed class WorkflowRuntimeService(WorkflowRuntime runtime) : IHostedService
+internal sealed class WorkflowRuntimeService(WorkflowRuntime runtime, ILogger<WorkflowRuntimeService> logger) : IHostedService
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         if (Environment.GetEnvironmentVariable("AW_DATABASE_MAINTENANCE") == "1") runtime.MaintenanceOnly(); else runtime.Start();
+        logger.LogInformation("Database admission finished after {ElapsedMs} ms: {Database}", elapsed.ElapsedMilliseconds, runtime.Inspect());
         return Task.CompletedTask;
     }
     public async Task StopAsync(CancellationToken cancellationToken) => await runtime.DisposeAsync();
