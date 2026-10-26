@@ -77,7 +77,7 @@ public sealed class ProcessTests
             Assert.Equal(0, cli.ExitCode);
             Assert.Empty(cli.Error);
             using var response = JsonDocument.Parse(cli.Output);
-            Assert.Equal(1, response.RootElement.GetProperty("protocolVersion").GetInt32());
+            Assert.Equal(LocalControlProtocol.CurrentVersion, response.RootElement.GetProperty("protocolVersion").GetInt32());
             Assert.StartsWith("0.1.0", response.RootElement.GetProperty("status").GetProperty("softwareVersion").GetString());
             Assert.Equal("running", response.RootElement.GetProperty("status").GetProperty("state").GetString());
             await host.StopAsync();

@@ -22,13 +22,13 @@ internal sealed class SocketFixture : IAsyncDisposable
         Endpoint = new(Path.Combine(Root, "runtime"));
     }
 
-    internal async Task StartAsync(int protocolVersion = 1, TimeSpan? timeout = null)
+    internal async Task StartAsync(int protocolVersion = LocalControlProtocol.CurrentVersion, TimeSpan? timeout = null)
     {
         Server = new(Query, Endpoint, protocolVersion, timeout ?? TimeSpan.FromSeconds(5));
         await Server.StartAsync();
     }
 
-    internal LocalControlClient Client(int version = 1, TimeSpan? timeout = null) =>
+    internal LocalControlClient Client(int version = LocalControlProtocol.CurrentVersion, TimeSpan? timeout = null) =>
         new(Endpoint, version, timeout ?? TimeSpan.FromSeconds(5));
 
     internal async Task<Socket> ConnectAsync()

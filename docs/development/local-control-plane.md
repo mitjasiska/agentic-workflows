@@ -71,6 +71,8 @@ The socket adapter uses StreamJsonRpc, a four-byte big-endian length prefix, a 1
 
 `src/AgenticWorkflows` contains application/workflow behavior, infrastructure adapters, local control, and tested source-setup/service modules. `src/AgenticWorkflows.ControlPlane` composes the Generic Host and runtime. `src/awctl` owns CLI parsing. `tools/AgenticWorkflows.SourceTools` exposes only the build seal and source-setup support for the two thin Bash entry scripts. Product validation and automated tests use .NET/xUnit.
 
+Submission stays in the same application/runtime boundary: the CLI requests `pr`, the application persists one frozen intent and correlated Operations, and the Git/GitHub adapters reconcile external effects. SQLite schema 3 owns submission records beneath the Workflow; protocol 2 exposes bounded progress. Tests use temporary repositories, bare remotes and controlled HTTP/harness responses. See the [submission validation matrix](managed-workflow-smoke-test.md) for focused checks and the explicit separation from unverified live smoke testing.
+
 Focused checks after a build:
 
 ```sh

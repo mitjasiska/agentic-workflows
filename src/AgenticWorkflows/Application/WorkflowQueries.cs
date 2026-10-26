@@ -9,7 +9,9 @@ public sealed record WorkflowSummary(Guid Id, string TaskIdentifier, Guid Snapsh
     string Branch, string Worktree, bool Abandoned, string[] Attention, string[] Warnings, int TotalPasses,
     int BatchStarted, string BatchRemaining, ReviewTarget? ReviewTarget, bool ReviewValid,
     string SubmissionReadiness, LinearObservation Linear, DateTimeOffset LastActivity, RecoveryPlan? Recovery,
-    string Measurements);
+    string Measurements, SubmissionProjection? Submission = null);
+public sealed record SubmissionProjection(Guid IntentId, string Stage, string ExpectedCommit, string? Commit,
+    string? PushedRevision, PullRequestIdentity? PullRequest, bool Forced, Guid? ReviewPassId);
 public sealed record ReportPage(string Text, int Offset, int? NextOffset);
 public sealed record WorkflowQueryReply(WorkflowSummary[] Workflows, WorkflowEvent[] History,
     long? NextPosition, ReportPage? Report);
@@ -44,7 +46,7 @@ public sealed class WorkflowQueries(WorkflowApplication application, IWorkflowRe
             "warnings" => string.Join("\n\n", data.State.Warnings.Select(w => $"{w.Code}: {w.Message}\n{w.Evidence}")),
             "attention" => string.Join("\n\n", data.State.Attention.Select(a => $"{a.Reason}: {a.Explanation}\n{a.ProposedResolution}")),
             "handoff" => data.Passes.SingleOrDefault(p => p.Id == query.PassId)?.Handoff.Text ?? throw MissingPass(),
-            "report" => Report(data, query.PassId),
+            "report" => query.PassId is null && (data.State.Submission is not null || data.Operations.Single(o => o.Id == data.State.CurrentOperationId).Kind == "Submission") ? SubmissionReport(data) : Report(data, query.PassId),
             _ => throw new WorkflowException("unknown_query", "Unsupported workflow query.", "Use workflow, history, snapshot, handoff, report, or list.")
         };
         int offset = Math.Min(query.Offset, text.Length);
@@ -76,6 +78,8 @@ public sealed class WorkflowQueries(WorkflowApplication application, IWorkflowRe
         }
         var recovery = state.Recovery is null ? null : state.Recovery with
         { Explanation = Bound(state.Recovery.Explanation, 200), PreservedEvidence = Bound(state.Recovery.PreservedEvidence, 100), Commands = state.Recovery.Commands.Take(6).ToArray() };
+        if (state.Submission is { } retained)
+            readiness = retained.PullRequest is not null ? "submitted: retained first PR; no follow-up batch" : "frozen submission: inspect operation and rerun awctl pr to continue";
         return new(id, data.Snapshots.Single(s => s.Id == state.ActiveSnapshotId).Identifier, state.ActiveSnapshotId,
             state.Phase, operation.Id, operation.Status, operation.Observation is null ? null : operation.Observation with { NativeSessionReference = null, Diagnostic = operation.Observation.Diagnostic is null ? null : Bound(operation.Observation.Diagnostic, 100) }, operation.PassId,
             state.WorkspaceIntent.Branch, Bound(state.WorkspaceIntent.ManagedPath, 256), state.Abandoned,
@@ -84,7 +88,25 @@ public sealed class WorkflowQueries(WorkflowApplication application, IWorkflowRe
             state.BatchLimit is int limit ? Math.Max(0, limit - state.BatchStarted).ToString() : "unlimited", state.Review?.Target, valid,
             readiness, state.LatestLinearObservation with { Revision = Bound(state.LatestLinearObservation.Revision, 100),
                 StateId = Bound(state.LatestLinearObservation.StateId, 100), StateType = Bound(state.LatestLinearObservation.StateType, 32) }, state.LastActivity, recovery,
-            "Token and cost measurements: unavailable. Recorded operation creation and completion times are available in history.");
+            "Token and cost measurements: unavailable. Recorded operation creation and completion times are available in history.",
+            state.Submission is { } submission ? new(submission.Intent.Id,
+                submission.PullRequest is not null ? "submitted" : submission.ForgeWriteAttempted ? "PR write attempted; reconcile" : submission.PushedRevision is not null ? "pushed" : submission.Commit is not null ? "committed" : "intent frozen",
+                submission.Intent.Commit, submission.Commit, submission.PushedRevision, submission.PullRequest,
+                submission.Intent.Forced, submission.Intent.ReviewPassId) : null);
+    }
+    private static string SubmissionReport(WorkflowData data)
+    {
+        var operation = data.Operations.Single(o => o.Id == data.State.CurrentOperationId);
+        string outcome = $"Operation {operation.Id}; kind {operation.Kind}; status {operation.Status}; predecessor {operation.PredecessorId}.\n" +
+            $"Recovery: {data.State.Recovery?.Explanation ?? "none"}\n" + string.Join('\n', data.State.Recovery?.Commands ?? []) + "\n\n";
+        if (data.State.Submission is null) return outcome + "No PR Intent was authorized. Worktree, passes and evidence remain retained.";
+        var submission = data.State.Submission!; var intent = submission.Intent;
+        return outcome + $"Submission intent {intent.Id}; Workflow {intent.WorkflowId}; snapshot {intent.SnapshotId}.\n" +
+            $"Tree {intent.Target.ProposedTree}; base {intent.BaseCommit}; branch {intent.Branch}; base branch {intent.BaseBranch}.\n" +
+            $"Original HEAD {intent.OriginalHead}; expected commit {intent.Commit}; verified commit {submission.Commit ?? "unconfirmed"}; pushed revision {submission.PushedRevision ?? "unconfirmed"}.\n" +
+            $"PR {submission.PullRequest?.Number}: {submission.PullRequest?.Url ?? "unconfirmed"}.\n" +
+            $"Force: {intent.Forced}; previous phase {intent.PreviousPhase}; {intent.BypassReason}\n" +
+            $"Recovery: {data.State.Recovery?.Explanation ?? "none"}\n\nCommit message:\n{intent.CommitMessage}\nPR body:\n{intent.Body}";
     }
     private static string Bound(string value, int maximum) => value.Length <= maximum ? value : value[..maximum] + "… (see full report)";
     private static string Report(WorkflowData data, Guid? passId)

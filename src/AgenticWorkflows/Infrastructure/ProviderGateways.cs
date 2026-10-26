@@ -11,13 +11,25 @@ public sealed class LinearGateway(HttpClient client) : ILinearGateway
     public async Task<LinearTask> ReadTaskAsync(string identifierOrId, string credentialReference, CancellationToken cancellationToken)
     {
         var data = await Query("""
-            query Task($id:String!) { issue(id:$id) { id identifier title description updatedAt url project { id } team { id } state { id type } } }
+            query Task($id:String!) { issue(id:$id) { id identifier title description updatedAt url project { id } team { id } state { id type } labels(first:100) { nodes { name } pageInfo { hasNextPage } } } }
             """, new { id = identifierOrId }, credentialReference, cancellationToken);
         var issue = data.GetProperty("issue");
         if (issue.ValueKind != JsonValueKind.Object) throw Error("linear_task_missing", "The bound Linear task no longer exists or is inaccessible.");
+        string[] labels = [];
+        if (issue.TryGetProperty("labels", out var labelConnection))
+        {
+            try
+            {
+                if (labelConnection.GetProperty("pageInfo").GetProperty("hasNextPage").GetBoolean())
+                    throw Error("linear_labels_incomplete", "Task labels exceed the bounded classification lookup; classification cannot be proven.");
+                labels = labelConnection.GetProperty("nodes").EnumerateArray().Select(l => Get(l, "name")).ToArray();
+            }
+            catch (Exception e) when (e is InvalidOperationException or KeyNotFoundException)
+            { throw Error("linear_labels_incomplete", "Linear did not return complete usable classification evidence."); }
+        }
         return new(Get(issue, "id"), Get(issue, "identifier"), Get(issue, "title"), Optional(issue, "description") ?? "",
             Get(issue, "updatedAt"), Get(issue.GetProperty("project"), "id"), Get(issue.GetProperty("team"), "id"),
-            Get(issue.GetProperty("state"), "id"), Get(issue.GetProperty("state"), "type"), Get(issue, "url"));
+            Get(issue.GetProperty("state"), "id"), Get(issue.GetProperty("state"), "type"), Get(issue, "url"), labels);
     }
 
     public async Task<(ProviderProjection Project, ProviderProjection Team, ProviderProjection State)> ValidateProjectAsync(
@@ -76,7 +88,7 @@ public sealed class LinearGateway(HttpClient client) : ILinearGateway
     private static WorkflowException Error(string code, string message) => new(code, message, "Check the bound Linear target and credential reference, then use awctl resume; AW never changes the task to Done.");
 }
 
-public sealed class GitHubGateway(HttpClient client) : IGitHubGateway
+public sealed partial class GitHubGateway(HttpClient client) : IGitHubGateway
 {
     public async Task<ProviderProjection> ValidateRepositoryAsync(string repositoryId, string remoteUrl, string credentialReference, CancellationToken cancellationToken)
     {

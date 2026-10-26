@@ -14,27 +14,27 @@ The client has a five-second deadline covering connection, request, and reply. T
 
 Messages use [JSON-RPC 2.0](https://www.jsonrpc.org/specification). The `jsonrpc` marker must be the exact string `"2.0"`. Method and parameter names are case-sensitive. Request `id` must be a string or a signed 64-bit integer; null, fractional, and other IDs are outside this profile. The server echoes the ID in its reply and the library correlates client responses by ID.
 
-Named `params` are required and contain the signed 32-bit integer `protocolVersion`. The current AW application protocol version is **1**, distinct from the JSON-RPC marker. `status` accepts no additional parameters; positional arrays are not supported. Requests accept only the envelope members `jsonrpc`, `id`, `method`, and `params`; library extension metadata is outside this profile. Methods beginning with `$/` or `rpc.` are rejected after the application-version gate, before the library can interpret extensions.
+Named `params` are required and contain the signed 32-bit integer `protocolVersion`. The current AW application protocol version is **2**, distinct from the JSON-RPC marker. `status` accepts no additional parameters; positional arrays are not supported. Requests accept only the envelope members `jsonrpc`, `id`, `method`, and `params`; library extension metadata is outside this profile. Methods beginning with `$/` or `rpc.` are rejected after the application-version gate, before the library can interpret extensions.
 
 Request body (the binary length prefix is omitted here):
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":1}}
+{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2}}
 ```
 
 Successful response body:
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"status":{"state":"running","softwareVersion":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"status":{"state":"running","softwareVersion":"0.1.0"}}}
 ```
 
 `softwareVersion` is the application assembly's informational version and may include a revision suffix. The client checks `result.protocolVersion` before interpreting the remaining application result. `awctl status` prints the result projection itself, preserving its existing stdout shape and exit code 0:
 
 ```json
-{"protocolVersion":1,"status":{"state":"running","softwareVersion":"0.1.0"}}
+{"protocolVersion":2,"status":{"state":"running","softwareVersion":"0.1.0"}}
 ```
 
-The old `{"protocolVersion":1,"command":"status"}` custom envelope is no longer accepted. The application version remains 1 for this initial status projection; it does not imply compatibility with the superseded envelope.
+The old `{"protocolVersion":1,"command":"status"}` custom envelope is no longer accepted. The current application protocol is version 2, adding the submission command and projection. Clients and services must be upgraded together; version 1 is rejected before dispatch. JSON-RPC's envelope version remains `2.0`.
 
 ## Compatibility and errors
 
@@ -43,7 +43,7 @@ After validating the JSON-RPC request shape, the adapter checks `params.protocol
 A version mismatch response has the request ID, no `result`, and this shape:
 
 ```json
-{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 1.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 1.","guidance":"Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":1}}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"awctl protocol version 42 does not match control-plane protocol version 2.","data":{"code":"protocol_mismatch","message":"awctl protocol version 42 does not match control-plane protocol version 2.","guidance":"Update awctl and the control plane together with ./build.sh from the configured source checkout, then run awctl service restart and retry awctl status.","endpoint":"/run/user/1001/agentic-workflows/control.sock","clientProtocolVersion":42,"serverProtocolVersion":2}}}
 ```
 
 The endpoint and version values depend on the exchange. Error messages are diagnostic text, not identifiers to parse. A JSON-RPC response contains exactly one of `result` or `error`.
@@ -76,7 +76,11 @@ The adapter uses StreamJsonRpc 2.26.150 with `SystemTextJsonFormatter`. `LocalCo
 | `workflow.query` | `query` | `protocolVersion`, `query` containing bounded workflows/history/report pages and continuation positions |
 | `database` | `command` | `protocolVersion`, `database` containing state and diagnostic/maintenance result |
 
-`workflow.command.command` has `action`, `workingDirectory`, and optional `workflowId`, `taskIdentifier`, `maxPasses`, `sourceDecision`, `cancellationDecision`, `decisionResponse`, `role`, `model`, `session`, and `force`. Actions are `setup`, `start`, `resume`, `continue`, `review`, `select`, `interrupt`, `abandon`, and `cleanup`. Only `start` uses a Task identifier. Existing work resolves from an explicit immutable Workflow ID or a proven managed worktree. `role` is `Implementer` or `Reviewer`; enum integers and unknown fields are rejected. See [usage](../user/managed-workflows.md) for the applicable option scopes.
+`workflow.command.command` has `action`, `workingDirectory`, and optional `workflowId`, `taskIdentifier`, `maxPasses`, `sourceDecision`, `cancellationDecision`, `decisionResponse`, `role`, `model`, `session`, and `force`. Actions are `setup`, `start`, `resume`, `continue`, `review`, `select`, `interrupt`, `abandon`, `cleanup`, and `pr`. Only `start` uses a Task identifier. Existing work resolves from an explicit immutable Workflow ID or a proven managed worktree. `role` is `Implementer` or `Reviewer`; enum integers and unknown fields are rejected. For `pr`, `force` bypasses only review policy for that invocation, never Git revision/target protections. See [usage](../user/managed-workflows.md) for prerequisites, permissions, option scopes, and recovery.
+
+`pr` returns after durable acceptance with its Operation ID. Publication proceeds under control-plane ownership and the workspace mutation gate after disconnection. Query the returned Workflow and Operation for its outcome; command acceptance is not PR success. A retry creates a linked Operation and reconciles the same immutable intent. `resume` does not replay submission actions. A forced retry must explicitly include `force:true` again.
+
+Workflow summaries include nullable `submission`: `intentId`, `stage`, `expectedCommit`, `commit`, `pushedRevision`, `pullRequest` (`id`, `number`, `url`), `forced`, and `reviewPassId`. Checkpoints describe confirmed effects, while Operation status and recovery describe the current attempt. `report` without `passId` returns the retained submission report when an intent exists, including frozen commit/PR metadata, original HEAD, exact targets, force context and recovery. Ordered history records request, intent freeze, verified commit/push, forge write attempt and completion or failure. Large reports remain paginated; raw commit objects and credentials are not part of these projections.
 
 `workflow.query.query` has `workingDirectory`, optional `workflowId`, `view` (default `workflow`), `after` (history position), optional `passId`, and `offset`. Views are `workflow`, `list`, `history`, `snapshot`, `handoff`, `report`, `warnings`, and `attention`. Text pages contain at most 1,000 UTF-16 characters without splitting a surrogate pair. History pages contain at most ten bounded summaries. List pages contain one bounded projection. `nextOffset` and `nextPosition` identify another page; null means no continuation. Full reports are assembled from immutable stored envelopes rather than editable sidecars. Readiness is derived from current Git and review evidence at query time.
 
@@ -86,4 +90,4 @@ The adapter uses StreamJsonRpc 2.26.150 with `SystemTextJsonFormatter`. `LocalCo
 
 Mutation acceptance is durable. When it creates an Operation, the reply names that Operation and the current projection. Agent work continues after CLI exit or socket disconnection. A timeout never means cancellation or proves that an action did not happen; inspect retained Workflow state before retrying. The five-second transport deadline does not cancel an admitted application handler. No streaming, notification, batch, or subscription interface is added. Null facts are represented explicitly in workflow replies.
 
-CLI exit codes remain 0 for success, 1 for application/transport errors, and 2 for usage errors. Partial cleanup returns 3 with structured component outcomes. Nothing in this interface authorizes commit, push, pull-request creation, or Linear completion.
+CLI exit codes remain 0 for command acceptance/query success, 1 for application/transport errors, and 2 for usage errors. Partial cleanup returns 3 with structured component outcomes. Only explicit `pr` authorizes its frozen commit/push/first-PR chain. Clean review never invokes it automatically. No method merges a PR or marks Linear Done.
