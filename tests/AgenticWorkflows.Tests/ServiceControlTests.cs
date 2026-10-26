@@ -52,6 +52,75 @@ public sealed class ServiceControlTests
         Assert.All(f.Manager.Calls, c => { Assert.Equal("systemctl", c.Executable); Assert.Contains("--user", c.Arguments); Assert.Contains(SourceSetup.UnitName, c.Arguments); });
     }
 
+    [Theory]
+    [InlineData(32, true)]
+    [InlineData(61, false)]
+    public async Task Cold_start_readiness_is_bounded_and_allows_observed_32_second_delay(int seconds, bool succeeds)
+    {
+        await using var f = new Fixture();
+        var time = new ReadinessTime();
+        f.Manager.OnShow = async () =>
+        {
+            if (time.Elapsed >= TimeSpan.FromSeconds(seconds) && f.Socket.Server is null) await f.Socket.StartAsync();
+        };
+        var service = new ServiceControl(f.Manager, new ServiceApplicationProbe(f.Socket.Client()), f.Socket.Endpoint, f.Manager.UnitPath, () => { },
+            interval: TimeSpan.FromSeconds(1), time: time, delay: (duration, token) =>
+            { time.Advance(duration); token.ThrowIfCancellationRequested(); return Task.CompletedTask; });
+        if (succeeds)
+        {
+            Assert.Equal("compatible", (await service.ExecuteAsync(new("start"), TextWriter.Null)).EndpointState);
+            Assert.Equal(TimeSpan.FromSeconds(32), time.Elapsed);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<LocalControlException>(() => service.ExecuteAsync(new("start"), TextWriter.Null));
+            Assert.Equal("service_timeout", error.Diagnostic.Code);
+            Assert.Equal(ServiceControl.DefaultTimeout, time.Elapsed);
+            Assert.Contains("active", error.Message); Assert.Contains("control_plane_unavailable", error.Message);
+        }
+        Assert.Equal(["start"], f.Manager.Actions);
+    }
+
+    [Fact]
+    public async Task Compatible_health_in_database_maintenance_still_completes_service_start()
+    {
+        await using var f = new Fixture();
+        f.Probe.Database = new("database_maintenance", "/isolated/workflows.db", 3, 2, false, false, "Maintenance only", "Explicit reset or restore");
+        var result = await f.Service().ExecuteAsync(new("start"), TextWriter.Null);
+        Assert.Equal("active", result.Service.ActiveState);
+        Assert.Equal("compatible", result.EndpointState);
+        Assert.False(result.Application!.Status.Database!.WorkflowReady);
+        Assert.Equal("database_maintenance", result.Application.Status.Database.State);
+    }
+
+    // Advance only the command deadline; no wall-clock sleep or service-manager access.
+    private sealed class ReadinessTime : TimeProvider
+    {
+        private readonly List<DeadlineTimer> timers = [];
+        internal TimeSpan Elapsed { get; private set; }
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch + Elapsed;
+        public override long GetTimestamp() => Elapsed.Ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new DeadlineTimer(this, callback, state); timer.Change(dueTime, period); timers.Add(timer); return timer;
+        }
+        internal void Advance(TimeSpan duration)
+        {
+            Elapsed += duration;
+            foreach (var timer in timers.ToArray()) timer.Fire();
+        }
+        private sealed class DeadlineTimer(ReadinessTime clock, TimerCallback callback, object? state) : ITimer
+        {
+            private TimeSpan? due;
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            { due = dueTime == Timeout.InfiniteTimeSpan ? null : clock.Elapsed + dueTime; return true; }
+            internal void Fire() { if (due is { } at && at <= clock.Elapsed) { due = null; callback(state); } }
+            public void Dispose() => due = null;
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
     [Fact]
     public async Task Active_unit_without_endpoint_times_out_with_observed_states_and_logs()
     {
@@ -340,11 +409,12 @@ public sealed class ServiceControlTests
         internal int StatusCalls, QueryCalls, UnavailableCalls;
         internal bool QueryUnavailable;
         internal WorkflowSummary[] Pages = [];
+        internal DatabaseReadiness? Database;
         public Task<StatusReply> StatusAsync(CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
             if (++StatusCalls <= UnavailableCalls) throw new LocalControlException(new("control_plane_unavailable", "unavailable", "start explicitly"));
-            return Task.FromResult(new StatusReply(1, new("running", "test")));
+            return Task.FromResult(new StatusReply(1, new("running", "test", Database)));
         }
         public Task<WorkflowQueryResponse> WorkflowsAsync(int offset, CancellationToken token)
         {

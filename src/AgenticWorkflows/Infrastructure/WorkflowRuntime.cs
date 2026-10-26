@@ -4,7 +4,7 @@ using AgenticWorkflows.Workflows;
 namespace AgenticWorkflows.Infrastructure;
 
 public sealed record DatabaseCommand(string Action, bool Force = false, string? Backup = null);
-public sealed record DatabaseReply(string State, string Message);
+public sealed record DatabaseReply(string State, string Message, DatabaseReadiness? Readiness = null);
 public interface IWorkflowRuntime
 {
     Task<WorkflowAcceptance> ExecuteAsync(WorkflowCommand command);
@@ -34,7 +34,7 @@ public sealed class WorkflowRuntime : IWorkflowRuntime, IAsyncDisposable
     public WorkflowRuntime(string database, IWorkflowConfiguration configuration, IWorkflowRepository repository,
         ILinearGateway linear, IGitHubGateway github, IHerdrGateway herdr, IPassDelivery delivery)
     {
-        this.database = database; this.configuration = configuration; this.repository = repository;
+        this.database = Path.GetFullPath(database); this.configuration = configuration; this.repository = repository;
         this.linear = linear; this.github = github; this.herdr = herdr; this.delivery = delivery;
     }
 
@@ -52,11 +52,35 @@ public sealed class WorkflowRuntime : IWorkflowRuntime, IAsyncDisposable
         catch (WorkflowException exception) { diagnostic = exception; }
     }
 
-    private static async Task ObserveMaintenance(WorkflowApplication application, SqliteWorkflowStore store, CancellationToken token)
+    private async Task ObserveMaintenance(WorkflowApplication application, SqliteWorkflowStore store, CancellationToken token)
     {
-        await application.ReconcileStartupAsync(token);
-        using var timer = new PeriodicTimer(TimeSpan.FromHours(1));
-        while (await timer.WaitForNextTickAsync(token)) store.Backup(DateOnly.FromDateTime(DateTime.UtcNow));
+        try
+        {
+            await application.ReconcileStartupAsync(token);
+            using var timer = new PeriodicTimer(TimeSpan.FromHours(1));
+            while (await timer.WaitForNextTickAsync(token)) store.Backup(DateOnly.FromDateTime(DateTime.UtcNow));
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (WorkflowException error) { diagnostic = error; }
+        catch (Exception) { diagnostic = new("workflow_reconciliation_failed", $"Startup reconciliation or backup observation failed for '{database}'.", "Inspect service logs and database status; preserve retained work and restart after resolving the failure."); }
+    }
+
+    public DatabaseReadiness Inspect()
+    {
+        var activeFailure = store?.AdmissionFailure;
+        var error = activeFailure ?? diagnostic;
+        try { SqliteMaintenance.RequireComplete(database); }
+        catch (WorkflowException pending) { error = pending; }
+        long? observed = SqliteWorkflowStore.ObserveSchema(database);
+        if (observed is long version && version != SqliteWorkflowStore.SchemaVersion && error?.Code != "database_maintenance")
+        {
+            var mismatch = SqliteWorkflowStore.SchemaIncompatibility(database, version);
+            error = new(mismatch.Code, $"active database '{database}': {mismatch.Message}", mismatch.Guidance);
+        }
+        bool admitted = store is not null && activeFailure is null && observed == SqliteWorkflowStore.SchemaVersion && error?.Code != "database_maintenance";
+        return new(error?.Code ?? (application is null ? "workflow_starting" : "ready"), database,
+            SqliteWorkflowStore.SchemaVersion, observed, admitted,
+            admitted && error is null && application is not null, error?.Message ?? (application is null ? "Database admission is starting." : "Active database and current backups are compatible and verified."), error?.Guidance);
     }
 
     public Task<WorkflowAcceptance> ExecuteAsync(WorkflowCommand command)
@@ -74,7 +98,7 @@ public sealed class WorkflowRuntime : IWorkflowRuntime, IAsyncDisposable
         await maintenance.WaitAsync();
         try
         {
-            if (command.Action == "status") return new(diagnostic?.Code ?? "ready", diagnostic?.Message ?? $"Database schema {SqliteWorkflowStore.SchemaVersion} is compatible and verified.");
+            if (command.Action == "status") { var status = Inspect(); return new(status.State, status.Message, status); }
             if (application is not null)
                 throw new WorkflowException("database_in_use", "Reset and restore require maintenance startup with the ordinary workflow runtime stopped.",
                     "Stop the host and restart it with AW_DATABASE_MAINTENANCE=1, then issue the explicit database reset or restore command.");
@@ -85,6 +109,7 @@ public sealed class WorkflowRuntime : IWorkflowRuntime, IAsyncDisposable
                 _ => throw new WorkflowException("invalid_database_command", "Expected reset --force or restore --backup PATH.", "No database files were changed.")
             };
             diagnostic = new("restart_required", "Database maintenance completed. Restart the control plane for ordinary reconciliation.", "Remove AW_DATABASE_MAINTENANCE and restart the host.");
+            store = null;
             return new("maintenance_complete", "Previous complete database archived at " + archive + ". Restart the control plane.");
         }
         finally { maintenance.Release(); }
@@ -94,7 +119,6 @@ public sealed class WorkflowRuntime : IWorkflowRuntime, IAsyncDisposable
     {
         if (diagnostic is not null) throw diagnostic;
         if (application is null) throw new WorkflowException("workflow_starting", "Workflow database admission is still starting.", "Retry the read-only query after startup completes.");
-        if (background.IsFaulted) throw new WorkflowException("database_maintenance_failed", "Background integrity/backup or startup reconciliation failed; ordinary mutation is blocked.", "Inspect the database status and preserve the store before explicit recovery.");
     }
     public async ValueTask DisposeAsync()
     {

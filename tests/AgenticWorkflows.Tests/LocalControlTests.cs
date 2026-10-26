@@ -11,8 +11,8 @@ namespace AgenticWorkflows.Tests;
 
 public sealed class LocalControlTests
 {
-    private const string StatusRequest = """{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2}}""";
-    private const string StatusResult = """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"status":{"state":"running","softwareVersion":"test"}}}""";
+    private const string StatusRequest = """{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3}}""";
+    private const string StatusResult = """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":3,"status":{"state":"running","softwareVersion":"test"}}}""";
 
     [Fact]
     public void Application_query_runs_without_endpoint_or_transport()
@@ -81,6 +81,8 @@ public sealed class LocalControlTests
     [Theory]
     [InlineData(1, 2)]
     [InlineData(2, 1)]
+    [InlineData(3, 2)]
+    [InlineData(2, 3)]
     public async Task Mismatch_does_not_dispatch_and_prints_versions_and_recovery(int serverVersion, int clientVersion)
     {
         await using var fixture = new SocketFixture();
@@ -125,29 +127,29 @@ public sealed class LocalControlTests
     [InlineData("null", -32600)]
     [InlineData("[]", -32600)]
     [InlineData("{}", -32600)]
-    [InlineData("""{"protocolVersion":2,"command":"status"}""", -32600)]
-    [InlineData("""{"id":1,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"1.0","id":1,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"3.0","id":1,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":2.0,"id":1,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":null,"id":1,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":true,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":null,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1.5,"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":5,"params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"\uD800","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2},"traceparent":123}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2},"extra":true}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{},"method":"status","params":{"protocolVersion":2}}""", -32600)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2,"protocolVersion":2}}""", -32700)]
-    [InlineData("""{"jsonrpc":"2.0","jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2}}""", -32700)]
+    [InlineData("""{"protocolVersion":3,"command":"status"}""", -32600)]
+    [InlineData("""{"id":1,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"1.0","id":1,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"3.0","id":1,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":2.0,"id":1,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":null,"id":1,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":true,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":null,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1.5,"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":5,"params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"\uD800","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3},"traceparent":123}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3},"extra":true}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{},"method":"status","params":{"protocolVersion":3}}""", -32600)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3,"protocolVersion":3}}""", -32700)]
+    [InlineData("""{"jsonrpc":"2.0","jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3}}""", -32700)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":"1"}}""", -32602)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":null}}""", -32602)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2147483648}}""", -32602)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status"}""", -32602)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{}}""", -32602)]
     [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":[1]}""", -32602)]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2,"extra":true}}""", -32602)]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3,"extra":true}}""", -32602)]
     public async Task Malformed_requests_are_structured_failures_without_dispatch(string request, int code)
     {
         await using var fixture = new SocketFixture();
@@ -173,7 +175,7 @@ public sealed class LocalControlTests
         await using var fixture = new SocketFixture();
         await fixture.StartAsync();
         var response = await ExchangeAsync(fixture,
-            $$$"""{"jsonrpc":"2.0","id":7,"method":"{{{method}}}","params":{"protocolVersion":2}}""");
+            $$$"""{"jsonrpc":"2.0","id":7,"method":"{{{method}}}","params":{"protocolVersion":3}}""");
         AssertError(response, -32601);
         Assert.Equal(7, response.GetProperty("id").GetInt32());
         Assert.Equal(0, fixture.Query.Calls);
@@ -344,7 +346,7 @@ public sealed class LocalControlTests
     }
 
     [Theory]
-    [InlineData(2)]
+    [InlineData(3)]
     [InlineData(42)]
     public async Task Reply_that_cannot_fit_its_escaped_id_closes_only_that_exchange(int version)
     {
@@ -354,7 +356,7 @@ public sealed class LocalControlTests
         using var stream = new NetworkStream(socket);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var request = StatusRequest.Replace("\"id\":1", $"\"id\":\"{new string('é', 4000)}\"")
-            .Replace("\"protocolVersion\":2", $"\"protocolVersion\":{version}");
+            .Replace("\"protocolVersion\":3", $"\"protocolVersion\":{version}");
         await WriteRawAsync(stream, request, false, deadline.Token);
         Assert.Equal(0, await stream.ReadAsync(new byte[1], deadline.Token));
         Assert.Equal(version == LocalControlProtocol.CurrentVersion ? 1 : 0, fixture.Query.Calls);
@@ -416,10 +418,10 @@ public sealed class LocalControlTests
     [InlineData("""{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":null}}""")]
     [InlineData("""{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Unknown method"}}""")]
     [InlineData("""{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"Mismatch"}}""")]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}""")]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"status":{"state":"running","softwareVersion":null}}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":3}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":3,"status":{"state":"running","softwareVersion":null}}}""")]
     [InlineData("""{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1"}}""")]
-    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":2}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"status","params":{"protocolVersion":3}}""")]
     public async Task Client_reports_malformed_or_error_responses_as_actionable_diagnostics(string body)
     {
         await using var fixture = new SocketFixture();

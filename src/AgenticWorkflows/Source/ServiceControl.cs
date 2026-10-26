@@ -30,6 +30,9 @@ public sealed class ServiceApplicationProbe(LocalControlClient client) : IServic
 [SupportedOSPlatform("linux")]
 public sealed class ServiceControl
 {
+    // Source-host cold startup can exceed 30 seconds. Bound the complete command, including
+    // manager/probe exchanges, while admitting the observed 32-second startup with headroom.
+    internal static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
     private readonly IArgumentProcess process;
     private readonly IServiceApplicationProbe probe;
     private readonly LocalControlEndpoint endpoint;
@@ -37,16 +40,21 @@ public sealed class ServiceControl
     private readonly Action validateSetup;
     private readonly TimeSpan timeout;
     private readonly TimeSpan interval;
+    private readonly TimeProvider time;
+    private readonly Func<TimeSpan, CancellationToken, Task> delay;
     private ServiceState state = new("unknown", "unknown", "unknown", "unknown", "", "unknown");
     private string endpointState = "unprobed";
     private ControlDiagnostic? healthDiagnostic;
     private StatusReply? health;
 
     internal ServiceControl(IArgumentProcess process, IServiceApplicationProbe probe, LocalControlEndpoint endpoint,
-        string unitPath, Action validateSetup, TimeSpan? timeout = null, TimeSpan? interval = null)
+        string unitPath, Action validateSetup, TimeSpan? timeout = null, TimeSpan? interval = null,
+        TimeProvider? time = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         this.process = process; this.probe = probe; this.endpoint = endpoint; this.unitPath = unitPath; this.validateSetup = validateSetup;
-        this.timeout = timeout ?? TimeSpan.FromSeconds(30); this.interval = interval ?? TimeSpan.FromMilliseconds(200);
+        this.timeout = timeout ?? DefaultTimeout; this.interval = interval ?? TimeSpan.FromMilliseconds(200);
+        this.time = time ?? TimeProvider.System;
+        this.delay = delay ?? ((duration, token) => Task.Delay(duration, this.time, token));
     }
 
     public static ServiceControl Create()
@@ -69,7 +77,7 @@ public sealed class ServiceControl
     public async Task<ServiceReply> ExecuteAsync(ServiceCommand command, TextWriter warnings)
     {
         if (command.Action is not ("start" or "stop" or "restart" or "status" or "enable" or "disable")) throw new ArgumentException();
-        using var deadline = new CancellationTokenSource(timeout);
+        using var deadline = new CancellationTokenSource(timeout, time);
         try
         {
             validateSetup();
@@ -108,11 +116,11 @@ public sealed class ServiceControl
             {
                 await ObserveManager(deadline.Token);
                 RequireUnit();
+                if (state.ActiveState == "failed") throw Failure("service_failed", "The user service entered the failed state.");
                 await ObserveHealth(deadline.Token);
                 if (healthDiagnostic?.Code == "protocol_mismatch") throw Failure("protocol_mismatch", healthDiagnostic.Message);
-                if (state.ActiveState == "failed") throw Failure("service_failed", "The user service entered the failed state.");
                 if (state.ActiveState == "active" && health is not null) return Reply();
-                await Task.Delay(interval, deadline.Token);
+                await delay(interval, deadline.Token);
             }
         }
         catch (LocalControlException) { throw; }
@@ -140,7 +148,7 @@ public sealed class ServiceControl
             RequireUnit();
             endpointState = DescribeEndpoint();
             if (state.ActiveState == "inactive" && endpointState == "absent") return;
-            await Task.Delay(interval, token);
+            await delay(interval, token);
         }
     }
     private string DescribeEndpoint()
