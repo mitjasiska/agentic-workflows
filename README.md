@@ -1,14 +1,36 @@
 # Agentic Workflows
 
+> **Deprecated — active development paused on October 28, 2026.**
+> This repository is preserved as an engineering reference. New agent-assisted
+> development uses [T3 Code](https://github.com/pingdotgg/t3code), Codex, and reusable
+> skills. The strategic pause is reversible; ongoing maintenance is not promised.
+
 Agentic Workflows is a local-first control plane and dashboard for human-directed agentic work. It turns a captured task into implementation, independent review, durable evidence, and a human-approved submission or exported artifact.
 
-The repository and product are both named Agentic Workflows. This repository contains the completed Initial E2E architecture and the Linux .NET control plane.
+This C#/.NET project is the second generation of [Agentic Workflows Prototype](https://github.com/mitjasiska/agentic-workflows-prototype), the experimental Python implementation. Both projects are now deprecated. This repository contains the completed Initial E2E architecture and the Linux .NET control plane; the dashboard remains planned work.
 
-## Current status
+## Engineering highlights
+
+- Durable SQLite-backed workflow state with explicit operation and recovery semantics.
+- A local `awctl` CLI using JSON-RPC 2.0 over a private Unix-domain socket.
+- Immutable, versioned Linear task snapshots and strictly validated, correlated Result Envelopes.
+- Separate implementation and independent review passes, with review authority tied to exact Git content.
+- Resumable commit, push, and GitHub PR submission with explicit human authorization.
+- Automated validation using isolated Git repositories, SQLite, and controlled providers.
+
+## Why development is paused
+
+I built two generations of Agentic Workflows to explore reliable agent-assisted software delivery. In controlled experiments on October 27, 2026, T3 Code V2 coordinated implementation, independent review, defect repair, and fresh re-review without manual intervention in the tested scenario. Its agent coordination, persistent conversations, and remote/mobile interface addressed much of the experience I had intended to build.
+
+For my current development needs, the additional guarantees of a separate orchestration platform did not justify its implementation and maintenance cost. I chose to focus on building useful applications with T3 Code, Codex, reusable skills, and lightweight integrations.
+
+AW's deterministic lifecycle, immutable requirements, validated evidence, exact-content review, and recovery policies remain valuable engineering work. The small T3 experiments did not establish equivalent guarantees or reliability on complex tasks. This is a decision about priorities and opportunity cost, not a finding that AW's architecture is unsound. Development may resume if real usage reveals recurring limitations that justify a focused solution.
+
+## Implementation and validation
 
 The Linux control plane exposes `awctl` commands through JSON-RPC 2.0 over a private Unix-domain socket. Managed Linear workflows persist requirements and evidence in SQLite, prepare local Herdr workspaces, and route Codex implementation through independent review. Explicit `awctl pr [WORKFLOW-ID]` freezes the authorized change, establishes one commit, safely pushes the task branch, and creates its first non-draft GitHub pull request. Repeating the command verifies and resumes that same submission. Clean review alone never publishes. The dashboard and later PR updates remain separate work. Automated validation uses isolated Git repositories, SQLite, and controlled providers; live Linear/Herdr/Codex/GitHub smoke testing remains unverified and does not yet establish Initial E2E milestone acceptance.
 
-The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). Planned implementation begins from separate Linear issues with defined outcomes and acceptance boundaries. Small routine changes explicitly requested by the user may proceed without an issue under the contribution exception in [AGENTS.md](AGENTS.md).
+The Initial E2E architecture was completed under [DEV-119](https://linear.app/mitjasiska/issue/DEV-119/complete-initial-e2e-architecture). The code, tests, architecture decisions, and documentation below are retained for study and possible future reuse.
 
 ## Documentation
 
